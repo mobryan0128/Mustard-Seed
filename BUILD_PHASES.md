@@ -174,7 +174,33 @@ Implement early exit + hold logic.
 
 ---
 
-## Phase 9 — Live Mode Prep
+## Phase 9 — Execution Smoke Test (LIVE VALIDATION)
+
+Objective:
+Validate real order execution with minimal risk.
+
+Create:
+    • tiny-size live order pathway
+    • execution confirmation checks
+    • live execution logging validation
+
+Test:
+    • successful order placement
+    • successful fill or correct rejection handling
+    • correct tracking of order status and resulting account state
+    • correct logging of all execution details
+
+Success:
+    • system can place and monitor real trades safely at tiny size
+    • execution plumbing is verified independently from strategy quality
+
+Do NOT:
+    • evaluate profitability
+    • increase position size
+    • treat this phase as full live deployment
+---
+
+## Phase 10 — Live Mode Prep
 
 **Objective:**
 Enable real trading safely.

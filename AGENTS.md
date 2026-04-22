@@ -74,16 +74,3 @@ Define strict behavioral rules for Codex when interacting with this repository.
 * Ensure traceability of decisions
 
 ---
-
-## Environment Assumptions
-
-- Primary development environment is local Visual Studio Code
-- Final runtime target is a Linux VPS
-- Build and validate locally first
-- Keep the system compatible with later Linux VPS deployment
-- Do not assume GUI access or interactive runtime in deployment
-- Use environment variables or `.env` files for secrets
-- Never hardcode credentials or machine-specific paths
-- Do not treat deployment as active unless explicitly instructed
-
----
