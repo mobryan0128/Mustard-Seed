@@ -27,6 +27,11 @@ DEFAULT_CRYPTO_FEED_RECONNECT_MAX_DELAY_SECONDS = 30.0
 DEFAULT_LOG_DIRECTORY = Path("logs")
 DEFAULT_REPLAY_DIRECTORY = Path("replay")
 DEFAULT_TIME_SYNC_MAX_DRIFT_MS = 1500
+DEFAULT_BIAS_LOOKBACK_SECONDS = 1800
+DEFAULT_BIAS_RECENT_WINDOW_SECONDS = 60
+DEFAULT_BIAS_MIN_SAMPLES = 20
+DEFAULT_BIAS_STALE_DATA_SECONDS = 15
+DEFAULT_BIAS_CHOP_THRESHOLD_BPS = 10
 
 
 class SettingsError(ValueError):
@@ -64,6 +69,12 @@ class KalshiSettings:
     replay_write_enabled: bool
     time_sync_max_drift_ms: int
     time_sync_log_results: bool
+    bias_products: tuple[str, ...]
+    bias_lookback_seconds: int
+    bias_recent_window_seconds: int
+    bias_min_samples: int
+    bias_stale_data_seconds: int
+    bias_chop_threshold_bps: int
 
 
 def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
@@ -133,6 +144,22 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
     ).rstrip("/")
     log_directory = _parse_path(values.get("LOG_DIRECTORY"), DEFAULT_LOG_DIRECTORY)
     replay_directory = _parse_path(values.get("REPLAY_DIRECTORY"), DEFAULT_REPLAY_DIRECTORY)
+    bias_products = _parse_csv(values.get("BIAS_PRODUCTS")) or crypto_feed_products
+    bias_lookback_seconds = _parse_positive_int(
+        values.get("BIAS_LOOKBACK_SECONDS"),
+        DEFAULT_BIAS_LOOKBACK_SECONDS,
+        "BIAS_LOOKBACK_SECONDS",
+    )
+    bias_recent_window_seconds = _parse_positive_int(
+        values.get("BIAS_RECENT_WINDOW_SECONDS"),
+        DEFAULT_BIAS_RECENT_WINDOW_SECONDS,
+        "BIAS_RECENT_WINDOW_SECONDS",
+    )
+    if bias_recent_window_seconds > bias_lookback_seconds:
+        raise SettingsError(
+            "BIAS_RECENT_WINDOW_SECONDS must be less than or equal to "
+            "BIAS_LOOKBACK_SECONDS."
+        )
 
     return KalshiSettings(
         env=kalshi_env,
@@ -201,6 +228,24 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
             values.get("TIME_SYNC_LOG_RESULTS"),
             True,
             "TIME_SYNC_LOG_RESULTS",
+        ),
+        bias_products=bias_products,
+        bias_lookback_seconds=bias_lookback_seconds,
+        bias_recent_window_seconds=bias_recent_window_seconds,
+        bias_min_samples=_parse_positive_int(
+            values.get("BIAS_MIN_SAMPLES"),
+            DEFAULT_BIAS_MIN_SAMPLES,
+            "BIAS_MIN_SAMPLES",
+        ),
+        bias_stale_data_seconds=_parse_positive_int(
+            values.get("BIAS_STALE_DATA_SECONDS"),
+            DEFAULT_BIAS_STALE_DATA_SECONDS,
+            "BIAS_STALE_DATA_SECONDS",
+        ),
+        bias_chop_threshold_bps=_parse_positive_int(
+            values.get("BIAS_CHOP_THRESHOLD_BPS"),
+            DEFAULT_BIAS_CHOP_THRESHOLD_BPS,
+            "BIAS_CHOP_THRESHOLD_BPS",
         ),
     )
 
@@ -272,6 +317,12 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "REPLAY_WRITE_ENABLED",
         "TIME_SYNC_MAX_DRIFT_MS",
         "TIME_SYNC_LOG_RESULTS",
+        "BIAS_PRODUCTS",
+        "BIAS_LOOKBACK_SECONDS",
+        "BIAS_RECENT_WINDOW_SECONDS",
+        "BIAS_MIN_SAMPLES",
+        "BIAS_STALE_DATA_SECONDS",
+        "BIAS_CHOP_THRESHOLD_BPS",
     ):
         if key in os.environ:
             values[key] = _clean_env_value(os.environ[key])
