@@ -36,6 +36,8 @@ DEFAULT_BIAS_CHOP_THRESHOLD_BPS = 10
 DEFAULT_SIMULATION_ENABLED = True
 DEFAULT_SIMULATION_MAX_NEW_POSITIONS_PER_EVALUATION = 1
 DEFAULT_SIMULATION_POSITION_ID_PREFIX = "sim"
+DEFAULT_SIMULATION_EXIT_ENABLED = True
+DEFAULT_SIMULATION_ALLOW_SAME_PASS_REENTRY = False
 
 
 class SettingsError(ValueError):
@@ -83,6 +85,8 @@ class KalshiSettings:
     simulation_enabled: bool
     simulation_max_new_positions_per_evaluation: int
     simulation_position_id_prefix: str
+    simulation_exit_enabled: bool
+    simulation_allow_same_pass_reentry: bool
 
 
 def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
@@ -274,6 +278,16 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
             "SIMULATION_MAX_NEW_POSITIONS_PER_EVALUATION",
         ),
         simulation_position_id_prefix=simulation_position_id_prefix,
+        simulation_exit_enabled=_parse_bool(
+            values.get("SIMULATION_EXIT_ENABLED"),
+            DEFAULT_SIMULATION_EXIT_ENABLED,
+            "SIMULATION_EXIT_ENABLED",
+        ),
+        simulation_allow_same_pass_reentry=_parse_bool(
+            values.get("SIMULATION_ALLOW_SAME_PASS_REENTRY"),
+            DEFAULT_SIMULATION_ALLOW_SAME_PASS_REENTRY,
+            "SIMULATION_ALLOW_SAME_PASS_REENTRY",
+        ),
     )
 
 
@@ -354,6 +368,8 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "SIMULATION_ENABLED",
         "SIMULATION_MAX_NEW_POSITIONS_PER_EVALUATION",
         "SIMULATION_POSITION_ID_PREFIX",
+        "SIMULATION_EXIT_ENABLED",
+        "SIMULATION_ALLOW_SAME_PASS_REENTRY",
     ):
         if key in os.environ:
             values[key] = _clean_env_value(os.environ[key])

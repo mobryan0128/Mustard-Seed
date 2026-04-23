@@ -1,4 +1,4 @@
-"""Simulation-only execution engine for Phase 7."""
+"""Simulation-only execution engine for Phase 8."""
 
 from __future__ import annotations
 
@@ -7,6 +7,10 @@ from decimal import Decimal
 
 from kalshi_bot.config.settings import KalshiSettings
 from kalshi_bot.contracts.contract_scanner import ContractScanSnapshot, ScannedContract
+from kalshi_bot.execution.exit_manager import (
+    ClosedSimulatedPosition,
+    determine_exit_decisions,
+)
 
 
 class SimulationExecutionError(ValueError):
@@ -15,7 +19,7 @@ class SimulationExecutionError(ValueError):
 
 @dataclass(frozen=True)
 class SimulatedPosition:
-    """In-memory simulated position state."""
+    """In-memory open simulated position state."""
 
     position_id: str
     product_id: str
@@ -47,6 +51,7 @@ class SimulationSnapshot:
     """Current simulated execution state."""
 
     open_positions: dict[str, SimulatedPosition]
+    closed_positions: tuple[ClosedSimulatedPosition, ...]
     decisions: tuple[SimulationDecision, ...]
     evaluation_count: int
 
@@ -60,6 +65,8 @@ class SimulationExecutionEngine:
         enabled: bool,
         max_new_positions_per_evaluation: int,
         position_id_prefix: str,
+        exit_enabled: bool,
+        allow_same_pass_reentry: bool,
     ) -> None:
         if not enabled:
             raise SimulationExecutionError("Simulation execution is disabled.")
@@ -73,10 +80,14 @@ class SimulationExecutionEngine:
 
         self._max_new_positions_per_evaluation = max_new_positions_per_evaluation
         self._position_id_prefix = normalized_prefix
+        self._exit_enabled = exit_enabled
+        self._allow_same_pass_reentry = allow_same_pass_reentry
         self._open_positions: dict[str, SimulatedPosition] = {}
         self._position_id_by_product: dict[str, str] = {}
+        self._closed_positions: list[ClosedSimulatedPosition] = []
         self._latest_snapshot = SimulationSnapshot(
             open_positions={},
+            closed_positions=(),
             decisions=(),
             evaluation_count=0,
         )
@@ -88,6 +99,8 @@ class SimulationExecutionEngine:
             enabled=settings.simulation_enabled,
             max_new_positions_per_evaluation=settings.simulation_max_new_positions_per_evaluation,
             position_id_prefix=settings.simulation_position_id_prefix,
+            exit_enabled=settings.simulation_exit_enabled,
+            allow_same_pass_reentry=settings.simulation_allow_same_pass_reentry,
         )
 
     def evaluate(self, scan_snapshot: ContractScanSnapshot) -> SimulationSnapshot:
@@ -95,7 +108,86 @@ class SimulationExecutionEngine:
             contract.market_ticker: contract for contract in scan_snapshot.ranked_contracts
         }
         decisions: list[SimulationDecision] = []
+        closed_product_ids = self._apply_exit_decisions(
+            scan_snapshot=scan_snapshot,
+            decisions=decisions,
+        )
+        self._update_open_positions(
+            ranked_by_market=ranked_by_market,
+            decisions=decisions,
+        )
+        self._consider_new_entry(
+            ranked_contracts=scan_snapshot.ranked_contracts,
+            decisions=decisions,
+            closed_product_ids=closed_product_ids,
+        )
 
+        self._latest_snapshot = SimulationSnapshot(
+            open_positions=dict(self._open_positions),
+            closed_positions=tuple(self._closed_positions),
+            decisions=tuple(decisions),
+            evaluation_count=self._latest_snapshot.evaluation_count + 1,
+        )
+        return self._latest_snapshot
+
+    def snapshot(self) -> SimulationSnapshot:
+        return self._latest_snapshot
+
+    def _apply_exit_decisions(
+        self,
+        *,
+        scan_snapshot: ContractScanSnapshot,
+        decisions: list[SimulationDecision],
+    ) -> set[str]:
+        if not self._exit_enabled or not self._open_positions:
+            return set()
+
+        exit_decisions = determine_exit_decisions(
+            open_positions=self._open_positions,
+            ranked_contracts=scan_snapshot.ranked_contracts,
+        )
+        closed_product_ids: set[str] = set()
+        for exit_decision in exit_decisions:
+            position = self._open_positions.pop(exit_decision.position_id, None)
+            if position is None:
+                continue
+            self._position_id_by_product.pop(position.product_id, None)
+            closed_product_ids.add(position.product_id)
+            self._closed_positions.append(
+                ClosedSimulatedPosition(
+                    position_id=position.position_id,
+                    product_id=position.product_id,
+                    market_ticker=position.market_ticker,
+                    direction=position.direction,
+                    structure=position.structure,
+                    confidence=position.confidence,
+                    entry_price=position.entry_price,
+                    exit_price=exit_decision.exit_price,
+                    status="closed",
+                    opened_at=position.opened_at,
+                    closed_at=exit_decision.closed_at,
+                    updated_at=position.updated_at,
+                    update_count=position.update_count,
+                    exit_reason=exit_decision.exit_reason,
+                )
+            )
+            decisions.append(
+                SimulationDecision(
+                    action="close_position",
+                    position_id=position.position_id,
+                    product_id=position.product_id,
+                    market_ticker=position.market_ticker,
+                    reason=exit_decision.exit_reason,
+                )
+            )
+        return closed_product_ids
+
+    def _update_open_positions(
+        self,
+        *,
+        ranked_by_market: dict[str, ScannedContract],
+        decisions: list[SimulationDecision],
+    ) -> None:
         for position_id in sorted(self._open_positions):
             position = self._open_positions[position_id]
             ranked_contract = ranked_by_market.get(position.market_ticker)
@@ -125,11 +217,14 @@ class SimulationExecutionEngine:
                 )
             )
 
-        ranked_contract = (
-            scan_snapshot.ranked_contracts[0] if scan_snapshot.ranked_contracts else None
-        )
-        new_positions_opened = 0
-        if ranked_contract is None:
+    def _consider_new_entry(
+        self,
+        *,
+        ranked_contracts: tuple[ScannedContract, ...],
+        decisions: list[SimulationDecision],
+        closed_product_ids: set[str],
+    ) -> None:
+        if not ranked_contracts:
             decisions.append(
                 SimulationDecision(
                     action="skip_entry",
@@ -139,31 +234,52 @@ class SimulationExecutionEngine:
                     reason="no_ranked_contracts",
                 )
             )
-        elif ranked_contract.product_id in self._position_id_by_product:
-            decisions.append(
-                SimulationDecision(
-                    action="skip_entry",
-                    position_id=self._position_id_by_product[ranked_contract.product_id],
-                    product_id=ranked_contract.product_id,
-                    market_ticker=ranked_contract.market_ticker,
-                    reason="open_position_for_product",
-                )
-            )
-        elif new_positions_opened >= self._max_new_positions_per_evaluation:
+            return
+
+        if self._max_new_positions_per_evaluation <= 0:
             decisions.append(
                 SimulationDecision(
                     action="skip_entry",
                     position_id=None,
-                    product_id=ranked_contract.product_id,
-                    market_ticker=ranked_contract.market_ticker,
+                    product_id=ranked_contracts[0].product_id,
+                    market_ticker=ranked_contracts[0].market_ticker,
                     reason="max_new_positions_reached",
                 )
             )
-        else:
+            return
+
+        initial_decision_count = len(decisions)
+        for ranked_contract in ranked_contracts:
+            existing_position_id = self._position_id_by_product.get(ranked_contract.product_id)
+            if existing_position_id is not None:
+                decisions.append(
+                    SimulationDecision(
+                        action="skip_entry",
+                        position_id=existing_position_id,
+                        product_id=ranked_contract.product_id,
+                        market_ticker=ranked_contract.market_ticker,
+                        reason="open_position_for_product",
+                    )
+                )
+                continue
+            if (
+                not self._allow_same_pass_reentry
+                and ranked_contract.product_id in closed_product_ids
+            ):
+                decisions.append(
+                    SimulationDecision(
+                        action="skip_entry",
+                        position_id=None,
+                        product_id=ranked_contract.product_id,
+                        market_ticker=ranked_contract.market_ticker,
+                        reason="same_pass_reentry_disallowed",
+                    )
+                )
+                continue
+
             position = self._open_position_from_contract(ranked_contract)
             self._open_positions[position.position_id] = position
             self._position_id_by_product[position.product_id] = position.position_id
-            new_positions_opened += 1
             decisions.append(
                 SimulationDecision(
                     action="open_position",
@@ -173,16 +289,18 @@ class SimulationExecutionEngine:
                     reason=None,
                 )
             )
+            return
 
-        self._latest_snapshot = SimulationSnapshot(
-            open_positions=dict(self._open_positions),
-            decisions=tuple(decisions),
-            evaluation_count=self._latest_snapshot.evaluation_count + 1,
-        )
-        return self._latest_snapshot
-
-    def snapshot(self) -> SimulationSnapshot:
-        return self._latest_snapshot
+        if len(decisions) == initial_decision_count:
+            decisions.append(
+                SimulationDecision(
+                    action="skip_entry",
+                    position_id=None,
+                    product_id=ranked_contracts[0].product_id,
+                    market_ticker=ranked_contracts[0].market_ticker,
+                    reason="no_eligible_ranked_contract",
+                )
+            )
 
     def _open_position_from_contract(self, contract: ScannedContract) -> SimulatedPosition:
         position_id = f"{self._position_id_prefix}-{self._next_position_number:04d}"
