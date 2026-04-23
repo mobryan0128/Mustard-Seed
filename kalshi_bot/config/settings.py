@@ -11,12 +11,19 @@ DEMO_API_BASE_URL = "https://demo-api.kalshi.co/trade-api/v2"
 PROD_API_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 DEMO_WS_URL = "wss://demo-api.kalshi.co/trade-api/ws/v2"
 PROD_WS_URL = "wss://api.elections.kalshi.com/trade-api/ws/v2"
+DEFAULT_CRYPTO_FEED_WS_URL = "wss://advanced-trade-ws.coinbase.com"
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 10.0
 DEFAULT_WS_MESSAGE_LIMIT = 25
 DEFAULT_WS_RECEIVE_TIMEOUT_SECONDS = 30.0
 DEFAULT_WS_MAX_RECONNECT_ATTEMPTS = 3
 DEFAULT_WS_RECONNECT_INITIAL_DELAY_SECONDS = 1.0
 DEFAULT_WS_RECONNECT_MAX_DELAY_SECONDS = 30.0
+DEFAULT_CRYPTO_FEED_PRODUCTS = ("BTC-USD", "ETH-USD")
+DEFAULT_CRYPTO_FEED_MESSAGE_LIMIT = 25
+DEFAULT_CRYPTO_FEED_RECEIVE_TIMEOUT_SECONDS = 30.0
+DEFAULT_CRYPTO_FEED_MAX_RECONNECT_ATTEMPTS = 3
+DEFAULT_CRYPTO_FEED_RECONNECT_INITIAL_DELAY_SECONDS = 1.0
+DEFAULT_CRYPTO_FEED_RECONNECT_MAX_DELAY_SECONDS = 30.0
 
 
 class SettingsError(ValueError):
@@ -41,6 +48,13 @@ class KalshiSettings:
     ws_max_reconnect_attempts: int
     ws_reconnect_initial_delay_seconds: float
     ws_reconnect_max_delay_seconds: float
+    crypto_feed_ws_url: str
+    crypto_feed_products: tuple[str, ...]
+    crypto_feed_message_limit: int
+    crypto_feed_receive_timeout_seconds: float
+    crypto_feed_max_reconnect_attempts: int
+    crypto_feed_reconnect_initial_delay_seconds: float
+    crypto_feed_reconnect_max_delay_seconds: float
 
 
 def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
@@ -87,6 +101,27 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
             "KALSHI_WS_RECONNECT_INITIAL_DELAY_SECONDS must be less than or equal "
             "to KALSHI_WS_RECONNECT_MAX_DELAY_SECONDS."
         )
+    crypto_feed_initial_delay_seconds = _parse_positive_float(
+        values.get("CRYPTO_FEED_RECONNECT_INITIAL_DELAY_SECONDS"),
+        DEFAULT_CRYPTO_FEED_RECONNECT_INITIAL_DELAY_SECONDS,
+        "CRYPTO_FEED_RECONNECT_INITIAL_DELAY_SECONDS",
+    )
+    crypto_feed_max_delay_seconds = _parse_positive_float(
+        values.get("CRYPTO_FEED_RECONNECT_MAX_DELAY_SECONDS"),
+        DEFAULT_CRYPTO_FEED_RECONNECT_MAX_DELAY_SECONDS,
+        "CRYPTO_FEED_RECONNECT_MAX_DELAY_SECONDS",
+    )
+    if crypto_feed_initial_delay_seconds > crypto_feed_max_delay_seconds:
+        raise SettingsError(
+            "CRYPTO_FEED_RECONNECT_INITIAL_DELAY_SECONDS must be less than or equal "
+            "to CRYPTO_FEED_RECONNECT_MAX_DELAY_SECONDS."
+        )
+    crypto_feed_products = (
+        _parse_csv(values.get("CRYPTO_FEED_PRODUCTS")) or DEFAULT_CRYPTO_FEED_PRODUCTS
+    )
+    crypto_feed_ws_url = (
+        values.get("CRYPTO_FEED_WS_URL") or DEFAULT_CRYPTO_FEED_WS_URL
+    ).rstrip("/")
 
     return KalshiSettings(
         env=kalshi_env,
@@ -115,6 +150,25 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         ),
         ws_reconnect_initial_delay_seconds=ws_initial_delay_seconds,
         ws_reconnect_max_delay_seconds=ws_max_delay_seconds,
+        crypto_feed_ws_url=crypto_feed_ws_url,
+        crypto_feed_products=crypto_feed_products,
+        crypto_feed_message_limit=_parse_positive_int(
+            values.get("CRYPTO_FEED_MESSAGE_LIMIT"),
+            DEFAULT_CRYPTO_FEED_MESSAGE_LIMIT,
+            "CRYPTO_FEED_MESSAGE_LIMIT",
+        ),
+        crypto_feed_receive_timeout_seconds=_parse_positive_float(
+            values.get("CRYPTO_FEED_RECEIVE_TIMEOUT_SECONDS"),
+            DEFAULT_CRYPTO_FEED_RECEIVE_TIMEOUT_SECONDS,
+            "CRYPTO_FEED_RECEIVE_TIMEOUT_SECONDS",
+        ),
+        crypto_feed_max_reconnect_attempts=_parse_non_negative_int(
+            values.get("CRYPTO_FEED_MAX_RECONNECT_ATTEMPTS"),
+            DEFAULT_CRYPTO_FEED_MAX_RECONNECT_ATTEMPTS,
+            "CRYPTO_FEED_MAX_RECONNECT_ATTEMPTS",
+        ),
+        crypto_feed_reconnect_initial_delay_seconds=crypto_feed_initial_delay_seconds,
+        crypto_feed_reconnect_max_delay_seconds=crypto_feed_max_delay_seconds,
     )
 
 
@@ -172,6 +226,13 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "KALSHI_WS_MAX_RECONNECT_ATTEMPTS",
         "KALSHI_WS_RECONNECT_INITIAL_DELAY_SECONDS",
         "KALSHI_WS_RECONNECT_MAX_DELAY_SECONDS",
+        "CRYPTO_FEED_WS_URL",
+        "CRYPTO_FEED_PRODUCTS",
+        "CRYPTO_FEED_MESSAGE_LIMIT",
+        "CRYPTO_FEED_RECEIVE_TIMEOUT_SECONDS",
+        "CRYPTO_FEED_MAX_RECONNECT_ATTEMPTS",
+        "CRYPTO_FEED_RECONNECT_INITIAL_DELAY_SECONDS",
+        "CRYPTO_FEED_RECONNECT_MAX_DELAY_SECONDS",
     ):
         if key in os.environ:
             values[key] = _clean_env_value(os.environ[key])
