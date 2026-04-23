@@ -1,0 +1,353 @@
+"""Validate Phase 10 live-trading guardrails with deterministic fixtures."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from decimal import Decimal
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from kalshi_bot.clients.kalshi_client import KalshiClientError, KalshiOrderSummary  # noqa: E402
+from kalshi_bot.execution.execution_engine import (  # noqa: E402
+    LiveExecutionSmokeTester,
+    LiveValidationOrder,
+)
+from kalshi_bot.observability.logger import StructuredLogger  # noqa: E402
+from kalshi_bot.observability.replay_engine import ReplayEngine  # noqa: E402
+from kalshi_bot.risk.risk_manager import RiskManager  # noqa: E402
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Validate Phase 10 live guardrails.")
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="Run the actual live guardrail smoke path instead of offline fixtures.",
+    )
+    parser.add_argument(
+        "--env-file",
+        default=".env.example",
+        help="Environment file used only for the optional live smoke path.",
+    )
+    args = parser.parse_args()
+
+    if args.live:
+        return _run_live(args.env_file)
+    return _run_offline()
+
+
+def _run_offline() -> int:
+    failures: list[str] = []
+    failures.extend(_validate_kill_switch_denial())
+    failures.extend(_validate_live_trading_disabled_denial())
+    failures.extend(_validate_non_prod_denial())
+    failures.extend(_validate_count_cap_denial())
+    failures.extend(_validate_ioc_denial())
+    failures.extend(_validate_allowed_flow())
+
+    if failures:
+        for failure in failures:
+            print(f"FAIL {failure}", file=sys.stderr)
+        return 1
+
+    print("Phase 10 live guardrail offline fixtures succeeded.")
+    return 0
+
+
+def _validate_kill_switch_denial() -> list[str]:
+    snapshot, state = _run_guardrail_fixture(
+        risk_manager=_risk_manager(live_kill_switch_active=True),
+        order=_order(),
+    )
+    return _assert_denied(
+        snapshot=snapshot,
+        state=state,
+        expected_reason="kill_switch_active",
+    )
+
+
+def _validate_live_trading_disabled_denial() -> list[str]:
+    snapshot, state = _run_guardrail_fixture(
+        risk_manager=_risk_manager(live_trading_enabled=False),
+        order=_order(),
+    )
+    return _assert_denied(
+        snapshot=snapshot,
+        state=state,
+        expected_reason="live_trading_not_enabled",
+    )
+
+
+def _validate_non_prod_denial() -> list[str]:
+    snapshot, state = _run_guardrail_fixture(
+        risk_manager=_risk_manager(env="demo"),
+        order=_order(),
+    )
+    return _assert_denied(
+        snapshot=snapshot,
+        state=state,
+        expected_reason="live_env_not_prod",
+    )
+
+
+def _validate_count_cap_denial() -> list[str]:
+    snapshot, state = _run_guardrail_fixture(
+        risk_manager=_risk_manager(),
+        order=_order(count=2),
+    )
+    return _assert_denied(
+        snapshot=snapshot,
+        state=state,
+        expected_reason="order_count_exceeds_phase10_cap",
+    )
+
+
+def _validate_ioc_denial() -> list[str]:
+    snapshot, state = _run_guardrail_fixture(
+        risk_manager=_risk_manager(),
+        order=_order(time_in_force="fill_or_kill"),
+    )
+    return _assert_denied(
+        snapshot=snapshot,
+        state=state,
+        expected_reason="unsupported_time_in_force",
+    )
+
+
+def _validate_allowed_flow() -> list[str]:
+    created_order = _order_summary(
+        order_id="ord-allowed",
+        client_order_id="live-allowed",
+        status="resting",
+        fill_count_fp="0.00",
+        remaining_count_fp="1.00",
+        initial_count_fp="1.00",
+    )
+    executed_order = _order_summary(
+        order_id="ord-allowed",
+        client_order_id="live-allowed",
+        status="executed",
+        fill_count_fp="1.00",
+        remaining_count_fp="0.00",
+        initial_count_fp="1.00",
+    )
+    snapshot, state = _run_guardrail_fixture(
+        risk_manager=_risk_manager(),
+        order=_order(client_order_id="live-allowed"),
+        created_order=created_order,
+        polled_orders=[created_order, executed_order],
+    )
+
+    failures: list[str] = []
+    if snapshot.result.classification != "filled":
+        failures.append(f"allowed flow classification={snapshot.result.classification}")
+    if snapshot.result.decision_reason is not None:
+        failures.append(f"allowed flow decision_reason={snapshot.result.decision_reason}")
+    if not snapshot.result.order_placed:
+        failures.append("allowed flow did not place order")
+    if state.create_order_calls != 1:
+        failures.append(f"allowed flow create_order_calls={state.create_order_calls}")
+    if state.get_order_calls != 2:
+        failures.append(f"allowed flow get_order_calls={state.get_order_calls}")
+    if not snapshot.result.balance_fetched:
+        failures.append("allowed flow did not fetch balance")
+    if not state.log_written or not state.replay_written:
+        failures.append("allowed flow did not write log/replay artifacts")
+    return failures
+
+
+def _assert_denied(*, snapshot, state, expected_reason: str) -> list[str]:
+    failures: list[str] = []
+    if snapshot.result.classification != "blocked_by_safeguard":
+        failures.append(f"denial classification={snapshot.result.classification}")
+    if snapshot.result.decision_reason != expected_reason:
+        failures.append(f"denial reason={snapshot.result.decision_reason}")
+    if snapshot.result.order_placed:
+        failures.append("denied flow placed an order")
+    if state.create_order_calls != 0:
+        failures.append(f"denied flow create_order_calls={state.create_order_calls}")
+    if state.get_order_calls != 0:
+        failures.append(f"denied flow get_order_calls={state.get_order_calls}")
+    if snapshot.result.balance_fetched:
+        failures.append("denied flow fetched balance unexpectedly")
+    if not state.log_written or not state.replay_written:
+        failures.append("denied flow did not write log/replay artifacts")
+    return failures
+
+
+def _run_guardrail_fixture(
+    *,
+    risk_manager: RiskManager,
+    order: LiveValidationOrder,
+    created_order: KalshiOrderSummary | None = None,
+    polled_orders: list[KalshiOrderSummary] | None = None,
+):
+    with TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        logger = StructuredLogger(log_directory=tmp_path / "logs", enabled=True)
+        replay_engine = ReplayEngine(replay_directory=tmp_path / "replay", enabled=True)
+        fake_client = _FakeKalshiClient(
+            created_order=created_order,
+            polled_orders=polled_orders,
+            balance_payload={"balance": "10.00"},
+        )
+        tester = LiveExecutionSmokeTester(
+            client=fake_client,
+            logger=logger,
+            replay_engine=replay_engine,
+            order=order,
+            poll_attempts=3,
+            poll_interval_seconds=0.001,
+            risk_manager=risk_manager,
+            sleep_fn=lambda _: None,
+        )
+        snapshot = tester.run()
+        state = _FixtureState(
+            create_order_calls=fake_client.create_order_calls,
+            get_order_calls=fake_client.get_order_calls,
+            log_written=logger.path.exists(),
+            replay_written=replay_engine.path.exists(),
+        )
+        return snapshot, state
+
+
+def _risk_manager(
+    *,
+    live_validation_enabled: bool = True,
+    live_trading_enabled: bool = True,
+    live_kill_switch_active: bool = False,
+    env: str = "prod",
+    live_validation_env: str = "prod",
+) -> RiskManager:
+    return RiskManager(
+        live_validation_enabled=live_validation_enabled,
+        live_trading_enabled=live_trading_enabled,
+        live_kill_switch_active=live_kill_switch_active,
+        env=env,
+        live_validation_env=live_validation_env,
+        max_live_order_count=1,
+        required_time_in_force="immediate_or_cancel",
+    )
+
+
+def _order(
+    *,
+    count: int = 1,
+    time_in_force: str = "immediate_or_cancel",
+    client_order_id: str = "live-check",
+) -> LiveValidationOrder:
+    return LiveValidationOrder(
+        ticker="KXBTC-1",
+        action="buy",
+        side="yes",
+        count=count,
+        price_dollars=Decimal("0.0100"),
+        time_in_force=time_in_force,
+        client_order_id=client_order_id,
+    )
+
+
+def _order_summary(
+    *,
+    order_id: str,
+    client_order_id: str,
+    status: str,
+    fill_count_fp: str,
+    remaining_count_fp: str,
+    initial_count_fp: str,
+) -> KalshiOrderSummary:
+    return KalshiOrderSummary(
+        order_id=order_id,
+        client_order_id=client_order_id,
+        ticker="KXBTC-1",
+        side="yes",
+        action="buy",
+        order_type="limit",
+        status=status,
+        yes_price_dollars=Decimal("0.0100"),
+        no_price_dollars=None,
+        fill_count_fp=Decimal(fill_count_fp),
+        remaining_count_fp=Decimal(remaining_count_fp),
+        initial_count_fp=Decimal(initial_count_fp),
+        created_time="2026-04-23T12:00:00Z",
+        last_update_time="2026-04-23T12:00:01Z",
+    )
+
+
+def _run_live(env_file: str) -> int:
+    from kalshi_bot.config.settings import SettingsError, load_settings
+    from kalshi_bot.execution.execution_engine import LiveExecutionSmokeError
+
+    try:
+        settings = load_settings(env_file)
+        tester = LiveExecutionSmokeTester.from_settings(settings)
+    except (SettingsError, LiveExecutionSmokeError, ValueError) as exc:
+        print(f"Phase 10 live guardrail check failed: {exc}", file=sys.stderr)
+        return 1
+
+    snapshot = tester.run()
+    print("Phase 10 live guardrail smoke completed.")
+    print(f"classification={snapshot.result.classification}")
+    print(f"decision_reason={snapshot.result.decision_reason}")
+    print(f"order_placed={snapshot.result.order_placed}")
+    print(f"balance_fetched={snapshot.result.balance_fetched}")
+    return 0
+
+
+class _FakeKalshiClient:
+    def __init__(
+        self,
+        *,
+        created_order: KalshiOrderSummary | None,
+        polled_orders: list[KalshiOrderSummary] | None,
+        balance_payload: dict[str, object],
+    ) -> None:
+        self._created_order = created_order
+        self._polled_orders = list(polled_orders or [])
+        self._balance_payload = balance_payload
+        self._poll_index = 0
+        self.create_order_calls = 0
+        self.get_order_calls = 0
+
+    def create_order(self, order_request) -> KalshiOrderSummary:
+        self.create_order_calls += 1
+        if self._created_order is None:
+            raise KalshiClientError("No fake create-order result configured.")
+        return self._created_order
+
+    def get_order(self, order_id: str) -> KalshiOrderSummary:
+        self.get_order_calls += 1
+        if not self._polled_orders:
+            raise KalshiClientError("No fake get-order result configured.")
+        if self._poll_index >= len(self._polled_orders):
+            return self._polled_orders[-1]
+        result = self._polled_orders[self._poll_index]
+        self._poll_index += 1
+        return result
+
+    def get_balance(self) -> dict[str, object]:
+        return dict(self._balance_payload)
+
+
+class _FixtureState:
+    def __init__(
+        self,
+        *,
+        create_order_calls: int,
+        get_order_calls: int,
+        log_written: bool,
+        replay_written: bool,
+    ) -> None:
+        self.create_order_calls = create_order_calls
+        self.get_order_calls = get_order_calls
+        self.log_written = log_written
+        self.replay_written = replay_written
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

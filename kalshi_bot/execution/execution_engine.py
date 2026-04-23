@@ -22,6 +22,7 @@ from kalshi_bot.execution.exit_manager import (
 )
 from kalshi_bot.observability.logger import StructuredLogger
 from kalshi_bot.observability.replay_engine import ReplayEngine
+from kalshi_bot.risk.risk_manager import RiskManager
 
 
 class SimulationExecutionError(ValueError):
@@ -89,6 +90,7 @@ class LiveValidationResult:
     """Outcome of one live execution smoke-test run."""
 
     classification: str
+    decision_reason: str | None
     order_placed: bool
     order_id: str | None
     final_order: KalshiOrderSummary | None
@@ -390,6 +392,7 @@ class LiveExecutionSmokeTester:
         order: LiveValidationOrder,
         poll_attempts: int,
         poll_interval_seconds: float,
+        risk_manager: RiskManager,
         sleep_fn=time.sleep,
     ) -> None:
         if poll_attempts <= 0:
@@ -402,6 +405,7 @@ class LiveExecutionSmokeTester:
         self._order = order
         self._poll_attempts = poll_attempts
         self._poll_interval_seconds = poll_interval_seconds
+        self._risk_manager = risk_manager
         self._sleep_fn = sleep_fn
 
     @classmethod
@@ -446,6 +450,7 @@ class LiveExecutionSmokeTester:
             order=order,
             poll_attempts=settings.live_validation_poll_attempts,
             poll_interval_seconds=settings.live_validation_poll_interval_seconds,
+            risk_manager=RiskManager.from_settings(settings),
         )
 
     def run(self) -> LiveValidationSnapshot:
@@ -461,6 +466,46 @@ class LiveExecutionSmokeTester:
         poll_attempts_used = 0
         error_message: str | None = None
         classification = "unknown_final_state"
+        decision_reason: str | None = None
+
+        safety_decision = self._risk_manager.evaluate_live_order(self._order)
+        if not safety_decision.allow:
+            classification = "blocked_by_safeguard"
+            decision_reason = safety_decision.reason
+            self._log_and_record(
+                event_type="live_submission_blocked",
+                record_type="live_submission_blocked",
+                identifier=self._order.client_order_id,
+                payload={"reason": decision_reason},
+            )
+            result = LiveValidationResult(
+                classification=classification,
+                decision_reason=decision_reason,
+                order_placed=False,
+                order_id=None,
+                final_order=None,
+                poll_attempts_used=0,
+                balance_fetched=False,
+                balance_payload=None,
+                error_message=None,
+            )
+            self._log_and_record(
+                event_type="validation_completed",
+                record_type="validation_completed",
+                identifier=self._order.client_order_id,
+                payload={
+                    "classification": result.classification,
+                    "decision_reason": result.decision_reason,
+                    "order_placed": result.order_placed,
+                    "poll_attempts_used": result.poll_attempts_used,
+                    "balance_fetched": result.balance_fetched,
+                    "error_message": result.error_message,
+                },
+            )
+            return LiveValidationSnapshot(
+                requested_order=self._order,
+                result=result,
+            )
 
         try:
             created_order = self._client.create_order(
@@ -487,6 +532,7 @@ class LiveExecutionSmokeTester:
         except KalshiClientError as exc:
             classification = "rejected"
             error_message = str(exc)
+            decision_reason = "order_submit_failed"
             self._log_and_record(
                 event_type="order_submit_failed",
                 record_type="order_submit_failed",
@@ -500,6 +546,7 @@ class LiveExecutionSmokeTester:
 
         result = LiveValidationResult(
             classification=classification,
+            decision_reason=decision_reason,
             order_placed=order_placed,
             order_id=final_order.order_id if final_order is not None else None,
             final_order=final_order,
@@ -514,6 +561,7 @@ class LiveExecutionSmokeTester:
             identifier=result.order_id or self._order.client_order_id,
             payload={
                 "classification": result.classification,
+                "decision_reason": result.decision_reason,
                 "order_placed": result.order_placed,
                 "poll_attempts_used": result.poll_attempts_used,
                 "balance_fetched": result.balance_fetched,

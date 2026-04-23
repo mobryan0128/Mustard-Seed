@@ -46,6 +46,8 @@ DEFAULT_LIVE_VALIDATION_TIME_IN_FORCE = "immediate_or_cancel"
 DEFAULT_LIVE_VALIDATION_POLL_ATTEMPTS = 5
 DEFAULT_LIVE_VALIDATION_POLL_INTERVAL_SECONDS = 1.0
 DEFAULT_LIVE_VALIDATION_CLIENT_ORDER_ID_PREFIX = "live-smoke"
+DEFAULT_LIVE_TRADING_ENABLED = False
+DEFAULT_LIVE_KILL_SWITCH_ACTIVE = False
 
 
 class SettingsError(ValueError):
@@ -106,6 +108,8 @@ class KalshiSettings:
     live_validation_poll_attempts: int
     live_validation_poll_interval_seconds: float
     live_validation_client_order_id_prefix: str
+    live_trading_enabled: bool
+    live_kill_switch_active: bool
 
 
 def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
@@ -243,6 +247,16 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         or DEFAULT_LIVE_VALIDATION_CLIENT_ORDER_ID_PREFIX
     )
     live_validation_time_in_force = DEFAULT_LIVE_VALIDATION_TIME_IN_FORCE
+    live_trading_enabled = _parse_bool(
+        values.get("LIVE_TRADING_ENABLED"),
+        DEFAULT_LIVE_TRADING_ENABLED,
+        "LIVE_TRADING_ENABLED",
+    )
+    live_kill_switch_active = _parse_bool(
+        values.get("LIVE_KILL_SWITCH_ACTIVE"),
+        DEFAULT_LIVE_KILL_SWITCH_ACTIVE,
+        "LIVE_KILL_SWITCH_ACTIVE",
+    )
 
     if live_validation_enabled:
         if kalshi_env != "prod":
@@ -391,6 +405,8 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_validation_poll_attempts=live_validation_poll_attempts,
         live_validation_poll_interval_seconds=live_validation_poll_interval_seconds,
         live_validation_client_order_id_prefix=live_validation_client_order_id_prefix,
+        live_trading_enabled=live_trading_enabled,
+        live_kill_switch_active=live_kill_switch_active,
     )
 
 
@@ -484,6 +500,8 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_VALIDATION_POLL_ATTEMPTS",
         "LIVE_VALIDATION_POLL_INTERVAL_SECONDS",
         "LIVE_VALIDATION_CLIENT_ORDER_ID_PREFIX",
+        "LIVE_TRADING_ENABLED",
+        "LIVE_KILL_SWITCH_ACTIVE",
     ):
         if key in os.environ:
             values[key] = _clean_env_value(os.environ[key])
