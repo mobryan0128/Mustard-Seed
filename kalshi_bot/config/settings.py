@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
 
@@ -38,6 +39,13 @@ DEFAULT_SIMULATION_MAX_NEW_POSITIONS_PER_EVALUATION = 1
 DEFAULT_SIMULATION_POSITION_ID_PREFIX = "sim"
 DEFAULT_SIMULATION_EXIT_ENABLED = True
 DEFAULT_SIMULATION_ALLOW_SAME_PASS_REENTRY = False
+DEFAULT_LIVE_VALIDATION_ENABLED = False
+DEFAULT_LIVE_VALIDATION_ENV = "prod"
+DEFAULT_LIVE_VALIDATION_COUNT = 1
+DEFAULT_LIVE_VALIDATION_TIME_IN_FORCE = "immediate_or_cancel"
+DEFAULT_LIVE_VALIDATION_POLL_ATTEMPTS = 5
+DEFAULT_LIVE_VALIDATION_POLL_INTERVAL_SECONDS = 1.0
+DEFAULT_LIVE_VALIDATION_CLIENT_ORDER_ID_PREFIX = "live-smoke"
 
 
 class SettingsError(ValueError):
@@ -87,6 +95,17 @@ class KalshiSettings:
     simulation_position_id_prefix: str
     simulation_exit_enabled: bool
     simulation_allow_same_pass_reentry: bool
+    live_validation_enabled: bool
+    live_validation_env: str
+    live_validation_ticker: str | None
+    live_validation_action: str | None
+    live_validation_side: str | None
+    live_validation_count: int
+    live_validation_price_dollars: Decimal | None
+    live_validation_time_in_force: str
+    live_validation_poll_attempts: int
+    live_validation_poll_interval_seconds: float
+    live_validation_client_order_id_prefix: str
 
 
 def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
@@ -179,6 +198,79 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         _optional(values, "SIMULATION_POSITION_ID_PREFIX")
         or DEFAULT_SIMULATION_POSITION_ID_PREFIX
     )
+    live_validation_enabled = _parse_bool(
+        values.get("LIVE_VALIDATION_ENABLED"),
+        DEFAULT_LIVE_VALIDATION_ENABLED,
+        "LIVE_VALIDATION_ENABLED",
+    )
+    live_validation_env = (
+        _optional(values, "LIVE_VALIDATION_ENV") or DEFAULT_LIVE_VALIDATION_ENV
+    ).lower()
+    if live_validation_env not in {"prod", "demo"}:
+        raise SettingsError("LIVE_VALIDATION_ENV must be either 'prod' or 'demo'.")
+    live_validation_ticker = _optional(values, "LIVE_VALIDATION_TICKER")
+    live_validation_action = _optional(values, "LIVE_VALIDATION_ACTION")
+    if live_validation_action is not None:
+        live_validation_action = live_validation_action.lower()
+    if live_validation_action not in {None, "buy", "sell"}:
+        raise SettingsError("LIVE_VALIDATION_ACTION must be either 'buy' or 'sell'.")
+    live_validation_side = _optional(values, "LIVE_VALIDATION_SIDE")
+    if live_validation_side is not None:
+        live_validation_side = live_validation_side.lower()
+    if live_validation_side not in {None, "yes", "no"}:
+        raise SettingsError("LIVE_VALIDATION_SIDE must be either 'yes' or 'no'.")
+    live_validation_count = _parse_positive_int(
+        values.get("LIVE_VALIDATION_COUNT"),
+        DEFAULT_LIVE_VALIDATION_COUNT,
+        "LIVE_VALIDATION_COUNT",
+    )
+    live_validation_price_dollars = _parse_price_dollars(
+        values.get("LIVE_VALIDATION_PRICE_DOLLARS"),
+        "LIVE_VALIDATION_PRICE_DOLLARS",
+    )
+    live_validation_poll_attempts = _parse_positive_int(
+        values.get("LIVE_VALIDATION_POLL_ATTEMPTS"),
+        DEFAULT_LIVE_VALIDATION_POLL_ATTEMPTS,
+        "LIVE_VALIDATION_POLL_ATTEMPTS",
+    )
+    live_validation_poll_interval_seconds = _parse_positive_float(
+        values.get("LIVE_VALIDATION_POLL_INTERVAL_SECONDS"),
+        DEFAULT_LIVE_VALIDATION_POLL_INTERVAL_SECONDS,
+        "LIVE_VALIDATION_POLL_INTERVAL_SECONDS",
+    )
+    live_validation_client_order_id_prefix = (
+        _optional(values, "LIVE_VALIDATION_CLIENT_ORDER_ID_PREFIX")
+        or DEFAULT_LIVE_VALIDATION_CLIENT_ORDER_ID_PREFIX
+    )
+    live_validation_time_in_force = DEFAULT_LIVE_VALIDATION_TIME_IN_FORCE
+
+    if live_validation_enabled:
+        if kalshi_env != "prod":
+            raise SettingsError(
+                "KALSHI_ENV must be 'prod' when LIVE_VALIDATION_ENABLED is true."
+            )
+        if live_validation_env != "prod":
+            raise SettingsError(
+                "LIVE_VALIDATION_ENV must be 'prod' when LIVE_VALIDATION_ENABLED is true."
+            )
+        if live_validation_ticker is None:
+            raise SettingsError(
+                "LIVE_VALIDATION_TICKER is required when LIVE_VALIDATION_ENABLED is true."
+            )
+        if live_validation_action is None:
+            raise SettingsError(
+                "LIVE_VALIDATION_ACTION is required when LIVE_VALIDATION_ENABLED is true."
+            )
+        if live_validation_side is None:
+            raise SettingsError(
+                "LIVE_VALIDATION_SIDE is required when LIVE_VALIDATION_ENABLED is true."
+            )
+        if live_validation_price_dollars is None:
+            raise SettingsError(
+                "LIVE_VALIDATION_PRICE_DOLLARS is required when LIVE_VALIDATION_ENABLED is true."
+            )
+        if live_validation_count != 1:
+            raise SettingsError("LIVE_VALIDATION_COUNT must be 1 for Phase 9.")
 
     return KalshiSettings(
         env=kalshi_env,
@@ -288,6 +380,17 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
             DEFAULT_SIMULATION_ALLOW_SAME_PASS_REENTRY,
             "SIMULATION_ALLOW_SAME_PASS_REENTRY",
         ),
+        live_validation_enabled=live_validation_enabled,
+        live_validation_env=live_validation_env,
+        live_validation_ticker=live_validation_ticker,
+        live_validation_action=live_validation_action,
+        live_validation_side=live_validation_side,
+        live_validation_count=live_validation_count,
+        live_validation_price_dollars=live_validation_price_dollars,
+        live_validation_time_in_force=live_validation_time_in_force,
+        live_validation_poll_attempts=live_validation_poll_attempts,
+        live_validation_poll_interval_seconds=live_validation_poll_interval_seconds,
+        live_validation_client_order_id_prefix=live_validation_client_order_id_prefix,
     )
 
 
@@ -370,6 +473,17 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "SIMULATION_POSITION_ID_PREFIX",
         "SIMULATION_EXIT_ENABLED",
         "SIMULATION_ALLOW_SAME_PASS_REENTRY",
+        "LIVE_VALIDATION_ENABLED",
+        "LIVE_VALIDATION_ENV",
+        "LIVE_VALIDATION_TICKER",
+        "LIVE_VALIDATION_ACTION",
+        "LIVE_VALIDATION_SIDE",
+        "LIVE_VALIDATION_COUNT",
+        "LIVE_VALIDATION_PRICE_DOLLARS",
+        "LIVE_VALIDATION_TIME_IN_FORCE",
+        "LIVE_VALIDATION_POLL_ATTEMPTS",
+        "LIVE_VALIDATION_POLL_INTERVAL_SECONDS",
+        "LIVE_VALIDATION_CLIENT_ORDER_ID_PREFIX",
     ):
         if key in os.environ:
             values[key] = _clean_env_value(os.environ[key])
@@ -464,6 +578,20 @@ def _parse_path(value: str | None, default: Path) -> Path:
     if value is None or not value.strip():
         return default
     return Path(value).expanduser()
+
+
+def _parse_price_dollars(value: str | None, key: str) -> Decimal | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        parsed = Decimal(value.strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise SettingsError(f"{key} must be a valid decimal string.") from exc
+    if parsed < Decimal("0.01") or parsed > Decimal("0.99"):
+        raise SettingsError(f"{key} must be between 0.01 and 0.99 inclusive.")
+    if parsed.as_tuple().exponent < -4:
+        raise SettingsError(f"{key} must have at most four decimal places.")
+    return parsed.quantize(Decimal("0.0001"))
 
 
 def _parse_product_markets_json(value: str | None) -> dict[str, tuple[str, ...]]:

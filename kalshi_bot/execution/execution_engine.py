@@ -3,18 +3,33 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
+import time
+import uuid
 
+from kalshi_bot.clients.kalshi_client import (
+    KalshiClient,
+    KalshiClientError,
+    KalshiOrderRequest,
+    KalshiOrderSummary,
+)
 from kalshi_bot.config.settings import KalshiSettings
 from kalshi_bot.contracts.contract_scanner import ContractScanSnapshot, ScannedContract
 from kalshi_bot.execution.exit_manager import (
     ClosedSimulatedPosition,
     determine_exit_decisions,
 )
+from kalshi_bot.observability.logger import StructuredLogger
+from kalshi_bot.observability.replay_engine import ReplayEngine
 
 
 class SimulationExecutionError(ValueError):
     """Raised when simulation execution configuration is invalid."""
+
+
+class LiveExecutionSmokeError(ValueError):
+    """Raised when live validation configuration is invalid."""
 
 
 @dataclass(frozen=True)
@@ -54,6 +69,41 @@ class SimulationSnapshot:
     closed_positions: tuple[ClosedSimulatedPosition, ...]
     decisions: tuple[SimulationDecision, ...]
     evaluation_count: int
+
+
+@dataclass(frozen=True)
+class LiveValidationOrder:
+    """Explicit tiny live-validation order configuration."""
+
+    ticker: str
+    action: str
+    side: str
+    count: int
+    price_dollars: Decimal
+    time_in_force: str
+    client_order_id: str
+
+
+@dataclass(frozen=True)
+class LiveValidationResult:
+    """Outcome of one live execution smoke-test run."""
+
+    classification: str
+    order_placed: bool
+    order_id: str | None
+    final_order: KalshiOrderSummary | None
+    poll_attempts_used: int
+    balance_fetched: bool
+    balance_payload: dict[str, object] | None
+    error_message: str | None
+
+
+@dataclass(frozen=True)
+class LiveValidationSnapshot:
+    """Inspectable snapshot for one live smoke-test invocation."""
+
+    requested_order: LiveValidationOrder
+    result: LiveValidationResult
 
 
 class SimulationExecutionEngine:
@@ -326,3 +376,282 @@ def _reference_timestamp(contract: ScannedContract) -> str | None:
     if contract.market_as_of:
         return contract.market_as_of
     return contract.bias_as_of
+
+
+class LiveExecutionSmokeTester:
+    """Submit one tiny live IOC order and inspect the resulting state."""
+
+    def __init__(
+        self,
+        *,
+        client: KalshiClient,
+        logger: StructuredLogger,
+        replay_engine: ReplayEngine,
+        order: LiveValidationOrder,
+        poll_attempts: int,
+        poll_interval_seconds: float,
+        sleep_fn=time.sleep,
+    ) -> None:
+        if poll_attempts <= 0:
+            raise LiveExecutionSmokeError("poll_attempts must be greater than zero.")
+        if poll_interval_seconds <= 0:
+            raise LiveExecutionSmokeError("poll_interval_seconds must be greater than zero.")
+        self._client = client
+        self._logger = logger
+        self._replay_engine = replay_engine
+        self._order = order
+        self._poll_attempts = poll_attempts
+        self._poll_interval_seconds = poll_interval_seconds
+        self._sleep_fn = sleep_fn
+
+    @classmethod
+    def from_settings(cls, settings: KalshiSettings) -> "LiveExecutionSmokeTester":
+        if not settings.live_validation_enabled:
+            raise LiveExecutionSmokeError("LIVE_VALIDATION_ENABLED must be true.")
+        if settings.env != "prod" or settings.live_validation_env != "prod":
+            raise LiveExecutionSmokeError(
+                "KALSHI_ENV and LIVE_VALIDATION_ENV must both be 'prod'."
+            )
+        if settings.live_validation_ticker is None:
+            raise LiveExecutionSmokeError("LIVE_VALIDATION_TICKER is required.")
+        if settings.live_validation_action is None:
+            raise LiveExecutionSmokeError("LIVE_VALIDATION_ACTION is required.")
+        if settings.live_validation_side is None:
+            raise LiveExecutionSmokeError("LIVE_VALIDATION_SIDE is required.")
+        if settings.live_validation_price_dollars is None:
+            raise LiveExecutionSmokeError("LIVE_VALIDATION_PRICE_DOLLARS is required.")
+
+        client_order_id = _build_live_client_order_id(
+            settings.live_validation_client_order_id_prefix
+        )
+        order = LiveValidationOrder(
+            ticker=settings.live_validation_ticker,
+            action=settings.live_validation_action,
+            side=settings.live_validation_side,
+            count=settings.live_validation_count,
+            price_dollars=settings.live_validation_price_dollars,
+            time_in_force=settings.live_validation_time_in_force,
+            client_order_id=client_order_id,
+        )
+        return cls(
+            client=KalshiClient.from_settings(settings),
+            logger=StructuredLogger(
+                log_directory=settings.log_directory,
+                enabled=settings.log_jsonl_enabled,
+            ),
+            replay_engine=ReplayEngine(
+                replay_directory=settings.replay_directory,
+                enabled=settings.replay_write_enabled,
+            ),
+            order=order,
+            poll_attempts=settings.live_validation_poll_attempts,
+            poll_interval_seconds=settings.live_validation_poll_interval_seconds,
+        )
+
+    def run(self) -> LiveValidationSnapshot:
+        self._log_and_record(
+            event_type="validation_start",
+            record_type="validation_start",
+            identifier=self._order.ticker,
+            payload=_requested_order_payload(self._order),
+        )
+
+        final_order: KalshiOrderSummary | None = None
+        order_placed = False
+        poll_attempts_used = 0
+        error_message: str | None = None
+        classification = "unknown_final_state"
+
+        try:
+            created_order = self._client.create_order(
+                KalshiOrderRequest(
+                    ticker=self._order.ticker,
+                    action=self._order.action,
+                    side=self._order.side,
+                    count=self._order.count,
+                    price_dollars=self._order.price_dollars,
+                    time_in_force=self._order.time_in_force,
+                    client_order_id=self._order.client_order_id,
+                )
+            )
+            order_placed = True
+            final_order = created_order
+            self._log_and_record(
+                event_type="order_submitted",
+                record_type="order_submitted",
+                identifier=created_order.order_id,
+                payload=_order_summary_payload(created_order),
+            )
+            final_order, poll_attempts_used = self._poll_order(created_order.order_id)
+            classification = _classify_order_result(final_order)
+        except KalshiClientError as exc:
+            classification = "rejected"
+            error_message = str(exc)
+            self._log_and_record(
+                event_type="order_submit_failed",
+                record_type="order_submit_failed",
+                identifier=self._order.client_order_id,
+                payload={"message": error_message},
+            )
+
+        balance_payload, balance_error = self._fetch_balance()
+        if balance_error is not None and error_message is None:
+            error_message = balance_error
+
+        result = LiveValidationResult(
+            classification=classification,
+            order_placed=order_placed,
+            order_id=final_order.order_id if final_order is not None else None,
+            final_order=final_order,
+            poll_attempts_used=poll_attempts_used,
+            balance_fetched=balance_payload is not None,
+            balance_payload=balance_payload,
+            error_message=error_message,
+        )
+        self._log_and_record(
+            event_type="validation_completed",
+            record_type="validation_completed",
+            identifier=result.order_id or self._order.client_order_id,
+            payload={
+                "classification": result.classification,
+                "order_placed": result.order_placed,
+                "poll_attempts_used": result.poll_attempts_used,
+                "balance_fetched": result.balance_fetched,
+                "error_message": result.error_message,
+            },
+        )
+        return LiveValidationSnapshot(
+            requested_order=self._order,
+            result=result,
+        )
+
+    def _poll_order(self, order_id: str) -> tuple[KalshiOrderSummary, int]:
+        last_order = self._client.get_order(order_id)
+        attempts_used = 1
+        self._log_and_record(
+            event_type="order_polled",
+            record_type="order_polled",
+            identifier=order_id,
+            payload={"attempt": attempts_used, "status": last_order.status},
+        )
+        if _is_terminal_order(last_order):
+            return last_order, attempts_used
+
+        while attempts_used < self._poll_attempts:
+            self._sleep_fn(self._poll_interval_seconds)
+            attempts_used += 1
+            try:
+                last_order = self._client.get_order(order_id)
+            except KalshiClientError as exc:
+                self._log_and_record(
+                    event_type="order_poll_failed",
+                    record_type="order_poll_failed",
+                    identifier=order_id,
+                    payload={"attempt": attempts_used, "message": str(exc)},
+                )
+                break
+            self._log_and_record(
+                event_type="order_polled",
+                record_type="order_polled",
+                identifier=order_id,
+                payload={"attempt": attempts_used, "status": last_order.status},
+            )
+            if _is_terminal_order(last_order):
+                break
+        return last_order, attempts_used
+
+    def _fetch_balance(self) -> tuple[dict[str, object] | None, str | None]:
+        try:
+            payload = self._client.get_balance()
+        except KalshiClientError as exc:
+            self._log_and_record(
+                event_type="balance_fetch_failed",
+                record_type="balance_fetch_failed",
+                identifier=self._order.client_order_id,
+                payload={"message": str(exc)},
+            )
+            return None, str(exc)
+        self._log_and_record(
+            event_type="balance_fetched",
+            record_type="balance_fetched",
+            identifier=self._order.client_order_id,
+            payload={"keys": tuple(sorted(payload.keys()))},
+            replay_payload=payload,
+        )
+        return payload, None
+
+    def _log_and_record(
+        self,
+        *,
+        event_type: str,
+        record_type: str,
+        identifier: str | None,
+        payload: dict[str, object],
+        replay_payload: dict[str, object] | None = None,
+    ) -> None:
+        self._logger.log_event(
+            category="live_validation",
+            event_type=event_type,
+            source="kalshi_live_validation",
+            identifier=identifier,
+            payload=payload,
+        )
+        self._replay_engine.record_message(
+            source="kalshi_live_validation",
+            message_type=record_type,
+            identifier=identifier,
+            payload=replay_payload if replay_payload is not None else payload,
+        )
+
+
+def _build_live_client_order_id(prefix: str) -> str:
+    normalized_prefix = prefix.strip()
+    if not normalized_prefix:
+        raise LiveExecutionSmokeError("LIVE_VALIDATION_CLIENT_ORDER_ID_PREFIX is required.")
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+    return f"{normalized_prefix}-{timestamp}-{uuid.uuid4().hex[:8]}"
+
+
+def _requested_order_payload(order: LiveValidationOrder) -> dict[str, object]:
+    return {
+        "ticker": order.ticker,
+        "action": order.action,
+        "side": order.side,
+        "count": order.count,
+        "price_dollars": order.price_dollars,
+        "time_in_force": order.time_in_force,
+        "client_order_id": order.client_order_id,
+    }
+
+
+def _order_summary_payload(order: KalshiOrderSummary) -> dict[str, object]:
+    return {
+        "order_id": order.order_id,
+        "client_order_id": order.client_order_id,
+        "ticker": order.ticker,
+        "side": order.side,
+        "action": order.action,
+        "status": order.status,
+        "fill_count_fp": order.fill_count_fp,
+        "remaining_count_fp": order.remaining_count_fp,
+        "initial_count_fp": order.initial_count_fp,
+        "last_update_time": order.last_update_time,
+    }
+
+
+def _classify_order_result(order: KalshiOrderSummary) -> str:
+    if order.status == "rejected":
+        return "rejected"
+    fill_count = order.fill_count_fp or Decimal("0")
+    initial_count = order.initial_count_fp or Decimal("0")
+    if fill_count > 0 and initial_count > 0 and fill_count >= initial_count:
+        return "filled"
+    if fill_count > 0:
+        return "partially_filled"
+    if order.status in {"canceled", "cancelled", "expired"}:
+        return "canceled_or_expired"
+    return "unknown_final_state"
+
+
+def _is_terminal_order(order: KalshiOrderSummary) -> bool:
+    return _classify_order_result(order) != "unknown_final_state"
