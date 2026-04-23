@@ -33,6 +33,9 @@ DEFAULT_BIAS_RECENT_WINDOW_SECONDS = 60
 DEFAULT_BIAS_MIN_SAMPLES = 20
 DEFAULT_BIAS_STALE_DATA_SECONDS = 15
 DEFAULT_BIAS_CHOP_THRESHOLD_BPS = 10
+DEFAULT_SIMULATION_ENABLED = True
+DEFAULT_SIMULATION_MAX_NEW_POSITIONS_PER_EVALUATION = 1
+DEFAULT_SIMULATION_POSITION_ID_PREFIX = "sim"
 
 
 class SettingsError(ValueError):
@@ -77,6 +80,9 @@ class KalshiSettings:
     bias_stale_data_seconds: int
     bias_chop_threshold_bps: int
     contract_scanner_product_markets: dict[str, tuple[str, ...]]
+    simulation_enabled: bool
+    simulation_max_new_positions_per_evaluation: int
+    simulation_position_id_prefix: str
 
 
 def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
@@ -164,6 +170,10 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         )
     contract_scanner_product_markets = _parse_product_markets_json(
         values.get("CONTRACT_SCANNER_PRODUCT_MARKETS_JSON")
+    )
+    simulation_position_id_prefix = (
+        _optional(values, "SIMULATION_POSITION_ID_PREFIX")
+        or DEFAULT_SIMULATION_POSITION_ID_PREFIX
     )
 
     return KalshiSettings(
@@ -253,6 +263,17 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
             "BIAS_CHOP_THRESHOLD_BPS",
         ),
         contract_scanner_product_markets=contract_scanner_product_markets,
+        simulation_enabled=_parse_bool(
+            values.get("SIMULATION_ENABLED"),
+            DEFAULT_SIMULATION_ENABLED,
+            "SIMULATION_ENABLED",
+        ),
+        simulation_max_new_positions_per_evaluation=_parse_positive_int(
+            values.get("SIMULATION_MAX_NEW_POSITIONS_PER_EVALUATION"),
+            DEFAULT_SIMULATION_MAX_NEW_POSITIONS_PER_EVALUATION,
+            "SIMULATION_MAX_NEW_POSITIONS_PER_EVALUATION",
+        ),
+        simulation_position_id_prefix=simulation_position_id_prefix,
     )
 
 
@@ -330,6 +351,9 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "BIAS_STALE_DATA_SECONDS",
         "BIAS_CHOP_THRESHOLD_BPS",
         "CONTRACT_SCANNER_PRODUCT_MARKETS_JSON",
+        "SIMULATION_ENABLED",
+        "SIMULATION_MAX_NEW_POSITIONS_PER_EVALUATION",
+        "SIMULATION_POSITION_ID_PREFIX",
     ):
         if key in os.environ:
             values[key] = _clean_env_value(os.environ[key])
