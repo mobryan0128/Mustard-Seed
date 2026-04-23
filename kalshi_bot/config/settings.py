@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,6 +76,7 @@ class KalshiSettings:
     bias_min_samples: int
     bias_stale_data_seconds: int
     bias_chop_threshold_bps: int
+    contract_scanner_product_markets: dict[str, tuple[str, ...]]
 
 
 def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
@@ -160,6 +162,9 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
             "BIAS_RECENT_WINDOW_SECONDS must be less than or equal to "
             "BIAS_LOOKBACK_SECONDS."
         )
+    contract_scanner_product_markets = _parse_product_markets_json(
+        values.get("CONTRACT_SCANNER_PRODUCT_MARKETS_JSON")
+    )
 
     return KalshiSettings(
         env=kalshi_env,
@@ -247,6 +252,7 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
             DEFAULT_BIAS_CHOP_THRESHOLD_BPS,
             "BIAS_CHOP_THRESHOLD_BPS",
         ),
+        contract_scanner_product_markets=contract_scanner_product_markets,
     )
 
 
@@ -323,6 +329,7 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "BIAS_MIN_SAMPLES",
         "BIAS_STALE_DATA_SECONDS",
         "BIAS_CHOP_THRESHOLD_BPS",
+        "CONTRACT_SCANNER_PRODUCT_MARKETS_JSON",
     ):
         if key in os.environ:
             values[key] = _clean_env_value(os.environ[key])
@@ -417,3 +424,35 @@ def _parse_path(value: str | None, default: Path) -> Path:
     if value is None or not value.strip():
         return default
     return Path(value).expanduser()
+
+
+def _parse_product_markets_json(value: str | None) -> dict[str, tuple[str, ...]]:
+    if value is None or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise SettingsError("CONTRACT_SCANNER_PRODUCT_MARKETS_JSON must be valid JSON.") from exc
+    if not isinstance(parsed, dict):
+        raise SettingsError("CONTRACT_SCANNER_PRODUCT_MARKETS_JSON must be a JSON object.")
+
+    normalized: dict[str, tuple[str, ...]] = {}
+    for raw_product_id, raw_tickers in parsed.items():
+        product_id = str(raw_product_id).strip()
+        if not product_id:
+            raise SettingsError(
+                "CONTRACT_SCANNER_PRODUCT_MARKETS_JSON product keys must be non-empty strings."
+            )
+        if not isinstance(raw_tickers, list):
+            raise SettingsError(
+                "CONTRACT_SCANNER_PRODUCT_MARKETS_JSON values must be arrays of market tickers."
+            )
+        tickers = tuple(
+            dict.fromkeys(str(raw_ticker).strip() for raw_ticker in raw_tickers if str(raw_ticker).strip())
+        )
+        if not tickers:
+            raise SettingsError(
+                "CONTRACT_SCANNER_PRODUCT_MARKETS_JSON values must contain non-empty market tickers."
+            )
+        normalized[product_id] = tickers
+    return normalized
