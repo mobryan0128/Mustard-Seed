@@ -1,0 +1,26 @@
+# Template only.
+# Do not enable this unit for production trading yet.
+# This repository does not currently expose a single long-running bot entrypoint.
+
+[Unit]
+Description=Kalshi Bot Future Service Template
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kalshi
+Group=kalshi
+WorkingDirectory=/opt/kalshi-bot
+EnvironmentFile=/opt/kalshi-bot/.env
+
+# Replace ExecStart only after a unified long-running entrypoint exists.
+ExecStart=/bin/bash -lc 'echo "Define a unified long-running entrypoint before enabling this service."; exit 1'
+
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
