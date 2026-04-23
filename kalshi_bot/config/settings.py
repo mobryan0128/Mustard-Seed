@@ -24,6 +24,9 @@ DEFAULT_CRYPTO_FEED_RECEIVE_TIMEOUT_SECONDS = 30.0
 DEFAULT_CRYPTO_FEED_MAX_RECONNECT_ATTEMPTS = 3
 DEFAULT_CRYPTO_FEED_RECONNECT_INITIAL_DELAY_SECONDS = 1.0
 DEFAULT_CRYPTO_FEED_RECONNECT_MAX_DELAY_SECONDS = 30.0
+DEFAULT_LOG_DIRECTORY = Path("logs")
+DEFAULT_REPLAY_DIRECTORY = Path("replay")
+DEFAULT_TIME_SYNC_MAX_DRIFT_MS = 1500
 
 
 class SettingsError(ValueError):
@@ -55,6 +58,12 @@ class KalshiSettings:
     crypto_feed_max_reconnect_attempts: int
     crypto_feed_reconnect_initial_delay_seconds: float
     crypto_feed_reconnect_max_delay_seconds: float
+    log_directory: Path
+    log_jsonl_enabled: bool
+    replay_directory: Path
+    replay_write_enabled: bool
+    time_sync_max_drift_ms: int
+    time_sync_log_results: bool
 
 
 def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
@@ -122,6 +131,8 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
     crypto_feed_ws_url = (
         values.get("CRYPTO_FEED_WS_URL") or DEFAULT_CRYPTO_FEED_WS_URL
     ).rstrip("/")
+    log_directory = _parse_path(values.get("LOG_DIRECTORY"), DEFAULT_LOG_DIRECTORY)
+    replay_directory = _parse_path(values.get("REPLAY_DIRECTORY"), DEFAULT_REPLAY_DIRECTORY)
 
     return KalshiSettings(
         env=kalshi_env,
@@ -169,6 +180,28 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         ),
         crypto_feed_reconnect_initial_delay_seconds=crypto_feed_initial_delay_seconds,
         crypto_feed_reconnect_max_delay_seconds=crypto_feed_max_delay_seconds,
+        log_directory=log_directory,
+        log_jsonl_enabled=_parse_bool(
+            values.get("LOG_JSONL_ENABLED"),
+            True,
+            "LOG_JSONL_ENABLED",
+        ),
+        replay_directory=replay_directory,
+        replay_write_enabled=_parse_bool(
+            values.get("REPLAY_WRITE_ENABLED"),
+            True,
+            "REPLAY_WRITE_ENABLED",
+        ),
+        time_sync_max_drift_ms=_parse_non_negative_int(
+            values.get("TIME_SYNC_MAX_DRIFT_MS"),
+            DEFAULT_TIME_SYNC_MAX_DRIFT_MS,
+            "TIME_SYNC_MAX_DRIFT_MS",
+        ),
+        time_sync_log_results=_parse_bool(
+            values.get("TIME_SYNC_LOG_RESULTS"),
+            True,
+            "TIME_SYNC_LOG_RESULTS",
+        ),
     )
 
 
@@ -233,6 +266,12 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "CRYPTO_FEED_MAX_RECONNECT_ATTEMPTS",
         "CRYPTO_FEED_RECONNECT_INITIAL_DELAY_SECONDS",
         "CRYPTO_FEED_RECONNECT_MAX_DELAY_SECONDS",
+        "LOG_DIRECTORY",
+        "LOG_JSONL_ENABLED",
+        "REPLAY_DIRECTORY",
+        "REPLAY_WRITE_ENABLED",
+        "TIME_SYNC_MAX_DRIFT_MS",
+        "TIME_SYNC_LOG_RESULTS",
     ):
         if key in os.environ:
             values[key] = _clean_env_value(os.environ[key])
@@ -310,3 +349,20 @@ def _parse_csv(value: str | None) -> tuple[str, ...]:
         return ()
     items = tuple(item.strip() for item in value.split(",") if item.strip())
     return items
+
+
+def _parse_bool(value: str | None, default: bool, key: str) -> bool:
+    if value is None or not value.strip():
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise SettingsError(f"{key} must be a boolean-like value.")
+
+
+def _parse_path(value: str | None, default: Path) -> Path:
+    if value is None or not value.strip():
+        return default
+    return Path(value).expanduser()
