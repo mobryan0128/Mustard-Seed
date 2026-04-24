@@ -23,6 +23,9 @@ Do not continue if:
 - dependencies are missing
 - `.env` is incomplete
 - private key path is wrong
+- runner market discovery settings are invalid when overridden:
+  - `KALSHI_AUTO_MARKET_DISCOVERY_ENABLED=true`
+  - `KALSHI_MARKET_DISCOVERY_REFRESH_CYCLES` is a bounded positive integer
 - working directories are not writable
 
 ## 3. Validation Checklist
@@ -63,6 +66,9 @@ Run readiness checks manually inside tmux. Keep one pane tailing logs if desired
 ```bash
 python scripts/run_kalshi_bot.py --env-file .env --max-cycles 3
 ```
+
+Confirm bounded runner output shows active discovered market tickers and that
+`last_discovery_cycle` stays stable between refresh intervals.
 
 For continuous supervised simulation:
 

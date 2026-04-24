@@ -59,6 +59,13 @@ def main() -> int:
             f"markets={result.status.tracked_market_count} "
             f"products={result.status.tracked_crypto_product_count} "
             f"ranked={result.status.ranked_contract_count} "
+            f"active_tickers={_format_active_tickers(result.status.active_market_tickers)} "
+            f"discovery_enabled={result.status.market_discovery_enabled} "
+            f"last_discovery_cycle={_none_text(result.status.last_market_discovery_cycle)} "
+            f"ws_data={result.status.kalshi_market_data_message_count} "
+            f"ws_subs={result.status.kalshi_subscription_message_count} "
+            f"ws_requested={_format_active_tickers(result.status.kalshi_subscribed_market_tickers)} "
+            f"ws_timed_out={result.status.kalshi_feed_timed_out} "
             f"skipped={result.status.skipped_contract_count} "
             f"skip_reasons={_format_skip_reasons(result.status.top_skip_reasons)} "
             f"bias={_format_bias_diagnostics(result.status.bias_diagnostics)} "
@@ -83,6 +90,12 @@ def _format_skip_reasons(skip_reasons) -> str:  # noqa: ANN001
     if not skip_reasons:
         return "none"
     return ",".join(f"{item.reason}:{item.count}" for item in skip_reasons)
+
+
+def _format_active_tickers(active_tickers) -> str:  # noqa: ANN001
+    if not active_tickers:
+        return "none"
+    return ",".join(str(ticker) for ticker in active_tickers)
 
 
 def _format_bias_diagnostics(bias_diagnostics) -> str:  # noqa: ANN001

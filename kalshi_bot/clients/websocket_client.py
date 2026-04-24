@@ -95,12 +95,15 @@ class UnsupportedMessage:
 @dataclass(frozen=True)
 class WebSocketRunResult:
     messages_received: int = 0
+    market_data_messages: int = 0
     ticker_messages: int = 0
     orderbook_snapshots: int = 0
     orderbook_deltas: int = 0
     subscription_messages: int = 0
     unsupported_messages: int = 0
     reconnects: int = 0
+    timed_out: bool = False
+    subscribed_market_tickers: tuple[str, ...] = ()
 
 
 ParsedMessage = Union[
@@ -230,10 +233,13 @@ class KalshiWebSocketClient:
         delay = self._reconnect_initial_delay_seconds
         result = WebSocketRunResult()
 
-        while result.messages_received < limit:
+        subscribed_tickers = tuple(dict.fromkeys(market_tickers))
+        result = _with_subscribed_market_tickers(result, subscribed_tickers)
+
+        while result.market_data_messages < limit:
             try:
                 await self.connect()
-                await self.subscribe(market_tickers=market_tickers, channels=channels)
+                await self.subscribe(market_tickers=subscribed_tickers, channels=channels)
                 result = await self._receive_until_limit(limit=limit, result=result)
                 break
             except (ConnectionClosed, OSError, WebSocketException) as exc:
@@ -259,13 +265,15 @@ class KalshiWebSocketClient:
         if self._connection is None:
             raise KalshiWebSocketError("WebSocket is not connected.")
 
-        while result.messages_received < limit:
+        while result.market_data_messages < limit:
             try:
                 raw_message = await asyncio.wait_for(
                     self._connection.recv(),
                     timeout=self._receive_timeout_seconds,
                 )
             except asyncio.TimeoutError as exc:
+                if result.messages_received > 0:
+                    return _increment_result(result, timed_out=True)
                 raise KalshiWebSocketError("Timed out waiting for WebSocket data.") from exc
 
             parsed = parse_ws_message(raw_message)
@@ -526,9 +534,14 @@ def _optional_int_or_str(data: dict[str, Any], key: str) -> int | str | None:
 
 
 def _count_message(result: WebSocketRunResult, message: ParsedMessage) -> WebSocketRunResult:
+    is_market_data = isinstance(
+        message,
+        (TickerMessage, OrderbookSnapshotMessage, OrderbookDeltaMessage),
+    )
     return _increment_result(
         result,
         messages_received=1,
+        market_data_messages=1 if is_market_data else 0,
         ticker_messages=1 if isinstance(message, TickerMessage) else 0,
         orderbook_snapshots=1 if isinstance(message, OrderbookSnapshotMessage) else 0,
         orderbook_deltas=1 if isinstance(message, OrderbookDeltaMessage) else 0,
@@ -541,19 +554,42 @@ def _increment_result(
     result: WebSocketRunResult,
     *,
     messages_received: int = 0,
+    market_data_messages: int = 0,
     ticker_messages: int = 0,
     orderbook_snapshots: int = 0,
     orderbook_deltas: int = 0,
     subscription_messages: int = 0,
     unsupported_messages: int = 0,
     reconnects: int = 0,
+    timed_out: bool = False,
 ) -> WebSocketRunResult:
     return WebSocketRunResult(
         messages_received=result.messages_received + messages_received,
+        market_data_messages=result.market_data_messages + market_data_messages,
         ticker_messages=result.ticker_messages + ticker_messages,
         orderbook_snapshots=result.orderbook_snapshots + orderbook_snapshots,
         orderbook_deltas=result.orderbook_deltas + orderbook_deltas,
         subscription_messages=result.subscription_messages + subscription_messages,
         unsupported_messages=result.unsupported_messages + unsupported_messages,
         reconnects=result.reconnects + reconnects,
+        timed_out=result.timed_out or timed_out,
+        subscribed_market_tickers=result.subscribed_market_tickers,
+    )
+
+
+def _with_subscribed_market_tickers(
+    result: WebSocketRunResult,
+    subscribed_market_tickers: tuple[str, ...],
+) -> WebSocketRunResult:
+    return WebSocketRunResult(
+        messages_received=result.messages_received,
+        market_data_messages=result.market_data_messages,
+        ticker_messages=result.ticker_messages,
+        orderbook_snapshots=result.orderbook_snapshots,
+        orderbook_deltas=result.orderbook_deltas,
+        subscription_messages=result.subscription_messages,
+        unsupported_messages=result.unsupported_messages,
+        reconnects=result.reconnects,
+        timed_out=result.timed_out,
+        subscribed_market_tickers=subscribed_market_tickers,
     )

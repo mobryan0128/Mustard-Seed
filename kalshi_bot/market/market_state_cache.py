@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from decimal import Decimal, InvalidOperation
 
 
@@ -114,6 +114,7 @@ class MarketStateCache:
             seq=seq,
         )
         self._track_sequence(sid, seq)
+        self._normalize_orderbook_ticker(market_ticker)
 
     def apply_orderbook_delta(
         self,
@@ -153,6 +154,7 @@ class MarketStateCache:
             book_side[price] = next_quantity
 
         self._track_sequence(sid, seq)
+        self._normalize_orderbook_ticker(market_ticker)
 
     def ticker(self, market_ticker: str) -> TickerState | None:
         return self._tickers.get(market_ticker)
@@ -162,6 +164,15 @@ class MarketStateCache:
 
     def market_tickers(self) -> tuple[str, ...]:
         return tuple(sorted(set(self._tickers) | set(self._orderbooks)))
+
+    def retain_markets(self, market_tickers: tuple[str, ...]) -> None:
+        retained = set(market_tickers)
+        for market_ticker in tuple(self._tickers):
+            if market_ticker not in retained:
+                self._tickers.pop(market_ticker, None)
+        for market_ticker in tuple(self._orderbooks):
+            if market_ticker not in retained:
+                self._orderbooks.pop(market_ticker, None)
 
     def snapshot(self) -> MarketStateSnapshot:
         return MarketStateSnapshot(
@@ -184,6 +195,42 @@ class MarketStateCache:
         if sid is not None and seq is not None:
             self._last_sequence_by_sid[sid] = seq
 
+    def _normalize_orderbook_ticker(self, market_ticker: str) -> None:
+        orderbook = self._orderbooks[market_ticker]
+        yes_bid = _best_bid(orderbook.yes)
+        no_bid = _best_bid(orderbook.no)
+        yes_ask_dollars = None
+        yes_ask_size_fp = None
+        if no_bid is not None:
+            no_bid_dollars, no_bid_size_fp = no_bid
+            yes_ask_dollars = Decimal("1") - no_bid_dollars
+            yes_ask_size_fp = no_bid_size_fp
+
+        existing = self._tickers.get(market_ticker)
+        if existing is None:
+            self._tickers[market_ticker] = TickerState(
+                market_ticker=market_ticker,
+                market_id=orderbook.market_id,
+                yes_bid_dollars=yes_bid[0] if yes_bid is not None else None,
+                yes_ask_dollars=yes_ask_dollars,
+                yes_bid_size_fp=yes_bid[1] if yes_bid is not None else None,
+                yes_ask_size_fp=yes_ask_size_fp,
+                sid=orderbook.sid,
+                seq=orderbook.seq,
+            )
+            return
+
+        self._tickers[market_ticker] = replace(
+            existing,
+            market_id=orderbook.market_id or existing.market_id,
+            yes_bid_dollars=yes_bid[0] if yes_bid is not None else None,
+            yes_ask_dollars=yes_ask_dollars,
+            yes_bid_size_fp=yes_bid[1] if yes_bid is not None else None,
+            yes_ask_size_fp=yes_ask_size_fp,
+            sid=orderbook.sid,
+            seq=orderbook.seq,
+        )
+
     @staticmethod
     def _require_market_ticker(market_ticker: str) -> None:
         if not market_ticker.strip():
@@ -200,6 +247,12 @@ def _levels_to_book(levels: tuple[tuple[str, str], ...]) -> dict[Decimal, Decima
         if quantity > 0:
             book[price] = quantity
     return book
+
+
+def _best_bid(book: dict[Decimal, Decimal]) -> tuple[Decimal, Decimal] | None:
+    if not book:
+        return None
+    return max(book.items(), key=lambda level: level[0])
 
 
 def _optional_decimal(value: int | str | None) -> Decimal | None:

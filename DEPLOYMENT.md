@@ -11,6 +11,7 @@ Live trading must remain explicitly blocked by default.
 - External crypto feed ingestion
 - Structured logs and replay output
 - Bias, scanner, simulation, exit, and live smoke-test surfaces
+- Runner-managed active BTC/ETH crypto market discovery and rollover
 - Phase 10 live guardrails:
   - `LIVE_TRADING_ENABLED`
   - `LIVE_KILL_SWITCH_ACTIVE`
@@ -67,7 +68,10 @@ Required checks:
 - `KALSHI_ENV=prod`
 - valid `KALSHI_API_KEY_ID`
 - valid `KALSHI_PRIVATE_KEY_PATH` or `KALSHI_PRIVATE_KEY_PEM`
-- explicit market ticker values for validation scripts
+- explicit market ticker values for standalone validation scripts, if used
+- `KALSHI_AUTO_MARKET_DISCOVERY_ENABLED=true` for runner-managed active BTC/ETH crypto markets
+- optional `KALSHI_CRYPTO_MARKET_SERIES_JSON` override for BTC/ETH 15m/30m series candidates
+- `KALSHI_MARKET_DISCOVERY_REFRESH_CYCLES` set high enough to avoid excessive REST discovery calls
 - explicit live smoke target only when intentionally testing
 
 Safety defaults that must stay blocked unless intentionally testing:
@@ -143,7 +147,7 @@ For continuous supervised simulation:
 python scripts/run_kalshi_bot.py --env-file .env
 ```
 
-Do not treat this as autonomous live trading. The runner remains simulation-only and does not submit live orders automatically.
+The runner discovers active configured crypto markets, updates its WebSocket subscriptions and scanner mapping, and drops stale market state on rollover. Do not treat this as autonomous live trading. The runner remains simulation-only and does not submit live orders automatically.
 
 ## Git Status Expectation
 For this documentation task, a clean status means:

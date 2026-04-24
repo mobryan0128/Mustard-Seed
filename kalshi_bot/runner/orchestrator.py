@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from kalshi_bot.clients.crypto_feed_client import CryptoFeedClient, CryptoFeedClientError
+from kalshi_bot.clients.kalshi_client import KalshiClient, KalshiClientError
 from kalshi_bot.clients.websocket_client import KalshiWebSocketClient, KalshiWebSocketError
 from kalshi_bot.config.settings import KalshiSettings
 from kalshi_bot.contracts.contract_scanner import (
@@ -23,6 +24,11 @@ from kalshi_bot.execution.execution_engine import (
     SimulationSnapshot,
 )
 from kalshi_bot.forecast.bias_engine import BiasEngine, BiasEngineError, BiasSnapshot
+from kalshi_bot.market.crypto_market_discovery import (
+    CryptoMarketDiscovery,
+    CryptoMarketDiscoveryError,
+    CryptoMarketDiscoverySnapshot,
+)
 from kalshi_bot.market.market_state_cache import MarketStateCache, MarketStateSnapshot
 from kalshi_bot.observability.logger import StructuredLogger
 from kalshi_bot.observability.replay_engine import ReplayEngine
@@ -77,6 +83,13 @@ class RunnerStatus:
     tracked_market_count: int
     tracked_crypto_product_count: int
     ranked_contract_count: int
+    active_market_tickers: tuple[str, ...]
+    market_discovery_enabled: bool
+    last_market_discovery_cycle: int | None
+    kalshi_market_data_message_count: int
+    kalshi_subscription_message_count: int
+    kalshi_subscribed_market_tickers: tuple[str, ...]
+    kalshi_feed_timed_out: bool
     skipped_contract_count: int
     top_skip_reasons: tuple[SkipReasonDiagnostic, ...]
     bias_diagnostics: tuple[BiasDiagnostic, ...]
@@ -108,7 +121,8 @@ class KalshiBotRunner:
         kalshi_ws_client: Any,
         crypto_feed_client: Any,
         bias_engine: BiasEngine,
-        contract_scanner: ContractScanner,
+        contract_scanner: ContractScanner | None,
+        market_discovery: CryptoMarketDiscovery | None,
         simulation_engine: SimulationExecutionEngine,
         logger: StructuredLogger,
         replay_engine: ReplayEngine,
@@ -122,6 +136,7 @@ class KalshiBotRunner:
         self._crypto_feed_client = crypto_feed_client
         self._bias_engine = bias_engine
         self._contract_scanner = contract_scanner
+        self._market_discovery = market_discovery
         self._simulation_engine = simulation_engine
         self._logger = logger
         self._replay_engine = replay_engine
@@ -131,17 +146,25 @@ class KalshiBotRunner:
         self._last_successful_cycle_at: str | None = None
         self._last_error: str | None = None
         self._latest_result: RunnerCycleResult | None = None
-        self._market_tickers = tuple(
-            dict.fromkeys(
-                market_ticker
-                for tickers in settings.contract_scanner_product_markets.values()
-                for market_ticker in tickers
-            )
+        self._last_market_discovery_cycle: int | None = None
+        self._active_product_markets = (
+            {}
+            if settings.auto_market_discovery_enabled
+            else dict(settings.contract_scanner_product_markets)
         )
+        self._market_tickers = _flatten_product_markets(self._active_product_markets)
 
     @classmethod
     def from_settings(cls, settings: KalshiSettings) -> "KalshiBotRunner":
         market_state_cache = MarketStateCache()
+        logger = StructuredLogger(
+            log_directory=settings.log_directory,
+            enabled=settings.log_jsonl_enabled,
+        )
+        replay_engine = ReplayEngine(
+            replay_directory=settings.replay_directory,
+            enabled=settings.replay_write_enabled,
+        )
         try:
             kalshi_ws_client = KalshiWebSocketClient.from_settings(
                 settings,
@@ -149,13 +172,25 @@ class KalshiBotRunner:
             )
             crypto_feed_client = CryptoFeedClient.from_settings(settings)
             bias_engine = BiasEngine.from_settings(settings)
-            contract_scanner = ContractScanner.from_settings(settings)
+            if settings.auto_market_discovery_enabled:
+                kalshi_client = KalshiClient.from_settings(settings, logger=logger)
+                market_discovery = CryptoMarketDiscovery.from_settings(
+                    settings,
+                    kalshi_client,
+                    logger=logger,
+                )
+                contract_scanner = None
+            else:
+                market_discovery = None
+                contract_scanner = ContractScanner.from_settings(settings)
             simulation_engine = SimulationExecutionEngine.from_settings(settings)
         except (
             KalshiWebSocketError,
             CryptoFeedClientError,
+            KalshiClientError,
             BiasEngineError,
             ContractScannerError,
+            CryptoMarketDiscoveryError,
             SimulationExecutionError,
         ) as exc:
             raise RunnerError(str(exc)) from exc
@@ -167,15 +202,10 @@ class KalshiBotRunner:
             crypto_feed_client=crypto_feed_client,
             bias_engine=bias_engine,
             contract_scanner=contract_scanner,
+            market_discovery=market_discovery,
             simulation_engine=simulation_engine,
-            logger=StructuredLogger(
-                log_directory=settings.log_directory,
-                enabled=settings.log_jsonl_enabled,
-            ),
-            replay_engine=ReplayEngine(
-                replay_directory=settings.replay_directory,
-                enabled=settings.replay_write_enabled,
-            ),
+            logger=logger,
+            replay_engine=replay_engine,
         )
 
     def stop(self) -> None:
@@ -187,6 +217,10 @@ class KalshiBotRunner:
         return self._status(
             kalshi_feed_connected=False,
             crypto_feed_connected=False,
+            kalshi_market_data_message_count=0,
+            kalshi_subscription_message_count=0,
+            kalshi_subscribed_market_tickers=(),
+            kalshi_feed_timed_out=False,
             ranked_contract_count=0,
             contract_scan_snapshot=None,
             bias_snapshot=None,
@@ -224,11 +258,12 @@ class KalshiBotRunner:
         self._cycle_count += 1
         cycle_number = self._cycle_count
         self._log_cycle_event("cycle_start", {"cycle_number": cycle_number})
+        self._refresh_market_discovery_if_due(cycle_number)
 
         kalshi_result, crypto_result = asyncio.run(self._run_ingestion_cycle())
         bias_snapshot = self._bias_engine.ingest(self._crypto_feed_client.snapshot())
         market_snapshot = self._market_state_cache.snapshot()
-        contract_scan_snapshot = self._contract_scanner.scan(
+        contract_scan_snapshot = self._scan_contracts(
             bias_snapshot=bias_snapshot,
             market_snapshot=market_snapshot,
         )
@@ -237,8 +272,12 @@ class KalshiBotRunner:
         self._last_error = None
 
         status = self._status(
-            kalshi_feed_connected=kalshi_result.messages_received > 0,
+            kalshi_feed_connected=_market_data_message_count(kalshi_result) > 0,
             crypto_feed_connected=crypto_result.messages_received > 0,
+            kalshi_market_data_message_count=_market_data_message_count(kalshi_result),
+            kalshi_subscription_message_count=_subscription_message_count(kalshi_result),
+            kalshi_subscribed_market_tickers=_subscribed_market_tickers(kalshi_result),
+            kalshi_feed_timed_out=bool(getattr(kalshi_result, "timed_out", False)),
             ranked_contract_count=len(contract_scan_snapshot.ranked_contracts),
             contract_scan_snapshot=contract_scan_snapshot,
             bias_snapshot=bias_snapshot,
@@ -261,6 +300,15 @@ class KalshiBotRunner:
                     "tracked_market_count": status.tracked_market_count,
                     "tracked_crypto_product_count": status.tracked_crypto_product_count,
                     "ranked_contract_count": status.ranked_contract_count,
+                    "active_market_tickers": list(status.active_market_tickers),
+                    "market_discovery_enabled": status.market_discovery_enabled,
+                    "last_market_discovery_cycle": status.last_market_discovery_cycle,
+                    "kalshi_market_data_message_count": status.kalshi_market_data_message_count,
+                    "kalshi_subscription_message_count": status.kalshi_subscription_message_count,
+                    "kalshi_subscribed_market_tickers": list(
+                        status.kalshi_subscribed_market_tickers
+                    ),
+                    "kalshi_feed_timed_out": status.kalshi_feed_timed_out,
                     "skipped_contract_count": status.skipped_contract_count,
                     "top_skip_reasons": _skip_reason_payloads(status.top_skip_reasons),
                     "bias_diagnostics": _bias_diagnostic_payloads(status.bias_diagnostics),
@@ -277,6 +325,11 @@ class KalshiBotRunner:
         return result
 
     async def _run_ingestion_cycle(self):
+        if not self._market_tickers:
+            crypto_result = await self._crypto_feed_client.run(
+                message_limit=self._settings.crypto_feed_message_limit,
+            )
+            return _FeedRunResult(messages_received=0), crypto_result
         return await asyncio.gather(
             self._kalshi_ws_client.run(
                 market_tickers=self._market_tickers,
@@ -287,11 +340,81 @@ class KalshiBotRunner:
             ),
         )
 
+    def _refresh_market_discovery_if_due(self, cycle_number: int) -> None:
+        if self._market_discovery is None:
+            return
+        if (
+            self._last_market_discovery_cycle is not None
+            and cycle_number - self._last_market_discovery_cycle
+            < self._settings.market_discovery_refresh_cycles
+        ):
+            return
+
+        snapshot = self._market_discovery.discover()
+        self._last_market_discovery_cycle = cycle_number
+        self._apply_market_discovery(snapshot)
+
+    def _apply_market_discovery(self, snapshot: CryptoMarketDiscoverySnapshot) -> None:
+        previous_tickers = set(self._market_tickers)
+        next_product_markets = dict(snapshot.product_markets)
+        next_tickers = _flatten_product_markets(next_product_markets)
+        next_ticker_set = set(next_tickers)
+
+        self._active_product_markets = next_product_markets
+        self._market_tickers = next_tickers
+        self._contract_scanner = (
+            ContractScanner(product_markets=next_product_markets)
+            if next_product_markets
+            else None
+        )
+        self._market_state_cache.retain_markets(next_tickers)
+
+        payload = {
+            "cycle_number": self._cycle_count,
+            "added_market_tickers": sorted(next_ticker_set - previous_tickers),
+            "dropped_market_tickers": sorted(previous_tickers - next_ticker_set),
+            "active_product_markets": _product_markets_payload(next_product_markets),
+            "discovered_markets": tuple(
+                {
+                    "product_id": market.product_id,
+                    "series_ticker": market.series_ticker,
+                    "market_ticker": market.market_ticker,
+                    "open_time": market.open_time,
+                    "close_time": market.close_time,
+                    "expiration_time": market.expiration_time,
+                }
+                for market in snapshot.discovered_markets
+            ),
+        }
+        self._log_cycle_event("market_discovery_refreshed", payload)
+        self._replay_engine.record_snapshot(
+            source="runner",
+            snapshot_name="market_discovery",
+            snapshot=payload,
+        )
+
+    def _scan_contracts(
+        self,
+        *,
+        bias_snapshot: BiasSnapshot,
+        market_snapshot: MarketStateSnapshot,
+    ) -> ContractScanSnapshot:
+        if self._contract_scanner is None:
+            return ContractScanSnapshot(ranked_contracts=(), skipped_contracts=())
+        return self._contract_scanner.scan(
+            bias_snapshot=bias_snapshot,
+            market_snapshot=market_snapshot,
+        )
+
     def _status(
         self,
         *,
         kalshi_feed_connected: bool,
         crypto_feed_connected: bool,
+        kalshi_market_data_message_count: int,
+        kalshi_subscription_message_count: int,
+        kalshi_subscribed_market_tickers: tuple[str, ...],
+        kalshi_feed_timed_out: bool,
         ranked_contract_count: int,
         contract_scan_snapshot: ContractScanSnapshot | None,
         bias_snapshot: BiasSnapshot | None,
@@ -312,6 +435,13 @@ class KalshiBotRunner:
             tracked_market_count=len(market_snapshot.tickers),
             tracked_crypto_product_count=len(crypto_snapshot.products),
             ranked_contract_count=ranked_contract_count,
+            active_market_tickers=self._market_tickers,
+            market_discovery_enabled=self._market_discovery is not None,
+            last_market_discovery_cycle=self._last_market_discovery_cycle,
+            kalshi_market_data_message_count=kalshi_market_data_message_count,
+            kalshi_subscription_message_count=kalshi_subscription_message_count,
+            kalshi_subscribed_market_tickers=kalshi_subscribed_market_tickers,
+            kalshi_feed_timed_out=kalshi_feed_timed_out,
             skipped_contract_count=(
                 len(contract_scan_snapshot.skipped_contracts)
                 if contract_scan_snapshot is not None
@@ -320,7 +450,7 @@ class KalshiBotRunner:
             top_skip_reasons=_top_skip_reasons(contract_scan_snapshot),
             bias_diagnostics=_bias_diagnostics(bias_snapshot),
             mapped_market_diagnostics=_mapped_market_diagnostics(
-                product_markets=self._settings.contract_scanner_product_markets,
+                product_markets=self._active_product_markets,
                 market_snapshot=market_snapshot,
             ),
             open_position_count=len(simulation_snapshot.open_positions),
@@ -343,6 +473,19 @@ class KalshiBotRunner:
                 "tracked_market_count": result.status.tracked_market_count,
                 "tracked_crypto_product_count": result.status.tracked_crypto_product_count,
                 "ranked_contract_count": result.status.ranked_contract_count,
+                "active_market_tickers": list(result.status.active_market_tickers),
+                "market_discovery_enabled": result.status.market_discovery_enabled,
+                "last_market_discovery_cycle": result.status.last_market_discovery_cycle,
+                "kalshi_market_data_message_count": (
+                    result.status.kalshi_market_data_message_count
+                ),
+                "kalshi_subscription_message_count": (
+                    result.status.kalshi_subscription_message_count
+                ),
+                "kalshi_subscribed_market_tickers": list(
+                    result.status.kalshi_subscribed_market_tickers
+                ),
+                "kalshi_feed_timed_out": result.status.kalshi_feed_timed_out,
                 "skipped_contract_count": result.status.skipped_contract_count,
                 "top_skip_reasons": _skip_reason_payloads(result.status.top_skip_reasons),
                 "bias_diagnostics": _bias_diagnostic_payloads(result.status.bias_diagnostics),
@@ -383,6 +526,43 @@ class KalshiBotRunner:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+@dataclass(frozen=True)
+class _FeedRunResult:
+    messages_received: int
+    market_data_messages: int = 0
+    subscription_messages: int = 0
+    timed_out: bool = False
+    subscribed_market_tickers: tuple[str, ...] = ()
+
+
+def _flatten_product_markets(product_markets: dict[str, tuple[str, ...]]) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            market_ticker
+            for tickers in product_markets.values()
+            for market_ticker in tickers
+        )
+    )
+
+
+def _market_data_message_count(result: Any) -> int:
+    return int(getattr(result, "market_data_messages", result.messages_received))
+
+
+def _subscription_message_count(result: Any) -> int:
+    return int(getattr(result, "subscription_messages", 0))
+
+
+def _subscribed_market_tickers(result: Any) -> tuple[str, ...]:
+    return tuple(getattr(result, "subscribed_market_tickers", ()))
+
+
+def _product_markets_payload(
+    product_markets: dict[str, tuple[str, ...]],
+) -> dict[str, tuple[str, ...]]:
+    return {product_id: tuple(tickers) for product_id, tickers in product_markets.items()}
 
 
 def _top_skip_reasons(

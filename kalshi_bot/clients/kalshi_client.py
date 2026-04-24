@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from typing import Any
 from urllib.parse import urljoin, urlsplit
 
 import httpx
@@ -13,6 +14,7 @@ from kalshi_bot.config.settings import KalshiSettings
 
 
 BALANCE_PATH = "/portfolio/balance"
+MARKETS_PATH = "/markets"
 ORDERS_PATH = "/portfolio/orders"
 
 
@@ -69,19 +71,48 @@ class KalshiOrderSummary:
     last_update_time: str | None
 
 
+@dataclass(frozen=True)
+class KalshiMarketSummary:
+    """Minimal normalized market metadata used by runner discovery."""
+
+    ticker: str
+    event_ticker: str | None
+    status: str | None
+    open_time: str | None
+    close_time: str | None
+    expiration_time: str | None
+    latest_expiration_time: str | None
+    yes_bid_dollars: Decimal | None
+    yes_ask_dollars: Decimal | None
+
+
+@dataclass(frozen=True)
+class KalshiMarketPage:
+    """One paginated Kalshi market-list response."""
+
+    markets: tuple[KalshiMarketSummary, ...]
+    cursor: str | None
+
+
 class KalshiClient:
     def __init__(
         self,
         base_url: str,
         auth_manager: KalshiAuthManager,
         timeout_seconds: float,
+        logger: Any | None = None,
     ) -> None:
         self._base_url = base_url.rstrip("/") + "/"
         self._auth_manager = auth_manager
         self._timeout_seconds = timeout_seconds
+        self._logger = logger
 
     @classmethod
-    def from_settings(cls, settings: KalshiSettings) -> "KalshiClient":
+    def from_settings(
+        cls,
+        settings: KalshiSettings,
+        logger: Any | None = None,
+    ) -> "KalshiClient":
         try:
             if settings.private_key_pem is not None:
                 auth_manager = KalshiAuthManager.from_pem(
@@ -106,6 +137,7 @@ class KalshiClient:
             base_url=settings.api_base_url,
             auth_manager=auth_manager,
             timeout_seconds=settings.request_timeout_seconds,
+            logger=logger,
         )
 
     def get_balance(self) -> dict[str, object]:
@@ -114,6 +146,50 @@ class KalshiClient:
         if not isinstance(payload, dict):
             raise KalshiClientError("Kalshi balance response was not a JSON object.")
         return payload
+
+    def get_markets(
+        self,
+        *,
+        series_ticker: str,
+        status: str = "open",
+        limit: int = 1000,
+        cursor: str | None = None,
+        mve_filter: str = "exclude",
+    ) -> KalshiMarketPage:
+        if not series_ticker.strip():
+            raise KalshiClientError("series_ticker is required.")
+        if limit <= 0 or limit > 1000:
+            raise KalshiClientError("market discovery limit must be between 1 and 1000.")
+
+        normalized_series_ticker = series_ticker.strip()
+        query_params = {
+            "series_ticker": normalized_series_ticker,
+            "status": status,
+            "limit": str(limit),
+            "cursor": cursor or "",
+            "mve_filter": mve_filter,
+        }
+        response = self._get(
+            MARKETS_PATH,
+            query_params=query_params,
+        )
+        payload = _json_object(response, "Kalshi markets response")
+        markets_payload = payload.get("markets")
+        self._log_get_markets_response(
+            series_ticker=normalized_series_ticker,
+            status=status,
+            limit=limit,
+            cursor_present=cursor is not None,
+            mve_filter=mve_filter,
+            markets_payload=markets_payload,
+            returned_cursor_present=_optional_text(payload.get("cursor")) is not None,
+        )
+        if not isinstance(markets_payload, list):
+            raise KalshiClientError("Kalshi markets response did not include markets.")
+        return KalshiMarketPage(
+            markets=tuple(_normalize_market_payload(market) for market in markets_payload),
+            cursor=_optional_text(payload.get("cursor")),
+        )
 
     def create_order(self, order: KalshiOrderRequest) -> KalshiOrderSummary:
         response = self._post_json(ORDERS_PATH, order.to_payload())
@@ -134,8 +210,12 @@ class KalshiClient:
             raise KalshiClientError("Kalshi get-order response did not include an order.")
         return _normalize_order_payload(order_payload)
 
-    def _get(self, path: str) -> httpx.Response:
-        return self._request("GET", path)
+    def _get(
+        self,
+        path: str,
+        query_params: dict[str, str] | None = None,
+    ) -> httpx.Response:
+        return self._request("GET", path, query_params=query_params)
 
     def _post_json(self, path: str, payload: dict[str, object]) -> httpx.Response:
         return self._request("POST", path, json_payload=payload)
@@ -144,6 +224,7 @@ class KalshiClient:
         self,
         method: str,
         path: str,
+        query_params: dict[str, str] | None = None,
         json_payload: dict[str, object] | None = None,
     ) -> httpx.Response:
         url = urljoin(self._base_url, path.lstrip("/"))
@@ -153,11 +234,47 @@ class KalshiClient:
             headers["Content-Type"] = "application/json"
 
         with httpx.Client(timeout=self._timeout_seconds) as client:
-            response = client.request(method, url, headers=headers, json=json_payload)
+            response = client.request(
+                method,
+                url,
+                headers=headers,
+                params=query_params,
+                json=json_payload,
+            )
 
         if response.status_code >= 400:
             raise KalshiClientError(_response_error_message(response))
         return response
+
+    def _log_get_markets_response(
+        self,
+        *,
+        series_ticker: str,
+        status: str,
+        limit: int,
+        cursor_present: bool,
+        mve_filter: str,
+        markets_payload: object,
+        returned_cursor_present: bool,
+    ) -> None:
+        if self._logger is None:
+            return
+        self._logger.log_event(
+            category="kalshi_client",
+            event_type="kalshi_get_markets_response",
+            source="kalshi_client",
+            identifier=series_ticker,
+            payload={
+                "series_ticker": series_ticker,
+                "status": status,
+                "limit": limit,
+                "cursor_present": cursor_present,
+                "mve_filter": mve_filter,
+                "returned_cursor_present": returned_cursor_present,
+                "raw_market_count": _market_payload_count(markets_payload),
+                "raw_market_ticker_sample": _market_payload_ticker_sample(markets_payload),
+            },
+        )
 
 
 def _json_object(response: httpx.Response, label: str) -> dict[str, object]:
@@ -187,6 +304,41 @@ def _normalize_order_payload(payload: dict[str, object]) -> KalshiOrderSummary:
         created_time=_optional_text(payload.get("created_time")),
         last_update_time=_optional_text(payload.get("last_update_time")),
     )
+
+
+def _normalize_market_payload(payload: object) -> KalshiMarketSummary:
+    if not isinstance(payload, dict):
+        raise KalshiClientError("Kalshi market payload was not a JSON object.")
+    return KalshiMarketSummary(
+        ticker=_require_text(payload.get("ticker"), "ticker"),
+        event_ticker=_optional_text(payload.get("event_ticker")),
+        status=_optional_text(payload.get("status")),
+        open_time=_optional_text(payload.get("open_time")),
+        close_time=_optional_text(payload.get("close_time")),
+        expiration_time=_optional_text(payload.get("expiration_time")),
+        latest_expiration_time=_optional_text(payload.get("latest_expiration_time")),
+        yes_bid_dollars=_optional_decimal(payload.get("yes_bid_dollars")),
+        yes_ask_dollars=_optional_decimal(payload.get("yes_ask_dollars")),
+    )
+
+
+def _market_payload_count(markets_payload: object) -> int | None:
+    if not isinstance(markets_payload, list):
+        return None
+    return len(markets_payload)
+
+
+def _market_payload_ticker_sample(markets_payload: object) -> tuple[str, ...]:
+    if not isinstance(markets_payload, list):
+        return ()
+    sample: list[str] = []
+    for market in markets_payload[:10]:
+        if not isinstance(market, dict):
+            continue
+        ticker = _optional_text(market.get("ticker"))
+        if ticker is not None:
+            sample.append(ticker)
+    return tuple(sample)
 
 
 def _response_error_message(response: httpx.Response) -> str:

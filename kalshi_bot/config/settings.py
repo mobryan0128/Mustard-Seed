@@ -52,6 +52,12 @@ DEFAULT_RUNNER_ENABLED = True
 DEFAULT_RUNNER_LOOP_INTERVAL_SECONDS = 5.0
 DEFAULT_RUNNER_STATUS_LOG_EVERY_N_CYCLES = 1
 DEFAULT_RUNNER_FAIL_FAST_ON_STARTUP = True
+DEFAULT_AUTO_MARKET_DISCOVERY_ENABLED = True
+DEFAULT_CRYPTO_MARKET_SERIES = {
+    "BTC-USD": ("KXBTC15M", "KXBTC30M"),
+    "ETH-USD": ("KXETH15M", "KXETH30M"),
+}
+DEFAULT_MARKET_DISCOVERY_REFRESH_CYCLES = 12
 
 
 class SettingsError(ValueError):
@@ -96,6 +102,9 @@ class KalshiSettings:
     bias_stale_data_seconds: int
     bias_chop_threshold_bps: int
     contract_scanner_product_markets: dict[str, tuple[str, ...]]
+    auto_market_discovery_enabled: bool
+    crypto_market_series: dict[str, tuple[str, ...]]
+    market_discovery_refresh_cycles: int
     simulation_enabled: bool
     simulation_max_new_positions_per_evaluation: int
     simulation_position_id_prefix: str
@@ -206,6 +215,22 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         )
     contract_scanner_product_markets = _parse_product_markets_json(
         values.get("CONTRACT_SCANNER_PRODUCT_MARKETS_JSON")
+    )
+    auto_market_discovery_enabled = _parse_bool(
+        values.get("KALSHI_AUTO_MARKET_DISCOVERY_ENABLED"),
+        DEFAULT_AUTO_MARKET_DISCOVERY_ENABLED,
+        "KALSHI_AUTO_MARKET_DISCOVERY_ENABLED",
+    )
+    crypto_market_series = _parse_product_series_json(
+        values.get("KALSHI_CRYPTO_MARKET_SERIES_JSON")
+    ) or {
+        product_id: tuple(series_tickers)
+        for product_id, series_tickers in DEFAULT_CRYPTO_MARKET_SERIES.items()
+    }
+    market_discovery_refresh_cycles = _parse_positive_int(
+        values.get("KALSHI_MARKET_DISCOVERY_REFRESH_CYCLES"),
+        DEFAULT_MARKET_DISCOVERY_REFRESH_CYCLES,
+        "KALSHI_MARKET_DISCOVERY_REFRESH_CYCLES",
     )
     simulation_position_id_prefix = (
         _optional(values, "SIMULATION_POSITION_ID_PREFIX")
@@ -406,6 +431,9 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
             "BIAS_CHOP_THRESHOLD_BPS",
         ),
         contract_scanner_product_markets=contract_scanner_product_markets,
+        auto_market_discovery_enabled=auto_market_discovery_enabled,
+        crypto_market_series=crypto_market_series,
+        market_discovery_refresh_cycles=market_discovery_refresh_cycles,
         simulation_enabled=_parse_bool(
             values.get("SIMULATION_ENABLED"),
             DEFAULT_SIMULATION_ENABLED,
@@ -522,6 +550,9 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "BIAS_STALE_DATA_SECONDS",
         "BIAS_CHOP_THRESHOLD_BPS",
         "CONTRACT_SCANNER_PRODUCT_MARKETS_JSON",
+        "KALSHI_AUTO_MARKET_DISCOVERY_ENABLED",
+        "KALSHI_CRYPTO_MARKET_SERIES_JSON",
+        "KALSHI_MARKET_DISCOVERY_REFRESH_CYCLES",
         "SIMULATION_ENABLED",
         "SIMULATION_MAX_NEW_POSITIONS_PER_EVALUATION",
         "SIMULATION_POSITION_ID_PREFIX",
@@ -693,4 +724,36 @@ def _parse_product_markets_json(value: str | None) -> dict[str, tuple[str, ...]]
                 "CONTRACT_SCANNER_PRODUCT_MARKETS_JSON values must contain non-empty market tickers."
             )
         normalized[product_id] = tickers
+    return normalized
+
+
+def _parse_product_series_json(value: str | None) -> dict[str, tuple[str, ...]]:
+    if value is None or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise SettingsError("KALSHI_CRYPTO_MARKET_SERIES_JSON must be valid JSON.") from exc
+    if not isinstance(parsed, dict):
+        raise SettingsError("KALSHI_CRYPTO_MARKET_SERIES_JSON must be a JSON object.")
+
+    normalized: dict[str, tuple[str, ...]] = {}
+    for raw_product_id, raw_series in parsed.items():
+        product_id = str(raw_product_id).strip()
+        if not product_id:
+            raise SettingsError(
+                "KALSHI_CRYPTO_MARKET_SERIES_JSON product keys must be non-empty strings."
+            )
+        if not isinstance(raw_series, list):
+            raise SettingsError(
+                "KALSHI_CRYPTO_MARKET_SERIES_JSON values must be arrays of series tickers."
+            )
+        series = tuple(
+            dict.fromkeys(str(raw_ticker).strip() for raw_ticker in raw_series if str(raw_ticker).strip())
+        )
+        if not series:
+            raise SettingsError(
+                "KALSHI_CRYPTO_MARKET_SERIES_JSON values must contain non-empty series tickers."
+            )
+        normalized[product_id] = series
     return normalized
