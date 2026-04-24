@@ -48,6 +48,10 @@ DEFAULT_LIVE_VALIDATION_POLL_INTERVAL_SECONDS = 1.0
 DEFAULT_LIVE_VALIDATION_CLIENT_ORDER_ID_PREFIX = "live-smoke"
 DEFAULT_LIVE_TRADING_ENABLED = False
 DEFAULT_LIVE_KILL_SWITCH_ACTIVE = False
+DEFAULT_RUNNER_ENABLED = True
+DEFAULT_RUNNER_LOOP_INTERVAL_SECONDS = 5.0
+DEFAULT_RUNNER_STATUS_LOG_EVERY_N_CYCLES = 1
+DEFAULT_RUNNER_FAIL_FAST_ON_STARTUP = True
 
 
 class SettingsError(ValueError):
@@ -110,6 +114,11 @@ class KalshiSettings:
     live_validation_client_order_id_prefix: str
     live_trading_enabled: bool
     live_kill_switch_active: bool
+    runner_enabled: bool
+    runner_loop_interval_seconds: float
+    runner_status_log_every_n_cycles: int
+    runner_fail_fast_on_startup: bool
+    runner_max_cycles: int | None
 
 
 def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
@@ -256,6 +265,30 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         values.get("LIVE_KILL_SWITCH_ACTIVE"),
         DEFAULT_LIVE_KILL_SWITCH_ACTIVE,
         "LIVE_KILL_SWITCH_ACTIVE",
+    )
+    runner_enabled = _parse_bool(
+        values.get("RUNNER_ENABLED"),
+        DEFAULT_RUNNER_ENABLED,
+        "RUNNER_ENABLED",
+    )
+    runner_loop_interval_seconds = _parse_positive_float(
+        values.get("RUNNER_LOOP_INTERVAL_SECONDS"),
+        DEFAULT_RUNNER_LOOP_INTERVAL_SECONDS,
+        "RUNNER_LOOP_INTERVAL_SECONDS",
+    )
+    runner_status_log_every_n_cycles = _parse_positive_int(
+        values.get("RUNNER_STATUS_LOG_EVERY_N_CYCLES"),
+        DEFAULT_RUNNER_STATUS_LOG_EVERY_N_CYCLES,
+        "RUNNER_STATUS_LOG_EVERY_N_CYCLES",
+    )
+    runner_fail_fast_on_startup = _parse_bool(
+        values.get("RUNNER_FAIL_FAST_ON_STARTUP"),
+        DEFAULT_RUNNER_FAIL_FAST_ON_STARTUP,
+        "RUNNER_FAIL_FAST_ON_STARTUP",
+    )
+    runner_max_cycles = _parse_optional_positive_int(
+        values.get("RUNNER_MAX_CYCLES"),
+        "RUNNER_MAX_CYCLES",
     )
 
     if live_validation_enabled:
@@ -407,6 +440,11 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_validation_client_order_id_prefix=live_validation_client_order_id_prefix,
         live_trading_enabled=live_trading_enabled,
         live_kill_switch_active=live_kill_switch_active,
+        runner_enabled=runner_enabled,
+        runner_loop_interval_seconds=runner_loop_interval_seconds,
+        runner_status_log_every_n_cycles=runner_status_log_every_n_cycles,
+        runner_fail_fast_on_startup=runner_fail_fast_on_startup,
+        runner_max_cycles=runner_max_cycles,
     )
 
 
@@ -502,6 +540,11 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_VALIDATION_CLIENT_ORDER_ID_PREFIX",
         "LIVE_TRADING_ENABLED",
         "LIVE_KILL_SWITCH_ACTIVE",
+        "RUNNER_ENABLED",
+        "RUNNER_LOOP_INTERVAL_SECONDS",
+        "RUNNER_STATUS_LOG_EVERY_N_CYCLES",
+        "RUNNER_FAIL_FAST_ON_STARTUP",
+        "RUNNER_MAX_CYCLES",
     ):
         if key in os.environ:
             values[key] = _clean_env_value(os.environ[key])
@@ -610,6 +653,15 @@ def _parse_price_dollars(value: str | None, key: str) -> Decimal | None:
     if parsed.as_tuple().exponent < -4:
         raise SettingsError(f"{key} must have at most four decimal places.")
     return parsed.quantize(Decimal("0.0001"))
+
+
+def _parse_optional_positive_int(value: str | None, key: str) -> int | None:
+    if value is None or not value.strip():
+        return None
+    parsed = _parse_non_negative_int(value, 0, key)
+    if parsed <= 0:
+        raise SettingsError(f"{key} must be greater than zero when provided.")
+    return parsed
 
 
 def _parse_product_markets_json(value: str | None) -> dict[str, tuple[str, ...]]:

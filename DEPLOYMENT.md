@@ -1,7 +1,7 @@
 # Deployment Readiness
 
 ## Summary
-This repository has phase validation and explicit live safety plumbing, but it does **not** yet have a single long-running orchestrator entrypoint for autonomous 24/7 trading. Treat this document as a deployment-readiness guide for Linux VPS setup, validation, and supervised operation, not as approval to enable unattended live trading.
+This repository now has a single supervised runner entrypoint for continuous **simulation-first** coordination: `python scripts/run_kalshi_bot.py`. Treat this document as a deployment-readiness guide for Linux VPS setup, validation, and supervised operation. It is **not** approval to enable unattended autonomous live trading.
 
 Live trading must remain explicitly blocked by default.
 
@@ -16,9 +16,9 @@ Live trading must remain explicitly blocked by default.
   - `LIVE_KILL_SWITCH_ACTIVE`
 
 ## Current Gaps
-- No unified long-running process entrypoint exists
-- No production supervisor should be enabled until such an entrypoint exists
-- Systemd should be treated as a template only
+- The continuous runner is simulation-only and does not auto-submit live orders
+- The explicit live smoke path remains operator-invoked and separate
+- Systemd should still be treated as supervised infrastructure, not as proof of autonomous live deployment
 
 ## Linux VPS Prerequisites
 - Ubuntu/Debian-class Linux VPS
@@ -103,6 +103,7 @@ python scripts/check_phase7_simulation.py
 python scripts/check_phase8_exit_logic.py
 python scripts/check_phase9_live_execution.py
 python scripts/check_phase10_live_guardrails.py
+python scripts/check_runner_lifecycle.py
 ```
 
 Expected outcome:
@@ -125,20 +126,24 @@ Fail-closed checks:
 - with missing explicit live flags, live submission must block
 
 ## Supervised Dry Run
-Current repo state supports supervised manual operation only.
+Current repo state supports a supervised continuous **simulation** runner.
 
 Use `tmux`:
 
 ```bash
 tmux new -s kalshi-bot
+cd /opt/kalshi-bot
 source .venv/bin/activate
-python scripts/check_kalshi_auth.py
-python scripts/check_kalshi_websocket.py --market-ticker <explicit_kalshi_ticker>
-python scripts/check_crypto_feed.py
-python scripts/check_phase10_live_guardrails.py
+python scripts/run_kalshi_bot.py --env-file .env --max-cycles 3
 ```
 
-Do not treat this as a production trading session. It is only a supervised readiness pass.
+For continuous supervised simulation:
+
+```bash
+python scripts/run_kalshi_bot.py --env-file .env
+```
+
+Do not treat this as autonomous live trading. The runner remains simulation-only and does not submit live orders automatically.
 
 ## Git Status Expectation
 For this documentation task, a clean status means:

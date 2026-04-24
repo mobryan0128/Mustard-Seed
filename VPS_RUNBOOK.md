@@ -40,6 +40,7 @@ python scripts/check_phase7_simulation.py
 python scripts/check_phase8_exit_logic.py
 python scripts/check_phase9_live_execution.py
 python scripts/check_phase10_live_guardrails.py
+python scripts/check_runner_lifecycle.py
 ```
 
 If any step fails:
@@ -58,6 +59,18 @@ source .venv/bin/activate
 ```
 
 Run readiness checks manually inside tmux. Keep one pane tailing logs if desired:
+
+```bash
+python scripts/run_kalshi_bot.py --env-file .env --max-cycles 3
+```
+
+For continuous supervised simulation:
+
+```bash
+python scripts/run_kalshi_bot.py --env-file .env
+```
+
+Optional second pane:
 
 ```bash
 tail -f logs/runtime.jsonl
@@ -114,9 +127,9 @@ After any validation run:
   - live safeguard blocks, if tested
 
 ## 8. Systemd Note
-`systemd/kalshi-bot.service.example` is a template only.
+`systemd/kalshi-bot.service.example` points at the simulation-first runner.
 
-Do **not** enable it as a production trading service yet because the repo does not currently contain a unified long-running entrypoint.
+Do **not** interpret it as approval for autonomous live trading. The runner does not auto-submit live orders and the explicit live smoke path remains separate.
 
 ## 9. Shutdown Procedure
 - stop any tmux/manual process
