@@ -268,6 +268,10 @@ class KalshiBotRunner:
             market_snapshot=market_snapshot,
         )
         simulation_snapshot = self._simulation_engine.evaluate(contract_scan_snapshot)
+        self._record_simulation_trade_events(
+            cycle_number=cycle_number,
+            simulation_snapshot=simulation_snapshot,
+        )
         self._last_successful_cycle_at = _utc_now_iso()
         self._last_error = None
 
@@ -521,6 +525,83 @@ class KalshiBotRunner:
                 "cycle_number": self._cycle_count,
                 "last_error": self._last_error,
             },
+        )
+
+    def _record_simulation_trade_events(
+        self,
+        *,
+        cycle_number: int,
+        simulation_snapshot: SimulationSnapshot,
+    ) -> None:
+        closed_positions = {
+            position.position_id: position
+            for position in simulation_snapshot.closed_positions
+        }
+        for decision in simulation_snapshot.decisions:
+            if decision.position_id is None:
+                continue
+            if decision.action == "open_position":
+                position = simulation_snapshot.open_positions.get(decision.position_id)
+                if position is None:
+                    continue
+                self._write_simulation_trade_event(
+                    event_type="simulation_position_opened",
+                    position_id=position.position_id,
+                    payload={
+                        "cycle_number": cycle_number,
+                        "position_id": position.position_id,
+                        "product_id": position.product_id,
+                        "market_ticker": position.market_ticker,
+                        "direction": position.direction,
+                        "structure": position.structure,
+                        "confidence": position.confidence,
+                        "entry_price": position.entry_price,
+                        "opened_at": position.opened_at,
+                    },
+                )
+            elif decision.action == "close_position":
+                position = closed_positions.get(decision.position_id)
+                if position is None:
+                    continue
+                self._write_simulation_trade_event(
+                    event_type="simulation_position_closed",
+                    position_id=position.position_id,
+                    payload={
+                        "cycle_number": cycle_number,
+                        "position_id": position.position_id,
+                        "product_id": position.product_id,
+                        "market_ticker": position.market_ticker,
+                        "direction": position.direction,
+                        "structure": position.structure,
+                        "confidence": position.confidence,
+                        "entry_price": position.entry_price,
+                        "exit_price": position.exit_price,
+                        "opened_at": position.opened_at,
+                        "closed_at": position.closed_at,
+                        "exit_reason": position.exit_reason,
+                        "pnl": position.exit_price - position.entry_price,
+                    },
+                )
+
+    def _write_simulation_trade_event(
+        self,
+        *,
+        event_type: str,
+        position_id: str,
+        payload: dict[str, object],
+    ) -> None:
+        self._logger.log_event(
+            category="simulation",
+            event_type=event_type,
+            source="simulation_execution_engine",
+            identifier=position_id,
+            payload=payload,
+        )
+        self._replay_engine.record_message(
+            source="simulation_execution_engine",
+            message_type=event_type,
+            identifier=position_id,
+            payload=payload,
         )
 
 

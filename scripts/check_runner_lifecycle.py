@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -16,7 +17,12 @@ if str(REPO_ROOT) not in sys.path:
 
 from kalshi_bot.config.settings import KalshiSettings  # noqa: E402
 from kalshi_bot.clients.kalshi_client import KalshiMarketPage, KalshiMarketSummary  # noqa: E402
-from kalshi_bot.execution.execution_engine import SimulationSnapshot  # noqa: E402
+from kalshi_bot.execution.execution_engine import (  # noqa: E402
+    SimulatedPosition,
+    SimulationDecision,
+    SimulationSnapshot,
+)
+from kalshi_bot.execution.exit_manager import ClosedSimulatedPosition  # noqa: E402
 from kalshi_bot.forecast.bias_engine import BiasRiskFlags, BiasSnapshot, BiasState  # noqa: E402
 from kalshi_bot.market.crypto_market_discovery import (  # noqa: E402
     CryptoMarketDiscovery,
@@ -41,6 +47,7 @@ def main() -> int:
     failures.extend(_validate_startup_fail_closed())
     failures.extend(_validate_market_discovery_tradable_filter())
     failures.extend(_validate_subscription_ack_without_market_data_is_not_connected())
+    failures.extend(_validate_simulation_trade_events_persisted())
 
     if failures:
         for failure in failures:
@@ -245,6 +252,67 @@ def _validate_subscription_ack_without_market_data_is_not_connected() -> list[st
     return failures
 
 
+def _validate_simulation_trade_events_persisted() -> list[str]:
+    runner, state = _build_runner(simulation_trade_events=True)
+    results = runner.run_cycles(2)
+    failures: list[str] = []
+    if len(results) != 2:
+        failures.append(f"simulation trade events cycle count={len(results)}")
+        return failures
+    if state.log_written_ref is None or state.replay_written_ref is None:
+        return ["simulation trade events missing log/replay paths"]
+
+    runtime_records = _jsonl_records(state.log_written_ref)
+    replay_records = _jsonl_records(state.replay_written_ref)
+
+    runtime_opened = _first_event_payload(
+        runtime_records,
+        key="event_type",
+        value="simulation_position_opened",
+    )
+    runtime_closed = _first_event_payload(
+        runtime_records,
+        key="event_type",
+        value="simulation_position_closed",
+    )
+    replay_opened = _first_event_payload(
+        replay_records,
+        key="record_type",
+        value="simulation_position_opened",
+    )
+    replay_closed = _first_event_payload(
+        replay_records,
+        key="record_type",
+        value="simulation_position_closed",
+    )
+
+    if runtime_opened is None:
+        failures.append("runtime opened simulation trade event missing")
+    if replay_opened is None:
+        failures.append("replay opened simulation trade event missing")
+    if runtime_closed is None:
+        failures.append("runtime closed simulation trade event missing")
+    if replay_closed is None:
+        failures.append("replay closed simulation trade event missing")
+
+    for label, payload in (
+        ("runtime", runtime_closed),
+        ("replay", replay_closed),
+    ):
+        if payload is None:
+            continue
+        expected = {
+            "entry_price": "0.460",
+            "exit_price": "0.490",
+            "exit_reason": "direction_conflict",
+            "pnl": "0.030",
+        }
+        for key, value in expected.items():
+            if payload.get(key) != value:
+                failures.append(f"{label} closed {key}={payload.get(key)} expected={value}")
+    return failures
+
+
 def _build_runner(
     *,
     stop_after_first_cycle: bool = False,
@@ -252,6 +320,7 @@ def _build_runner(
     kalshi_error: str | None = None,
     kalshi_market_data: bool = True,
     fail_fast_on_startup: bool = True,
+    simulation_trade_events: bool = False,
 ):
     temp_dir = TemporaryDirectory()
     tmp_path = Path(temp_dir.name)
@@ -275,7 +344,11 @@ def _build_runner(
         bias_engine=_FakeBiasEngine(),
         contract_scanner=None,
         market_discovery=_FakeMarketDiscovery(state=state),
-        simulation_engine=_FakeSimulationEngine(stop_after_first_cycle=stop_after_first_cycle, runner_ref=None),
+        simulation_engine=_FakeSimulationEngine(
+            stop_after_first_cycle=stop_after_first_cycle,
+            runner_ref=None,
+            trade_events=simulation_trade_events,
+        ),
         logger=logger,
         replay_engine=replay_engine,
         sleep_fn=lambda _: None,
@@ -477,10 +550,17 @@ class _FakeMarketDiscovery:
 
 
 class _FakeSimulationEngine:
-    def __init__(self, *, stop_after_first_cycle: bool, runner_ref) -> None:  # noqa: ANN001
+    def __init__(
+        self,
+        *,
+        stop_after_first_cycle: bool,
+        runner_ref,  # noqa: ANN001
+        trade_events: bool,
+    ) -> None:
         self._cycle = 0
         self._runner_ref = runner_ref
         self._stop_after_first_cycle = stop_after_first_cycle
+        self._trade_events = trade_events
         self._latest = SimulationSnapshot(
             open_positions={},
             closed_positions=(),
@@ -490,18 +570,83 @@ class _FakeSimulationEngine:
 
     def evaluate(self, scan_snapshot):  # noqa: ANN001
         self._cycle += 1
-        self._latest = SimulationSnapshot(
-            open_positions={"sim-0001": object()} if self._cycle >= 1 else {},
-            closed_positions=(),
-            decisions=(),
-            evaluation_count=self._cycle,
-        )
+        if self._trade_events:
+            self._latest = self._trade_event_snapshot()
+        else:
+            self._latest = SimulationSnapshot(
+                open_positions={"sim-0001": object()} if self._cycle >= 1 else {},
+                closed_positions=(),
+                decisions=(),
+                evaluation_count=self._cycle,
+            )
         if self._stop_after_first_cycle and self._cycle == 1 and self._runner_ref is not None:
             self._runner_ref.stop()
         return self._latest
 
     def snapshot(self) -> SimulationSnapshot:
         return self._latest
+
+    def _trade_event_snapshot(self) -> SimulationSnapshot:
+        opened = SimulatedPosition(
+            position_id="sim-0001",
+            product_id="BTC-USD",
+            market_ticker="KXBTC15M-OLD",
+            direction="up",
+            structure="trend",
+            confidence=70,
+            entry_price=Decimal("0.460"),
+            latest_price=Decimal("0.460"),
+            status="open",
+            opened_at="2026-04-23T12:00:03+00:00",
+            updated_at="2026-04-23T12:00:03+00:00",
+            update_count=0,
+        )
+        if self._cycle == 1:
+            return SimulationSnapshot(
+                open_positions={opened.position_id: opened},
+                closed_positions=(),
+                decisions=(
+                    SimulationDecision(
+                        action="open_position",
+                        position_id=opened.position_id,
+                        product_id=opened.product_id,
+                        market_ticker=opened.market_ticker,
+                        reason=None,
+                    ),
+                ),
+                evaluation_count=self._cycle,
+            )
+
+        closed = ClosedSimulatedPosition(
+            position_id=opened.position_id,
+            product_id=opened.product_id,
+            market_ticker=opened.market_ticker,
+            direction=opened.direction,
+            structure=opened.structure,
+            confidence=opened.confidence,
+            entry_price=opened.entry_price,
+            exit_price=Decimal("0.490"),
+            status="closed",
+            opened_at=opened.opened_at,
+            closed_at="2026-04-23T12:01:03+00:00",
+            updated_at=opened.updated_at,
+            update_count=opened.update_count,
+            exit_reason="direction_conflict",
+        )
+        return SimulationSnapshot(
+            open_positions={},
+            closed_positions=(closed,),
+            decisions=(
+                SimulationDecision(
+                    action="close_position",
+                    position_id=closed.position_id,
+                    product_id=closed.product_id,
+                    market_ticker=closed.market_ticker,
+                    reason=closed.exit_reason,
+                ),
+            ),
+            evaluation_count=self._cycle,
+        )
 
 
 @dataclass(frozen=True)
@@ -579,6 +724,29 @@ def _market_diagnostic_matches(
         and diagnostic.bid_present is bid_present
         and diagnostic.ask_present is ask_present
     )
+
+
+def _jsonl_records(path: Path) -> list[dict[str, object]]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _first_event_payload(
+    records: list[dict[str, object]],
+    *,
+    key: str,
+    value: str,
+) -> dict[str, object] | None:
+    for record in records:
+        if record.get(key) != value:
+            continue
+        payload = record.get("payload")
+        if isinstance(payload, dict):
+            return payload
+    return None
 
 
 def _discovery_snapshot(
