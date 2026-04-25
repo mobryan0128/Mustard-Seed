@@ -74,6 +74,7 @@ def _run_fixtures(engine: SimulationExecutionEngine) -> list[str]:
 
     fourth_snapshot = engine.evaluate(_steady_state_snapshot())
     failures.extend(_validate_steady_state_update(fourth_snapshot))
+    failures.extend(_validate_price_exit_rules())
 
     return failures
 
@@ -137,21 +138,27 @@ def _validate_market_disappearance_exit(snapshot) -> list[str]:
     failures: list[str] = []
     if snapshot.evaluation_count != 3:
         failures.append(f"market disappearance evaluation_count={snapshot.evaluation_count}")
-    if tuple(snapshot.open_positions) != ("sim-0003",):
+    if tuple(snapshot.open_positions) != ("sim-0002", "sim-0003"):
         failures.append(f"market disappearance open positions={tuple(snapshot.open_positions)}")
-    if len(snapshot.closed_positions) != 2:
+    if len(snapshot.closed_positions) != 1:
         failures.append(
-            f"market disappearance closed positions={len(snapshot.closed_positions)} expected=2"
+            f"market disappearance closed positions={len(snapshot.closed_positions)} expected=1"
         )
         return failures
 
     closed_position = snapshot.closed_positions[-1]
-    if closed_position.position_id != "sim-0002":
+    if closed_position.position_id != "sim-0001":
         failures.append(f"market disappearance closed id={closed_position.position_id}")
-    if closed_position.exit_reason != "market_not_ranked":
-        failures.append(f"market disappearance reason={closed_position.exit_reason}")
-    if closed_position.exit_price != Decimal("0.430"):
-        failures.append(f"market disappearance exit_price={closed_position.exit_price}")
+    if closed_position.exit_reason == "market_not_ranked":
+        failures.append("market disappearance created market_not_ranked exit")
+
+    held_position = snapshot.open_positions.get("sim-0002")
+    if held_position is None:
+        failures.append("market disappearance did not hold sim-0002 open")
+    elif held_position.product_id != "ETH-USD" or held_position.market_ticker != "KXETH-1":
+        failures.append(
+            f"market disappearance held wrong position {held_position.product_id}/{held_position.market_ticker}"
+        )
 
     open_position = snapshot.open_positions["sim-0003"]
     if open_position.product_id != "BTC-USD" or open_position.entry_price != Decimal("0.510"):
@@ -160,18 +167,23 @@ def _validate_market_disappearance_exit(snapshot) -> list[str]:
         )
 
     actions = tuple(decision.action for decision in snapshot.decisions)
-    if actions != ("close_position", "open_position"):
+    if actions != ("open_position",):
         failures.append(f"market disappearance actions={actions}")
     return failures
 
 
 def _validate_steady_state_update(snapshot) -> list[str]:
     failures: list[str] = []
-    if tuple(snapshot.open_positions) != ("sim-0003",):
+    if tuple(snapshot.open_positions) != ("sim-0002", "sim-0003"):
         failures.append(f"steady state open positions={tuple(snapshot.open_positions)}")
         return failures
-    if len(snapshot.closed_positions) != 2:
-        failures.append(f"steady state closed positions={len(snapshot.closed_positions)} expected=2")
+    if len(snapshot.closed_positions) != 1:
+        failures.append(f"steady state closed positions={len(snapshot.closed_positions)} expected=1")
+    held_position = snapshot.open_positions["sim-0002"]
+    if held_position.product_id != "ETH-USD" or held_position.latest_price != Decimal("0.430"):
+        failures.append(
+            f"steady state held position {held_position.product_id}/{held_position.latest_price}"
+        )
     open_position = snapshot.open_positions["sim-0003"]
     if open_position.latest_price != Decimal("0.520"):
         failures.append(f"steady state latest_price={open_position.latest_price}")
@@ -186,6 +198,136 @@ def _validate_steady_state_update(snapshot) -> list[str]:
         failures.append(f"steady state actions={actions}")
     if snapshot.decisions[-1].reason != "open_position_for_product":
         failures.append(f"steady state skip reason={snapshot.decisions[-1].reason}")
+    return failures
+
+
+def _validate_price_exit_rules() -> list[str]:
+    failures: list[str] = []
+    failures.extend(_validate_profit_capture_exit())
+    failures.extend(_validate_loss_protection_exit())
+    failures.extend(_validate_max_hold_updates_exit())
+    return failures
+
+
+def _validate_profit_capture_exit() -> list[str]:
+    engine = _new_engine()
+    engine.evaluate(_single_contract_snapshot(midpoint=Decimal("0.460")))
+
+    minimum_hold_snapshot = engine.evaluate(
+        _single_contract_snapshot(midpoint=Decimal("0.490"))
+    )
+    failures = _validate_minimum_hold_snapshot(
+        minimum_hold_snapshot,
+        scenario="profit minimum hold",
+        expected_latest_price=Decimal("0.490"),
+    )
+
+    exit_snapshot = engine.evaluate(_single_contract_snapshot(midpoint=Decimal("0.490")))
+    failures.extend(
+        _validate_single_closed_position(
+            exit_snapshot,
+            scenario="profit capture",
+            exit_reason="profit_capture",
+            exit_price=Decimal("0.490"),
+        )
+    )
+    return failures
+
+
+def _validate_loss_protection_exit() -> list[str]:
+    engine = _new_engine()
+    engine.evaluate(_single_contract_snapshot(midpoint=Decimal("0.460")))
+
+    minimum_hold_snapshot = engine.evaluate(
+        _single_contract_snapshot(midpoint=Decimal("0.440"))
+    )
+    failures = _validate_minimum_hold_snapshot(
+        minimum_hold_snapshot,
+        scenario="loss minimum hold",
+        expected_latest_price=Decimal("0.440"),
+    )
+
+    exit_snapshot = engine.evaluate(_single_contract_snapshot(midpoint=Decimal("0.440")))
+    failures.extend(
+        _validate_single_closed_position(
+            exit_snapshot,
+            scenario="loss protection",
+            exit_reason="loss_protection",
+            exit_price=Decimal("0.440"),
+        )
+    )
+    return failures
+
+
+def _validate_max_hold_updates_exit() -> list[str]:
+    engine = _new_engine()
+    engine.evaluate(_single_contract_snapshot(midpoint=Decimal("0.500")))
+    failures: list[str] = []
+
+    for update_number in range(1, 13):
+        snapshot = engine.evaluate(_single_contract_snapshot(midpoint=Decimal("0.500")))
+        if snapshot.closed_positions:
+            failures.append(
+                f"max hold update {update_number} closed early={snapshot.closed_positions[-1].exit_reason}"
+            )
+            return failures
+
+    exit_snapshot = engine.evaluate(_single_contract_snapshot(midpoint=Decimal("0.500")))
+    failures.extend(
+        _validate_single_closed_position(
+            exit_snapshot,
+            scenario="max hold updates",
+            exit_reason="max_hold_updates",
+            exit_price=Decimal("0.500"),
+        )
+    )
+    return failures
+
+
+def _validate_minimum_hold_snapshot(
+    snapshot,
+    *,
+    scenario: str,
+    expected_latest_price: Decimal,
+) -> list[str]:
+    failures: list[str] = []
+    if snapshot.closed_positions:
+        failures.append(f"{scenario} closed before first update")
+    position = snapshot.open_positions.get("sim-0001")
+    if position is None:
+        failures.append(f"{scenario} position missing")
+        return failures
+    if position.latest_price != expected_latest_price:
+        failures.append(f"{scenario} latest_price={position.latest_price}")
+    if position.update_count != 1:
+        failures.append(f"{scenario} update_count={position.update_count}")
+    actions = tuple(decision.action for decision in snapshot.decisions)
+    if actions != ("update_position", "skip_entry"):
+        failures.append(f"{scenario} actions={actions}")
+    return failures
+
+
+def _validate_single_closed_position(
+    snapshot,
+    *,
+    scenario: str,
+    exit_reason: str,
+    exit_price: Decimal,
+) -> list[str]:
+    failures: list[str] = []
+    if snapshot.open_positions:
+        failures.append(f"{scenario} left open positions={tuple(snapshot.open_positions)}")
+    if len(snapshot.closed_positions) != 1:
+        failures.append(f"{scenario} closed positions={len(snapshot.closed_positions)}")
+        return failures
+    closed_position = snapshot.closed_positions[0]
+    if closed_position.exit_reason != exit_reason:
+        failures.append(f"{scenario} reason={closed_position.exit_reason}")
+    if closed_position.exit_price != exit_price:
+        failures.append(f"{scenario} exit_price={closed_position.exit_price}")
+    actions = tuple(decision.action for decision in snapshot.decisions)
+    if actions != ("close_position", "skip_entry"):
+        failures.append(f"{scenario} actions={actions}")
     return failures
 
 
@@ -278,6 +420,34 @@ def _steady_state_snapshot() -> ContractScanSnapshot:
             ),
         ),
         skipped_contracts=(),
+    )
+
+
+def _single_contract_snapshot(*, midpoint: Decimal) -> ContractScanSnapshot:
+    return ContractScanSnapshot(
+        ranked_contracts=(
+            _scanned_contract(
+                product_id="BTC-USD",
+                market_ticker="KXBTC-1",
+                direction="up",
+                structure="trend",
+                confidence=75,
+                midpoint=midpoint,
+                bias_as_of="2026-04-23T12:00:00+00:00",
+                market_as_of="2026-04-23T12:00:03+00:00",
+            ),
+        ),
+        skipped_contracts=(),
+    )
+
+
+def _new_engine() -> SimulationExecutionEngine:
+    return SimulationExecutionEngine(
+        enabled=True,
+        max_new_positions_per_evaluation=1,
+        position_id_prefix="sim",
+        exit_enabled=True,
+        allow_same_pass_reentry=False,
     )
 
 

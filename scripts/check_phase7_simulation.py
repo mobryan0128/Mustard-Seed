@@ -109,7 +109,7 @@ def _validate_update_and_conflict(snapshot) -> list[str]:
     if position.update_count != 1:
         failures.append(f"second snapshot update_count={position.update_count} expected=1")
     actions = tuple(decision.action for decision in snapshot.decisions)
-    if actions != ("update_position", "skip_entry"):
+    if actions != ("update_position", "skip_entry", "skip_entry"):
         failures.append(f"second snapshot actions={actions}")
     if snapshot.decisions[-1].reason != "open_position_for_product":
         failures.append(f"second snapshot skip reason={snapshot.decisions[-1].reason}")

@@ -9,6 +9,11 @@ from typing import Any, Mapping
 from kalshi_bot.contracts.contract_scanner import ScannedContract
 
 
+PROFIT_CAPTURE_DELTA = Decimal("0.030")
+LOSS_PROTECTION_DELTA = Decimal("-0.020")
+MAX_HOLD_UPDATES = 12
+
+
 @dataclass(frozen=True)
 class SimulationExitDecision:
     """Deterministic close instruction for one simulated position."""
@@ -59,20 +64,26 @@ def determine_exit_decisions(
         current_market_contract = ranked_by_market.get(position.market_ticker)
         top_ranked_for_product = top_ranked_by_product.get(position.product_id)
 
-        market_not_ranked = current_market_contract is None
         direction_conflict = (
             top_ranked_for_product is not None
             and top_ranked_for_product.direction != position.direction
         )
-        if not market_not_ranked and not direction_conflict:
+        exit_price = _current_price(current_market_contract, position)
+        price_delta = exit_price - position.entry_price
+        exit_reason = None
+
+        if direction_conflict:
+            exit_reason = "direction_conflict"
+        elif position.update_count > 0 and price_delta >= PROFIT_CAPTURE_DELTA:
+            exit_reason = "profit_capture"
+        elif position.update_count > 0 and price_delta <= LOSS_PROTECTION_DELTA:
+            exit_reason = "loss_protection"
+        elif position.update_count >= MAX_HOLD_UPDATES:
+            exit_reason = "max_hold_updates"
+
+        if exit_reason is None:
             continue
 
-        exit_reason = "direction_conflict" if direction_conflict else "market_not_ranked"
-        exit_price = (
-            current_market_contract.midpoint
-            if current_market_contract is not None
-            else position.latest_price
-        )
         closed_at = _closed_at(current_market_contract, position)
         decisions.append(
             SimulationExitDecision(
@@ -85,6 +96,15 @@ def determine_exit_decisions(
             )
         )
     return tuple(decisions)
+
+
+def _current_price(
+    current_market_contract: ScannedContract | None,
+    position: Any,
+) -> Decimal:
+    if current_market_contract is not None:
+        return current_market_contract.midpoint
+    return position.latest_price
 
 
 def _closed_at(
