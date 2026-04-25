@@ -39,6 +39,15 @@ DEFAULT_SIMULATION_MAX_NEW_POSITIONS_PER_EVALUATION = 1
 DEFAULT_SIMULATION_POSITION_ID_PREFIX = "sim"
 DEFAULT_SIMULATION_EXIT_ENABLED = True
 DEFAULT_SIMULATION_ALLOW_SAME_PASS_REENTRY = False
+DEFAULT_RISK_ACCOUNT_BALANCE_DOLLARS = Decimal("10")
+DEFAULT_RISK_MIN_PERCENT_PER_TRADE = Decimal("0.01")
+DEFAULT_RISK_MAX_PERCENT_PER_TRADE = Decimal("0.03")
+DEFAULT_RISK_MIN_STAKE_DOLLARS = Decimal("0.10")
+DEFAULT_RISK_MAX_STAKE_DOLLARS = Decimal("3")
+DEFAULT_RISK_MAX_OPEN_POSITIONS = 2
+DEFAULT_RISK_MAX_TOTAL_EXPOSURE_DOLLARS = Decimal("10")
+DEFAULT_RISK_DAILY_LOSS_LIMIT_DOLLARS = Decimal("5")
+DEFAULT_RISK_KILL_SWITCH_ACTIVE = False
 DEFAULT_LIVE_VALIDATION_ENABLED = False
 DEFAULT_LIVE_VALIDATION_ENV = "prod"
 DEFAULT_LIVE_VALIDATION_COUNT = 1
@@ -112,6 +121,15 @@ class KalshiSettings:
     simulation_position_id_prefix: str
     simulation_exit_enabled: bool
     simulation_allow_same_pass_reentry: bool
+    risk_account_balance_dollars: Decimal
+    risk_min_percent_per_trade: Decimal
+    risk_max_percent_per_trade: Decimal
+    risk_min_stake_dollars: Decimal
+    risk_max_stake_dollars: Decimal
+    risk_max_open_positions: int
+    risk_max_total_exposure_dollars: Decimal
+    risk_daily_loss_limit_dollars: Decimal
+    risk_kill_switch_active: bool
     live_validation_enabled: bool
     live_validation_env: str
     live_validation_ticker: str | None
@@ -237,6 +255,61 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
     simulation_position_id_prefix = (
         _optional(values, "SIMULATION_POSITION_ID_PREFIX")
         or DEFAULT_SIMULATION_POSITION_ID_PREFIX
+    )
+    risk_account_balance_dollars = _parse_positive_decimal(
+        values.get("RISK_ACCOUNT_BALANCE_DOLLARS"),
+        DEFAULT_RISK_ACCOUNT_BALANCE_DOLLARS,
+        "RISK_ACCOUNT_BALANCE_DOLLARS",
+    )
+    risk_min_percent_per_trade = _parse_positive_decimal(
+        values.get("RISK_MIN_PERCENT_PER_TRADE"),
+        DEFAULT_RISK_MIN_PERCENT_PER_TRADE,
+        "RISK_MIN_PERCENT_PER_TRADE",
+    )
+    risk_max_percent_per_trade = _parse_positive_decimal(
+        values.get("RISK_MAX_PERCENT_PER_TRADE"),
+        DEFAULT_RISK_MAX_PERCENT_PER_TRADE,
+        "RISK_MAX_PERCENT_PER_TRADE",
+    )
+    if risk_min_percent_per_trade > risk_max_percent_per_trade:
+        raise SettingsError(
+            "RISK_MIN_PERCENT_PER_TRADE must be less than or equal to "
+            "RISK_MAX_PERCENT_PER_TRADE."
+        )
+    risk_min_stake_dollars = _parse_positive_decimal(
+        values.get("RISK_MIN_STAKE_DOLLARS"),
+        DEFAULT_RISK_MIN_STAKE_DOLLARS,
+        "RISK_MIN_STAKE_DOLLARS",
+    )
+    risk_max_stake_dollars = _parse_positive_decimal(
+        values.get("RISK_MAX_STAKE_DOLLARS"),
+        DEFAULT_RISK_MAX_STAKE_DOLLARS,
+        "RISK_MAX_STAKE_DOLLARS",
+    )
+    if risk_min_stake_dollars > risk_max_stake_dollars:
+        raise SettingsError(
+            "RISK_MIN_STAKE_DOLLARS must be less than or equal to "
+            "RISK_MAX_STAKE_DOLLARS."
+        )
+    risk_max_open_positions = _parse_positive_int(
+        values.get("RISK_MAX_OPEN_POSITIONS"),
+        DEFAULT_RISK_MAX_OPEN_POSITIONS,
+        "RISK_MAX_OPEN_POSITIONS",
+    )
+    risk_max_total_exposure_dollars = _parse_positive_decimal(
+        values.get("RISK_MAX_TOTAL_EXPOSURE_DOLLARS"),
+        DEFAULT_RISK_MAX_TOTAL_EXPOSURE_DOLLARS,
+        "RISK_MAX_TOTAL_EXPOSURE_DOLLARS",
+    )
+    risk_daily_loss_limit_dollars = _parse_positive_decimal(
+        values.get("RISK_DAILY_LOSS_LIMIT_DOLLARS"),
+        DEFAULT_RISK_DAILY_LOSS_LIMIT_DOLLARS,
+        "RISK_DAILY_LOSS_LIMIT_DOLLARS",
+    )
+    risk_kill_switch_active = _parse_bool(
+        values.get("RISK_KILL_SWITCH_ACTIVE"),
+        DEFAULT_RISK_KILL_SWITCH_ACTIVE,
+        "RISK_KILL_SWITCH_ACTIVE",
     )
     live_validation_enabled = _parse_bool(
         values.get("LIVE_VALIDATION_ENABLED"),
@@ -457,6 +530,15 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
             DEFAULT_SIMULATION_ALLOW_SAME_PASS_REENTRY,
             "SIMULATION_ALLOW_SAME_PASS_REENTRY",
         ),
+        risk_account_balance_dollars=risk_account_balance_dollars,
+        risk_min_percent_per_trade=risk_min_percent_per_trade,
+        risk_max_percent_per_trade=risk_max_percent_per_trade,
+        risk_min_stake_dollars=risk_min_stake_dollars,
+        risk_max_stake_dollars=risk_max_stake_dollars,
+        risk_max_open_positions=risk_max_open_positions,
+        risk_max_total_exposure_dollars=risk_max_total_exposure_dollars,
+        risk_daily_loss_limit_dollars=risk_daily_loss_limit_dollars,
+        risk_kill_switch_active=risk_kill_switch_active,
         live_validation_enabled=live_validation_enabled,
         live_validation_env=live_validation_env,
         live_validation_ticker=live_validation_ticker,
@@ -560,6 +642,15 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "SIMULATION_POSITION_ID_PREFIX",
         "SIMULATION_EXIT_ENABLED",
         "SIMULATION_ALLOW_SAME_PASS_REENTRY",
+        "RISK_ACCOUNT_BALANCE_DOLLARS",
+        "RISK_MIN_PERCENT_PER_TRADE",
+        "RISK_MAX_PERCENT_PER_TRADE",
+        "RISK_MIN_STAKE_DOLLARS",
+        "RISK_MAX_STAKE_DOLLARS",
+        "RISK_MAX_OPEN_POSITIONS",
+        "RISK_MAX_TOTAL_EXPOSURE_DOLLARS",
+        "RISK_DAILY_LOSS_LIMIT_DOLLARS",
+        "RISK_KILL_SWITCH_ACTIVE",
         "LIVE_VALIDATION_ENABLED",
         "LIVE_VALIDATION_ENV",
         "LIVE_VALIDATION_TICKER",
@@ -686,6 +777,18 @@ def _parse_price_dollars(value: str | None, key: str) -> Decimal | None:
     if parsed.as_tuple().exponent < -4:
         raise SettingsError(f"{key} must have at most four decimal places.")
     return parsed.quantize(Decimal("0.0001"))
+
+
+def _parse_positive_decimal(value: str | None, default: Decimal, key: str) -> Decimal:
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = Decimal(value.strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise SettingsError(f"{key} must be a valid decimal string.") from exc
+    if parsed <= 0:
+        raise SettingsError(f"{key} must be greater than zero.")
+    return parsed
 
 
 def _parse_optional_positive_int(value: str | None, key: str) -> int | None:
