@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 import time
 import uuid
@@ -64,6 +64,7 @@ class SimulationDecision:
     product_id: str
     market_ticker: str | None
     reason: str | None
+    details: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -354,16 +355,18 @@ class SimulationExecutionEngine:
                 )
                 continue
 
+            current_exposure_dollars = _current_exposure_dollars(
+                self._open_positions.values()
+            )
+            realized_daily_pnl_dollars = _realized_daily_pnl_dollars(
+                self._closed_positions
+            )
             risk_decision = self._risk_manager.evaluate_entry_risk(
                 product_id=ranked_contract.product_id,
                 confidence=ranked_contract.confidence,
                 open_position_count=len(self._open_positions),
-                current_exposure_dollars=_current_exposure_dollars(
-                    self._open_positions.values()
-                ),
-                realized_daily_pnl_dollars=_realized_pnl_dollars(
-                    self._closed_positions
-                ),
+                current_exposure_dollars=current_exposure_dollars,
+                realized_daily_pnl_dollars=realized_daily_pnl_dollars,
             )
             if not risk_decision.allowed:
                 decisions.append(
@@ -373,6 +376,13 @@ class SimulationExecutionEngine:
                         product_id=ranked_contract.product_id,
                         market_ticker=ranked_contract.market_ticker,
                         reason=risk_decision.reason,
+                        details={
+                            "direction": ranked_contract.direction,
+                            "confidence": ranked_contract.confidence,
+                            "entry_price": ranked_contract.midpoint,
+                            "current_exposure_dollars": current_exposure_dollars,
+                            "realized_daily_pnl_dollars": realized_daily_pnl_dollars,
+                        },
                     )
                 )
                 continue
@@ -438,15 +448,29 @@ def _current_exposure_dollars(positions) -> Decimal:
     )
 
 
-def _realized_pnl_dollars(positions) -> Decimal:
+def _realized_daily_pnl_dollars(positions) -> Decimal:
+    today = datetime.now(timezone.utc).date()
     return sum(
         (
             (position.exit_price - position.entry_price)
             * (position.stake_dollars or Decimal("0"))
             for position in positions
+            if _closed_at_utc_date(position.closed_at) == today
         ),
         Decimal("0"),
     )
+
+
+def _closed_at_utc_date(closed_at: str | None) -> date | None:
+    if closed_at is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(closed_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.date()
+    return parsed.astimezone(timezone.utc).date()
 
 
 def _default_simulation_risk_manager() -> RiskManager:

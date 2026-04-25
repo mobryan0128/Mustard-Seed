@@ -7,6 +7,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from kalshi_bot.clients.crypto_feed_client import CryptoFeedClient, CryptoFeedClientError
@@ -541,6 +542,33 @@ class KalshiBotRunner:
             for position in simulation_snapshot.closed_positions
         }
         for decision in simulation_snapshot.decisions:
+            if (
+                decision.action == "skip_entry"
+                and decision.reason is not None
+                and decision.reason.startswith("risk_")
+            ):
+                details = decision.details or {}
+                identifier = decision.market_ticker or decision.product_id
+                self._write_simulation_trade_event(
+                    event_type="simulation_entry_risk_denied",
+                    position_id=identifier,
+                    payload={
+                        "cycle_number": cycle_number,
+                        "product_id": decision.product_id,
+                        "market_ticker": decision.market_ticker,
+                        "direction": details.get("direction"),
+                        "confidence": details.get("confidence"),
+                        "reason": decision.reason,
+                        "entry_price": details.get("entry_price"),
+                        "current_exposure_dollars": details.get(
+                            "current_exposure_dollars"
+                        ),
+                        "realized_daily_pnl_dollars": details.get(
+                            "realized_daily_pnl_dollars"
+                        ),
+                    },
+                )
+                continue
             if decision.position_id is None:
                 continue
             if decision.action == "open_position":
@@ -585,6 +613,8 @@ class KalshiBotRunner:
                         "closed_at": position.closed_at,
                         "exit_reason": position.exit_reason,
                         "pnl": position.exit_price - position.entry_price,
+                        "pnl_dollars": (position.exit_price - position.entry_price)
+                        * (position.stake_dollars or Decimal("0")),
                     },
                 )
 

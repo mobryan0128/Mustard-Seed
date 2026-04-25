@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -29,6 +30,7 @@ def main() -> int:
     failures.extend(_validate_max_open_positions_denial())
     failures.extend(_validate_max_exposure_denial())
     failures.extend(_validate_daily_loss_denial())
+    failures.extend(_validate_day_scoped_daily_loss())
     failures.extend(_validate_denied_candidate_continues_to_next())
 
     if failures:
@@ -144,6 +146,7 @@ def _validate_daily_loss_denial() -> list[str]:
                 market_ticker="KXBTC-1",
                 confidence=40,
                 midpoint=Decimal("0.500"),
+                market_as_of=_today_timestamp(),
             )
         )
     )
@@ -154,6 +157,7 @@ def _validate_daily_loss_denial() -> list[str]:
                 market_ticker="KXBTC-1",
                 confidence=40,
                 midpoint=Decimal("0.480"),
+                market_as_of=_today_timestamp(),
             )
         )
     )
@@ -164,6 +168,7 @@ def _validate_daily_loss_denial() -> list[str]:
                 market_ticker="KXBTC-1",
                 confidence=40,
                 midpoint=Decimal("0.480"),
+                market_as_of=_today_timestamp(),
             )
         )
     )
@@ -174,6 +179,7 @@ def _validate_daily_loss_denial() -> list[str]:
                 market_ticker="KXETH-1",
                 confidence=60,
                 midpoint=Decimal("0.500"),
+                market_as_of=_today_timestamp(),
             )
         )
     )
@@ -184,6 +190,102 @@ def _validate_daily_loss_denial() -> list[str]:
     )
     if not snapshot.closed_positions:
         failures.append("daily loss fixture did not create closed position")
+    return failures
+
+
+def _validate_day_scoped_daily_loss() -> list[str]:
+    engine = _engine(daily_loss_limit_dollars=Decimal("0.001"))
+    yesterday = _date_timestamp(datetime.now(timezone.utc) - timedelta(days=1))
+    today = _today_timestamp()
+
+    engine.evaluate(
+        _snapshot(
+            _contract(
+                product_id="BTC-USD",
+                market_ticker="KXBTC-OLD",
+                confidence=40,
+                midpoint=Decimal("0.500"),
+                market_as_of=yesterday,
+            )
+        )
+    )
+    engine.evaluate(
+        _snapshot(
+            _contract(
+                product_id="BTC-USD",
+                market_ticker="KXBTC-OLD",
+                confidence=40,
+                midpoint=Decimal("0.480"),
+                market_as_of=yesterday,
+            )
+        )
+    )
+    engine.evaluate(
+        _snapshot(
+            _contract(
+                product_id="BTC-USD",
+                market_ticker="KXBTC-OLD",
+                confidence=40,
+                midpoint=Decimal("0.480"),
+                market_as_of=yesterday,
+            )
+        )
+    )
+
+    today_entry = engine.evaluate(
+        _snapshot(
+            _contract(
+                product_id="ETH-USD",
+                market_ticker="KXETH-TODAY",
+                confidence=40,
+                midpoint=Decimal("0.500"),
+                market_as_of=today,
+            )
+        )
+    )
+    failures: list[str] = []
+    if today_entry.decisions[-1].action != "open_position":
+        failures.append(
+            f"day scoped old loss blocked entry reason={today_entry.decisions[-1].reason}"
+        )
+
+    engine.evaluate(
+        _snapshot(
+            _contract(
+                product_id="ETH-USD",
+                market_ticker="KXETH-TODAY",
+                confidence=40,
+                midpoint=Decimal("0.480"),
+                market_as_of=today,
+            )
+        )
+    )
+    engine.evaluate(
+        _snapshot(
+            _contract(
+                product_id="ETH-USD",
+                market_ticker="KXETH-TODAY",
+                confidence=40,
+                midpoint=Decimal("0.480"),
+                market_as_of=today,
+            )
+        )
+    )
+    blocked_snapshot = engine.evaluate(
+        _snapshot(
+            _contract(
+                product_id="SOL-USD",
+                market_ticker="KXSOL-TODAY",
+                confidence=60,
+                midpoint=Decimal("0.500"),
+                market_as_of=today,
+            )
+        )
+    )
+    if blocked_snapshot.decisions[-1].reason != "risk_daily_loss_limit":
+        failures.append(
+            f"day scoped today loss reason={blocked_snapshot.decisions[-1].reason}"
+        )
     return failures
 
 
@@ -276,6 +378,7 @@ def _contract(
     market_ticker: str,
     confidence: int,
     midpoint: Decimal,
+    market_as_of: str = "2026-04-23T12:00:03+00:00",
 ) -> ScannedContract:
     score = ContractScore(
         confidence=confidence,
@@ -293,9 +396,22 @@ def _contract(
         best_ask=midpoint + Decimal("0.020"),
         midpoint=midpoint,
         bias_as_of="2026-04-23T12:00:00+00:00",
-        market_as_of="2026-04-23T12:00:03+00:00",
+        market_as_of=market_as_of,
         score=score,
     )
+
+
+def _today_timestamp() -> str:
+    return _date_timestamp(datetime.now(timezone.utc))
+
+
+def _date_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).replace(
+        hour=12,
+        minute=0,
+        second=3,
+        microsecond=0,
+    ).isoformat()
 
 
 if __name__ == "__main__":

@@ -48,6 +48,7 @@ def main() -> int:
     failures.extend(_validate_market_discovery_tradable_filter())
     failures.extend(_validate_subscription_ack_without_market_data_is_not_connected())
     failures.extend(_validate_simulation_trade_events_persisted())
+    failures.extend(_validate_simulation_risk_denied_event_persisted())
 
     if failures:
         for failure in failures:
@@ -307,10 +308,53 @@ def _validate_simulation_trade_events_persisted() -> list[str]:
             "stake_dollars": "0.20",
             "exit_reason": "direction_conflict",
             "pnl": "0.030",
+            "pnl_dollars": "0.00600",
         }
         for key, value in expected.items():
             if payload.get(key) != value:
                 failures.append(f"{label} closed {key}={payload.get(key)} expected={value}")
+    return failures
+
+
+def _validate_simulation_risk_denied_event_persisted() -> list[str]:
+    runner, state = _build_runner(simulation_risk_denied_events=True)
+    results = runner.run_cycles(1)
+    failures: list[str] = []
+    if len(results) != 1:
+        failures.append(f"risk denied events cycle count={len(results)}")
+        return failures
+    if state.log_written_ref is None or state.replay_written_ref is None:
+        return ["risk denied events missing log/replay paths"]
+
+    runtime_records = _jsonl_records(state.log_written_ref)
+    replay_records = _jsonl_records(state.replay_written_ref)
+    runtime_denied = _first_event_payload(
+        runtime_records,
+        key="event_type",
+        value="simulation_entry_risk_denied",
+    )
+    replay_denied = _first_event_payload(
+        replay_records,
+        key="record_type",
+        value="simulation_entry_risk_denied",
+    )
+    for label, payload in (("runtime", runtime_denied), ("replay", replay_denied)):
+        if payload is None:
+            failures.append(f"{label} risk denied event missing")
+            continue
+        expected = {
+            "product_id": "BTC-USD",
+            "market_ticker": "KXBTC15M-OLD",
+            "direction": "up",
+            "confidence": 70,
+            "reason": "risk_kill_switch_active",
+            "entry_price": "0.460",
+            "current_exposure_dollars": "0",
+            "realized_daily_pnl_dollars": "0",
+        }
+        for key, value in expected.items():
+            if payload.get(key) != value:
+                failures.append(f"{label} risk denied {key}={payload.get(key)} expected={value}")
     return failures
 
 
@@ -322,6 +366,7 @@ def _build_runner(
     kalshi_market_data: bool = True,
     fail_fast_on_startup: bool = True,
     simulation_trade_events: bool = False,
+    simulation_risk_denied_events: bool = False,
 ):
     temp_dir = TemporaryDirectory()
     tmp_path = Path(temp_dir.name)
@@ -349,6 +394,7 @@ def _build_runner(
             stop_after_first_cycle=stop_after_first_cycle,
             runner_ref=None,
             trade_events=simulation_trade_events,
+            risk_denied_events=simulation_risk_denied_events,
         ),
         logger=logger,
         replay_engine=replay_engine,
@@ -566,11 +612,13 @@ class _FakeSimulationEngine:
         stop_after_first_cycle: bool,
         runner_ref,  # noqa: ANN001
         trade_events: bool,
+        risk_denied_events: bool,
     ) -> None:
         self._cycle = 0
         self._runner_ref = runner_ref
         self._stop_after_first_cycle = stop_after_first_cycle
         self._trade_events = trade_events
+        self._risk_denied_events = risk_denied_events
         self._latest = SimulationSnapshot(
             open_positions={},
             closed_positions=(),
@@ -582,6 +630,8 @@ class _FakeSimulationEngine:
         self._cycle += 1
         if self._trade_events:
             self._latest = self._trade_event_snapshot()
+        elif self._risk_denied_events:
+            self._latest = self._risk_denied_event_snapshot()
         else:
             self._latest = SimulationSnapshot(
                 open_positions={"sim-0001": object()} if self._cycle >= 1 else {},
@@ -655,6 +705,30 @@ class _FakeSimulationEngine:
                     product_id=closed.product_id,
                     market_ticker=closed.market_ticker,
                     reason=closed.exit_reason,
+                ),
+            ),
+            evaluation_count=self._cycle,
+        )
+
+
+    def _risk_denied_event_snapshot(self) -> SimulationSnapshot:
+        return SimulationSnapshot(
+            open_positions={},
+            closed_positions=(),
+            decisions=(
+                SimulationDecision(
+                    action="skip_entry",
+                    position_id=None,
+                    product_id="BTC-USD",
+                    market_ticker="KXBTC15M-OLD",
+                    reason="risk_kill_switch_active",
+                    details={
+                        "direction": "up",
+                        "confidence": 70,
+                        "entry_price": Decimal("0.460"),
+                        "current_exposure_dollars": Decimal("0"),
+                        "realized_daily_pnl_dollars": Decimal("0"),
+                    },
                 ),
             ),
             evaluation_count=self._cycle,
