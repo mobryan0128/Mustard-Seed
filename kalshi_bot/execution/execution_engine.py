@@ -25,6 +25,9 @@ from kalshi_bot.observability.replay_engine import ReplayEngine
 from kalshi_bot.risk.risk_manager import RiskManager
 
 
+MAX_ENTRY_PRICE = Decimal("0.800")
+
+
 class SimulationExecutionError(ValueError):
     """Raised when simulation execution configuration is invalid."""
 
@@ -325,6 +328,18 @@ class SimulationExecutionEngine:
                         product_id=ranked_contract.product_id,
                         market_ticker=ranked_contract.market_ticker,
                         reason="same_pass_reentry_disallowed",
+                    )
+                )
+                continue
+
+            if ranked_contract.midpoint > MAX_ENTRY_PRICE:
+                decisions.append(
+                    SimulationDecision(
+                        action="skip_entry",
+                        position_id=None,
+                        product_id=ranked_contract.product_id,
+                        market_ticker=ranked_contract.market_ticker,
+                        reason="entry_price_too_high",
                     )
                 )
                 continue

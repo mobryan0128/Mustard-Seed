@@ -72,6 +72,7 @@ def _run_fixtures(engine: SimulationExecutionEngine) -> list[str]:
     third_snapshot = engine.evaluate(_third_scan_snapshot())
     failures.extend(_validate_second_product_entry(third_snapshot))
     failures.extend(_validate_snapshot_is_inspectable(third_snapshot))
+    failures.extend(_validate_entry_price_filter())
     return failures
 
 
@@ -142,6 +143,99 @@ def _validate_snapshot_is_inspectable(snapshot) -> list[str]:
     if not all(isinstance(position.latest_price, Decimal) for position in snapshot.open_positions.values()):
         failures.append("latest_price is not Decimal for all open positions")
     return failures
+
+
+def _validate_entry_price_filter() -> list[str]:
+    failures: list[str] = []
+    failures.extend(_validate_high_price_skip())
+    failures.extend(_validate_lower_price_opens_after_high_price_skip())
+    return failures
+
+
+def _validate_high_price_skip() -> list[str]:
+    engine = _new_engine()
+    snapshot = engine.evaluate(
+        ContractScanSnapshot(
+            ranked_contracts=(
+                _scanned_contract(
+                    product_id="BTC-USD",
+                    market_ticker="KXBTC-HIGH",
+                    midpoint=Decimal("0.801"),
+                    confidence=80,
+                    structure="trend",
+                    direction="up",
+                    bias_as_of="2026-04-23T12:03:00+00:00",
+                    market_as_of="2026-04-23T12:03:03+00:00",
+                ),
+            ),
+            skipped_contracts=(),
+        )
+    )
+    failures: list[str] = []
+    if snapshot.open_positions:
+        failures.append(f"high price skip opened positions={tuple(snapshot.open_positions)}")
+    actions = tuple(decision.action for decision in snapshot.decisions)
+    if actions != ("skip_entry",):
+        failures.append(f"high price skip actions={actions}")
+    if snapshot.decisions[-1].reason != "entry_price_too_high":
+        failures.append(f"high price skip reason={snapshot.decisions[-1].reason}")
+    return failures
+
+
+def _validate_lower_price_opens_after_high_price_skip() -> list[str]:
+    engine = _new_engine()
+    snapshot = engine.evaluate(
+        ContractScanSnapshot(
+            ranked_contracts=(
+                _scanned_contract(
+                    product_id="BTC-USD",
+                    market_ticker="KXBTC-HIGH",
+                    midpoint=Decimal("0.820"),
+                    confidence=80,
+                    structure="trend",
+                    direction="up",
+                    bias_as_of="2026-04-23T12:04:00+00:00",
+                    market_as_of="2026-04-23T12:04:03+00:00",
+                ),
+                _scanned_contract(
+                    product_id="BTC-USD",
+                    market_ticker="KXBTC-LOW",
+                    midpoint=Decimal("0.500"),
+                    confidence=78,
+                    structure="trend",
+                    direction="up",
+                    bias_as_of="2026-04-23T12:04:00+00:00",
+                    market_as_of="2026-04-23T12:04:04+00:00",
+                ),
+            ),
+            skipped_contracts=(),
+        )
+    )
+    failures: list[str] = []
+    position = snapshot.open_positions.get("sim-0001")
+    if position is None:
+        failures.append("lower price after high skip did not open")
+        return failures
+    if position.market_ticker != "KXBTC-LOW" or position.entry_price != Decimal("0.500"):
+        failures.append(
+            f"lower price after high skip opened {position.market_ticker}/{position.entry_price}"
+        )
+    actions = tuple(decision.action for decision in snapshot.decisions)
+    if actions != ("skip_entry", "open_position"):
+        failures.append(f"lower price after high skip actions={actions}")
+    if snapshot.decisions[0].reason != "entry_price_too_high":
+        failures.append(f"lower price after high skip reason={snapshot.decisions[0].reason}")
+    return failures
+
+
+def _new_engine() -> SimulationExecutionEngine:
+    return SimulationExecutionEngine(
+        enabled=True,
+        max_new_positions_per_evaluation=1,
+        position_id_prefix="sim",
+        exit_enabled=True,
+        allow_same_pass_reentry=False,
+    )
 
 
 def _first_scan_snapshot() -> ContractScanSnapshot:
