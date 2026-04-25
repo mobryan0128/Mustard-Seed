@@ -304,6 +304,7 @@ def _validate_simulation_trade_events_persisted() -> list[str]:
         expected = {
             "entry_price": "0.460",
             "exit_price": "0.490",
+            "stake_dollars": "0.20",
             "exit_reason": "direction_conflict",
             "pnl": "0.030",
         }
@@ -605,6 +606,7 @@ class _FakeSimulationEngine:
             confidence=70,
             entry_price=Decimal("0.460"),
             latest_price=Decimal("0.460"),
+            stake_dollars=Decimal("0.20"),
             status="open",
             opened_at="2026-04-23T12:00:03+00:00",
             updated_at="2026-04-23T12:00:03+00:00",
@@ -635,6 +637,7 @@ class _FakeSimulationEngine:
             confidence=opened.confidence,
             entry_price=opened.entry_price,
             exit_price=Decimal("0.490"),
+            stake_dollars=opened.stake_dollars,
             status="closed",
             opened_at=opened.opened_at,
             closed_at="2026-04-23T12:01:03+00:00",

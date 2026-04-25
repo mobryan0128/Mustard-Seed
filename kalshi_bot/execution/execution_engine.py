@@ -48,6 +48,7 @@ class SimulatedPosition:
     confidence: int
     entry_price: Decimal
     latest_price: Decimal
+    stake_dollars: Decimal | None
     status: str
     opened_at: str | None
     updated_at: str | None
@@ -122,6 +123,7 @@ class SimulationExecutionEngine:
         position_id_prefix: str,
         exit_enabled: bool,
         allow_same_pass_reentry: bool,
+        risk_manager: RiskManager | None = None,
     ) -> None:
         if not enabled:
             raise SimulationExecutionError("Simulation execution is disabled.")
@@ -137,6 +139,7 @@ class SimulationExecutionEngine:
         self._position_id_prefix = normalized_prefix
         self._exit_enabled = exit_enabled
         self._allow_same_pass_reentry = allow_same_pass_reentry
+        self._risk_manager = risk_manager or _default_simulation_risk_manager()
         self._open_positions: dict[str, SimulatedPosition] = {}
         self._position_id_by_product: dict[str, str] = {}
         self._closed_positions: list[ClosedSimulatedPosition] = []
@@ -149,13 +152,18 @@ class SimulationExecutionEngine:
         self._next_position_number = 1
 
     @classmethod
-    def from_settings(cls, settings: KalshiSettings) -> "SimulationExecutionEngine":
+    def from_settings(
+        cls,
+        settings: KalshiSettings,
+        risk_manager: RiskManager | None = None,
+    ) -> "SimulationExecutionEngine":
         return cls(
             enabled=settings.simulation_enabled,
             max_new_positions_per_evaluation=settings.simulation_max_new_positions_per_evaluation,
             position_id_prefix=settings.simulation_position_id_prefix,
             exit_enabled=settings.simulation_exit_enabled,
             allow_same_pass_reentry=settings.simulation_allow_same_pass_reentry,
+            risk_manager=risk_manager or RiskManager.from_settings(settings),
         )
 
     def evaluate(self, scan_snapshot: ContractScanSnapshot) -> SimulationSnapshot:
@@ -218,6 +226,7 @@ class SimulationExecutionEngine:
                     confidence=position.confidence,
                     entry_price=position.entry_price,
                     exit_price=exit_decision.exit_price,
+                    stake_dollars=position.stake_dollars,
                     status="closed",
                     opened_at=position.opened_at,
                     closed_at=exit_decision.closed_at,
@@ -257,6 +266,7 @@ class SimulationExecutionEngine:
                 confidence=ranked_contract.confidence,
                 entry_price=position.entry_price,
                 latest_price=ranked_contract.midpoint,
+                stake_dollars=position.stake_dollars,
                 status=position.status,
                 opened_at=position.opened_at,
                 updated_at=_reference_timestamp(ranked_contract),
@@ -344,7 +354,33 @@ class SimulationExecutionEngine:
                 )
                 continue
 
-            position = self._open_position_from_contract(ranked_contract)
+            risk_decision = self._risk_manager.evaluate_entry_risk(
+                product_id=ranked_contract.product_id,
+                confidence=ranked_contract.confidence,
+                open_position_count=len(self._open_positions),
+                current_exposure_dollars=_current_exposure_dollars(
+                    self._open_positions.values()
+                ),
+                realized_daily_pnl_dollars=_realized_pnl_dollars(
+                    self._closed_positions
+                ),
+            )
+            if not risk_decision.allowed:
+                decisions.append(
+                    SimulationDecision(
+                        action="skip_entry",
+                        position_id=None,
+                        product_id=ranked_contract.product_id,
+                        market_ticker=ranked_contract.market_ticker,
+                        reason=risk_decision.reason,
+                    )
+                )
+                continue
+
+            position = self._open_position_from_contract(
+                ranked_contract,
+                stake_dollars=risk_decision.stake_dollars,
+            )
             self._open_positions[position.position_id] = position
             self._position_id_by_product[position.product_id] = position.position_id
             decisions.append(
@@ -369,7 +405,12 @@ class SimulationExecutionEngine:
                 )
             )
 
-    def _open_position_from_contract(self, contract: ScannedContract) -> SimulatedPosition:
+    def _open_position_from_contract(
+        self,
+        contract: ScannedContract,
+        *,
+        stake_dollars: Decimal | None,
+    ) -> SimulatedPosition:
         position_id = f"{self._position_id_prefix}-{self._next_position_number:04d}"
         self._next_position_number += 1
         reference_timestamp = _reference_timestamp(contract)
@@ -382,11 +423,40 @@ class SimulationExecutionEngine:
             confidence=contract.confidence,
             entry_price=contract.midpoint,
             latest_price=contract.midpoint,
+            stake_dollars=stake_dollars,
             status="open",
             opened_at=reference_timestamp,
             updated_at=reference_timestamp,
             update_count=0,
         )
+
+
+def _current_exposure_dollars(positions) -> Decimal:
+    return sum(
+        (position.stake_dollars or Decimal("0") for position in positions),
+        Decimal("0"),
+    )
+
+
+def _realized_pnl_dollars(positions) -> Decimal:
+    return sum(
+        (
+            (position.exit_price - position.entry_price)
+            * (position.stake_dollars or Decimal("0"))
+            for position in positions
+        ),
+        Decimal("0"),
+    )
+
+
+def _default_simulation_risk_manager() -> RiskManager:
+    return RiskManager(
+        live_validation_enabled=False,
+        live_trading_enabled=False,
+        live_kill_switch_active=False,
+        env="demo",
+        live_validation_env="prod",
+    )
 
 
 def _reference_timestamp(contract: ScannedContract) -> str | None:

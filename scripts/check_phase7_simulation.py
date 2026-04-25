@@ -92,6 +92,8 @@ def _validate_first_entry(snapshot) -> list[str]:
         failures.append(
             f"first entry wrong prices entry={position.entry_price} latest={position.latest_price}"
         )
+    if position.stake_dollars != Decimal("0.20"):
+        failures.append(f"first entry stake={position.stake_dollars} expected=0.20")
     if position.update_count != 0:
         failures.append(f"first entry update_count={position.update_count} expected=0")
     if snapshot.decisions[-1].action != "open_position":
@@ -129,6 +131,8 @@ def _validate_second_product_entry(snapshot) -> list[str]:
         failures.append(
             f"third snapshot wrong second position {second_position.product_id}/{second_position.entry_price}"
         )
+    if second_position.stake_dollars != Decimal("0.20"):
+        failures.append(f"third snapshot stake={second_position.stake_dollars} expected=0.20")
     if snapshot.decisions[-1].action != "open_position":
         failures.append(f"third snapshot final action={snapshot.decisions[-1].action}")
     return failures

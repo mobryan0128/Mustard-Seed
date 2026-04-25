@@ -559,6 +559,7 @@ class KalshiBotRunner:
                         "structure": position.structure,
                         "confidence": position.confidence,
                         "entry_price": position.entry_price,
+                        "stake_dollars": position.stake_dollars,
                         "opened_at": position.opened_at,
                     },
                 )
@@ -579,6 +580,7 @@ class KalshiBotRunner:
                         "confidence": position.confidence,
                         "entry_price": position.entry_price,
                         "exit_price": position.exit_price,
+                        "stake_dollars": position.stake_dollars,
                         "opened_at": position.opened_at,
                         "closed_at": position.closed_at,
                         "exit_reason": position.exit_reason,

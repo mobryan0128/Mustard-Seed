@@ -38,6 +38,7 @@ class ClosedSimulatedPosition:
     confidence: int
     entry_price: Decimal
     exit_price: Decimal
+    stake_dollars: Decimal | None
     status: str
     opened_at: str | None
     closed_at: str | None

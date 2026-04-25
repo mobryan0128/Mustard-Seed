@@ -93,6 +93,8 @@ def _validate_first_entry(snapshot) -> list[str]:
         failures.append(
             f"first pass wrong prices entry={position.entry_price} latest={position.latest_price}"
         )
+    if position.stake_dollars != Decimal("0.20"):
+        failures.append(f"first pass stake={position.stake_dollars} expected=0.20")
     if snapshot.closed_positions:
         failures.append("first pass expected no closed positions")
     actions = tuple(decision.action for decision in snapshot.decisions)
@@ -118,6 +120,8 @@ def _validate_direction_conflict_exit(snapshot) -> list[str]:
         failures.append(f"direction conflict reason={closed_position.exit_reason}")
     if closed_position.exit_price != Decimal("0.490"):
         failures.append(f"direction conflict exit_price={closed_position.exit_price}")
+    if closed_position.stake_dollars != Decimal("0.20"):
+        failures.append(f"direction conflict stake={closed_position.stake_dollars}")
     if closed_position.market_ticker != "KXBTC-1":
         failures.append(f"direction conflict closed ticker={closed_position.market_ticker}")
 
