@@ -452,7 +452,10 @@ class KalshiBotRunner:
                 else 0
             ),
             top_skip_reasons=_top_skip_reasons(contract_scan_snapshot),
-            bias_diagnostics=_bias_diagnostics(bias_snapshot),
+            bias_diagnostics=_bias_diagnostics(
+                bias_snapshot,
+                product_ids=self._settings.bias_products,
+            ),
             mapped_market_diagnostics=_mapped_market_diagnostics(
                 product_markets=self._active_product_markets,
                 market_snapshot=market_snapshot,
@@ -658,9 +661,20 @@ def _top_skip_reasons(
     )
 
 
-def _bias_diagnostics(bias_snapshot: BiasSnapshot) -> tuple[BiasDiagnostic, ...]:
+def _bias_diagnostics(
+    bias_snapshot: BiasSnapshot,
+    *,
+    product_ids: tuple[str, ...],
+) -> tuple[BiasDiagnostic, ...]:
     diagnostics: list[BiasDiagnostic] = []
-    for product_id in ("BTC-USD", "ETH-USD"):
+    diagnostic_product_ids = tuple(
+        dict.fromkeys(
+            product_id
+            for product_id in (*product_ids, *bias_snapshot.products)
+            if product_id.strip()
+        )
+    )
+    for product_id in diagnostic_product_ids:
         state = bias_snapshot.products.get(product_id)
         diagnostics.append(
             BiasDiagnostic(
