@@ -36,6 +36,31 @@ class LiveSubmissionResult:
     error_message: str | None
 
 
+@dataclass(frozen=True)
+class LivePositionRecord:
+    """Latest reconciled state for one submitted live order."""
+
+    client_order_id: str
+    order_id: str
+    product_id: str
+    simulation_position_id: str
+    ticker: str
+    side: str
+    action: str
+    direction: str
+    confidence: int
+    requested_count: Decimal
+    filled_count: Decimal
+    remaining_count: Decimal
+    price_dollars: Decimal
+    average_fill_price_dollars: Decimal | None
+    stake_dollars: Decimal
+    status: str
+    classification: str
+    opened_at: str | None
+    updated_at: str | None
+
+
 class LiveExecutionCoordinator:
     """Convert simulated entries into intents and optionally submit guarded live orders."""
 
@@ -58,6 +83,14 @@ class LiveExecutionCoordinator:
         )
         self._replay_engine = replay_engine or _replay_engine_from_settings(settings)
         self._sleep_fn = sleep_fn
+        self._live_position_ledger: dict[str, LivePositionRecord] = {}
+        self._client_order_id_by_order_id: dict[str, str] = {}
+
+    @property
+    def live_position_ledger(self) -> dict[str, LivePositionRecord]:
+        """Latest in-memory live order ledger keyed by client order id."""
+
+        return dict(self._live_position_ledger)
 
     def process_simulation_snapshot(
         self,
@@ -169,7 +202,14 @@ class LiveExecutionCoordinator:
                 identifier=created_order.order_id,
                 payload=_order_summary_payload(created_order),
             )
-            final_order, poll_attempts_used = self._poll_order(created_order.order_id)
+            self._update_live_position_ledger(
+                intent=intent,
+                order=created_order,
+            )
+            final_order, poll_attempts_used = self._poll_order(
+                created_order.order_id,
+                intent=intent,
+            )
             classification = _classify_order_result(final_order)
         except KalshiClientError as exc:
             error_message = str(exc)
@@ -201,6 +241,11 @@ class LiveExecutionCoordinator:
                 **_order_summary_payload(final_order),
             },
         )
+        final_record = self._live_position_ledger.get(
+            final_order.client_order_id or intent.client_order_id
+        )
+        if final_record is not None:
+            self._log_order_outcome(final_record)
         return LiveSubmissionResult(
             classification=classification,
             decision_reason=None,
@@ -232,7 +277,12 @@ class LiveExecutionCoordinator:
             },
         )
 
-    def _poll_order(self, order_id: str) -> tuple[KalshiOrderSummary, int]:
+    def _poll_order(
+        self,
+        order_id: str,
+        *,
+        intent: LiveOrderIntent | None = None,
+    ) -> tuple[KalshiOrderSummary, int]:
         poll_attempts = getattr(self._settings, "live_validation_poll_attempts", 1)
         poll_interval_seconds = getattr(
             self._settings,
@@ -246,6 +296,8 @@ class LiveExecutionCoordinator:
             identifier=order_id,
             payload={"attempt": attempts_used, "status": last_order.status},
         )
+        if intent is not None:
+            self._update_live_position_ledger(intent=intent, order=last_order)
         if _is_terminal_order(last_order):
             return last_order, attempts_used
 
@@ -266,9 +318,57 @@ class LiveExecutionCoordinator:
                 identifier=order_id,
                 payload={"attempt": attempts_used, "status": last_order.status},
             )
+            if intent is not None:
+                self._update_live_position_ledger(intent=intent, order=last_order)
             if _is_terminal_order(last_order):
                 break
         return last_order, attempts_used
+
+    def _update_live_position_ledger(
+        self,
+        *,
+        intent: LiveOrderIntent,
+        order: KalshiOrderSummary,
+    ) -> LivePositionRecord:
+        classification = _classify_order_result(order)
+        client_order_id = order.client_order_id or intent.client_order_id
+        previous = self._live_position_ledger.get(client_order_id)
+        record = _live_position_record_from_order(
+            intent=intent,
+            order=order,
+            classification=classification,
+        )
+        self._live_position_ledger[client_order_id] = record
+        self._client_order_id_by_order_id[record.order_id] = client_order_id
+        self._log_and_record(
+            event_type="live_position_ledger_updated",
+            identifier=record.client_order_id,
+            payload=_live_position_record_payload(record),
+        )
+
+        previous_filled_count = previous.filled_count if previous is not None else Decimal("0")
+        if record.filled_count > 0 and previous_filled_count <= 0:
+            self._log_and_record(
+                event_type="live_position_opened",
+                identifier=record.client_order_id,
+                payload=_live_position_record_payload(record),
+            )
+        return record
+
+    def _log_order_outcome(self, record: LivePositionRecord) -> None:
+        if record.classification == "rejected":
+            event_type = "live_order_rejected"
+        elif record.classification == "canceled_or_expired":
+            event_type = "live_order_canceled_or_expired"
+        elif record.classification == "unknown_final_state":
+            event_type = "live_order_unknown_final_state"
+        else:
+            return
+        self._log_and_record(
+            event_type=event_type,
+            identifier=record.client_order_id,
+            payload=_live_position_record_payload(record),
+        )
 
     def _log_and_record(
         self,
@@ -358,6 +458,76 @@ def _order_summary_payload(order: KalshiOrderSummary) -> dict[str, object]:
     }
 
 
+def _live_position_record_from_order(
+    *,
+    intent: LiveOrderIntent,
+    order: KalshiOrderSummary,
+    classification: str,
+) -> LivePositionRecord:
+    requested_count = order.initial_count_fp or Decimal(str(intent.count))
+    filled_count = order.fill_count_fp or Decimal("0")
+    remaining_count = order.remaining_count_fp
+    if remaining_count is None:
+        remaining_count = max(requested_count - filled_count, Decimal("0"))
+    updated_at = order.last_update_time or order.created_time
+    return LivePositionRecord(
+        client_order_id=order.client_order_id or intent.client_order_id,
+        order_id=order.order_id,
+        product_id=intent.product_id,
+        simulation_position_id=intent.simulation_position_id,
+        ticker=order.ticker,
+        side=order.side,
+        action=order.action,
+        direction=intent.direction,
+        confidence=intent.confidence,
+        requested_count=requested_count,
+        filled_count=filled_count,
+        remaining_count=remaining_count,
+        price_dollars=_order_price_dollars(order, intent),
+        average_fill_price_dollars=None,
+        stake_dollars=intent.stake_dollars,
+        status=order.status,
+        classification=classification,
+        opened_at=order.created_time if filled_count > 0 else None,
+        updated_at=updated_at,
+    )
+
+
+def _order_price_dollars(
+    order: KalshiOrderSummary,
+    intent: LiveOrderIntent,
+) -> Decimal:
+    if order.side == "yes" and order.yes_price_dollars is not None:
+        return order.yes_price_dollars
+    if order.side == "no" and order.no_price_dollars is not None:
+        return order.no_price_dollars
+    return intent.price_dollars
+
+
+def _live_position_record_payload(record: LivePositionRecord) -> dict[str, object]:
+    return {
+        "client_order_id": record.client_order_id,
+        "order_id": record.order_id,
+        "product_id": record.product_id,
+        "simulation_position_id": record.simulation_position_id,
+        "ticker": record.ticker,
+        "side": record.side,
+        "action": record.action,
+        "direction": record.direction,
+        "confidence": record.confidence,
+        "requested_count": record.requested_count,
+        "filled_count": record.filled_count,
+        "remaining_count": record.remaining_count,
+        "price_dollars": record.price_dollars,
+        "average_fill_price_dollars": record.average_fill_price_dollars,
+        "stake_dollars": record.stake_dollars,
+        "status": record.status,
+        "classification": record.classification,
+        "opened_at": record.opened_at,
+        "updated_at": record.updated_at,
+    }
+
+
 def _classify_order_result(order: KalshiOrderSummary) -> str:
     if order.status == "rejected":
         return "rejected"
@@ -365,10 +535,10 @@ def _classify_order_result(order: KalshiOrderSummary) -> str:
     initial_count = order.initial_count_fp or Decimal("0")
     if fill_count > 0 and initial_count > 0 and fill_count >= initial_count:
         return "filled"
-    if fill_count > 0:
-        return "partially_filled"
     if order.status in {"canceled", "cancelled", "expired"}:
         return "canceled_or_expired"
+    if fill_count > 0:
+        return "partially_filled"
     return "unknown_final_state"
 
 
