@@ -32,6 +32,8 @@ def main() -> int:
     failures.extend(_validate_kill_switch_blocks_submission())
     failures.extend(_validate_non_prod_blocks_submission())
     failures.extend(_validate_count_cap_blocks_submission())
+    failures.extend(_validate_count_cap_override_allows_five())
+    failures.extend(_validate_count_cap_override_blocks_six())
     failures.extend(_validate_allowed_fake_flow())
     failures.extend(_validate_created_terminal_fill_does_not_poll())
 
@@ -96,6 +98,35 @@ def _validate_count_cap_blocks_submission() -> list[str]:
     result, state = _run_submission(
         intent=_intent(count=2, risk_approved=True),
         risk_manager=_risk_manager(),
+    )
+    return _assert_blocked(
+        result=result,
+        state=state,
+        expected_reason="order_count_exceeds_phase10_cap",
+    )
+
+
+def _validate_count_cap_override_allows_five() -> list[str]:
+    result, state = _run_submission(
+        intent=_intent(
+            count=5,
+            client_order_id="sim-live-count-five",
+            risk_approved=True,
+        ),
+        risk_manager=_risk_manager(max_live_order_count=5),
+    )
+    failures: list[str] = []
+    if result.classification != "filled":
+        failures.append(f"count-five classification={result.classification}")
+    if state.create_order_calls != 1:
+        failures.append(f"count-five create_order_calls={state.create_order_calls}")
+    return failures
+
+
+def _validate_count_cap_override_blocks_six() -> list[str]:
+    result, state = _run_submission(
+        intent=_intent(count=6, risk_approved=True),
+        risk_manager=_risk_manager(max_live_order_count=5),
     )
     return _assert_blocked(
         result=result,
@@ -284,6 +315,7 @@ def _risk_manager(
     live_kill_switch_active: bool = False,
     env: str = "prod",
     live_validation_env: str = "prod",
+    max_live_order_count: int = 1,
 ) -> RiskManager:
     return RiskManager(
         live_validation_enabled=live_validation_enabled,
@@ -291,7 +323,7 @@ def _risk_manager(
         live_kill_switch_active=live_kill_switch_active,
         env=env,
         live_validation_env=live_validation_env,
-        max_live_order_count=1,
+        max_live_order_count=max_live_order_count,
         required_time_in_force="immediate_or_cancel",
     )
 

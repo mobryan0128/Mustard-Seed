@@ -71,6 +71,15 @@ class LivePositionRecord:
     updated_at: str | None
 
 
+@dataclass(frozen=True)
+class LiveRiskState:
+    """Current live exposure inputs used by the live entry risk gate."""
+
+    open_position_count: int
+    current_exposure_dollars: Decimal
+    source: str
+
+
 class LiveExecutionCoordinator:
     """Convert simulated entries into intents and optionally submit guarded live orders."""
 
@@ -171,6 +180,7 @@ class LiveExecutionCoordinator:
         if balance_dollars is None:
             return ()
         entry_risk_manager = self._entry_risk_manager_for_balance(balance_dollars)
+        live_risk_state = self._reconcile_live_risk_state(cycle_number=cycle_number)
 
         intents: list[LiveOrderIntent] = []
         for contract in contract_scan_snapshot.ranked_contracts:
@@ -210,12 +220,11 @@ class LiveExecutionCoordinator:
                 },
             )
 
-            current_exposure_dollars = self._live_current_exposure_dollars()
             risk_decision = entry_risk_manager.evaluate_entry_risk(
                 product_id=contract.product_id,
                 confidence=contract.confidence,
-                open_position_count=self._live_open_position_count(),
-                current_exposure_dollars=current_exposure_dollars,
+                open_position_count=live_risk_state.open_position_count,
+                current_exposure_dollars=live_risk_state.current_exposure_dollars,
                 realized_daily_pnl_dollars=LIVE_RUNNER_REALIZED_DAILY_PNL_DOLLARS,
             )
             if not risk_decision.allowed:
@@ -224,7 +233,11 @@ class LiveExecutionCoordinator:
                     contract=contract,
                     cycle_number=cycle_number,
                     details={
-                        "current_exposure_dollars": current_exposure_dollars,
+                        "current_exposure_dollars": (
+                            live_risk_state.current_exposure_dollars
+                        ),
+                        "open_position_count": live_risk_state.open_position_count,
+                        "live_risk_source": live_risk_state.source,
                         "realized_daily_pnl_dollars": (
                             LIVE_RUNNER_REALIZED_DAILY_PNL_DOLLARS
                         ),
@@ -250,7 +263,11 @@ class LiveExecutionCoordinator:
                     "confidence": contract.confidence,
                     "balance_dollars": balance_dollars,
                     "stake_dollars": stake_dollars,
-                    "current_exposure_dollars": current_exposure_dollars,
+                    "current_exposure_dollars": (
+                        live_risk_state.current_exposure_dollars
+                    ),
+                    "open_position_count": live_risk_state.open_position_count,
+                    "live_risk_source": live_risk_state.source,
                     "entry_price": executable_price,
                     "executable_price": executable_price,
                 },
@@ -359,7 +376,7 @@ class LiveExecutionCoordinator:
             ),
             env=getattr(self._settings, "env", "demo"),
             live_validation_env="prod",
-            max_live_order_count=1,
+            max_live_order_count=getattr(self._settings, "live_max_order_count", 1),
             required_time_in_force=getattr(
                 self._settings,
                 "live_validation_time_in_force",
@@ -378,7 +395,11 @@ class LiveExecutionCoordinator:
                 "risk_max_stake_dollars",
                 Decimal("3"),
             ),
-            max_open_positions=getattr(self._settings, "risk_max_open_positions", 2),
+            max_open_positions=getattr(
+                self._settings,
+                "live_max_open_positions",
+                1,
+            ),
             max_total_exposure_dollars=getattr(
                 self._settings,
                 "risk_max_total_exposure_dollars",
@@ -606,6 +627,128 @@ class LiveExecutionCoordinator:
             details=payload,
         )
 
+    def _reconcile_live_risk_state(
+        self,
+        *,
+        cycle_number: int | None,
+    ) -> LiveRiskState:
+        ledger_state = self._ledger_live_risk_state()
+        if self._client is None or not hasattr(self._client, "get_positions"):
+            self._log_live_risk_state(
+                cycle_number=cycle_number,
+                state=ledger_state,
+                position_tickers=(),
+                message="positions_client_unavailable",
+            )
+            return ledger_state
+
+        try:
+            position_page = self._client.get_positions(
+                count_filter="position",
+                settlement_status="unsettled",
+                limit=1000,
+            )
+        except KalshiClientError as exc:
+            self._log_live_risk_state(
+                cycle_number=cycle_number,
+                state=ledger_state,
+                position_tickers=(),
+                message=f"positions_fetch_failed: {exc}",
+            )
+            return ledger_state
+
+        active_positions = tuple(
+            position
+            for position in position_page.market_positions
+            if abs(position.position_fp) > Decimal("0")
+        )
+        exposure_dollars = sum(
+            (abs(position.market_exposure_dollars) for position in active_positions),
+            Decimal("0"),
+        )
+        kalshi_state = LiveRiskState(
+            open_position_count=len(active_positions),
+            current_exposure_dollars=exposure_dollars,
+            source="kalshi_positions",
+        )
+        self._log_live_risk_state(
+            cycle_number=cycle_number,
+            state=kalshi_state,
+            position_tickers=tuple(position.ticker for position in active_positions[:10]),
+        )
+        if (
+            self._raw_ledger_exposure_dollars() > Decimal("0")
+            and kalshi_state.open_position_count == 0
+            and kalshi_state.current_exposure_dollars == Decimal("0")
+        ):
+            self._log_and_record(
+                event_type="stale_live_exposure_cleared",
+                identifier="live_risk_state",
+                payload={
+                    "cycle_number": cycle_number,
+                    "ledger_open_position_count": ledger_state.open_position_count,
+                    "ledger_current_exposure_dollars": (
+                        ledger_state.current_exposure_dollars
+                    ),
+                    "raw_ledger_exposure_dollars": (
+                        self._raw_ledger_exposure_dollars()
+                    ),
+                    "kalshi_open_position_count": kalshi_state.open_position_count,
+                    "kalshi_current_exposure_dollars": (
+                        kalshi_state.current_exposure_dollars
+                    ),
+                },
+            )
+        return kalshi_state
+
+    def _ledger_live_risk_state(self) -> LiveRiskState:
+        return LiveRiskState(
+            open_position_count=self._live_open_position_count(),
+            current_exposure_dollars=self._live_current_exposure_dollars(),
+            source="ledger_fallback",
+        )
+
+    def _log_live_risk_state(
+        self,
+        *,
+        cycle_number: int | None,
+        state: LiveRiskState,
+        position_tickers: tuple[str, ...],
+        message: str | None = None,
+    ) -> None:
+        payload = {
+            "cycle_number": cycle_number,
+            "source": state.source,
+            "open_position_count": state.open_position_count,
+            "current_exposure_dollars": state.current_exposure_dollars,
+            "position_ticker_sample": position_tickers,
+        }
+        if message is not None:
+            payload["message"] = message
+        self._log_and_record(
+            event_type="live_position_reconciled",
+            identifier="live_risk_state",
+            payload=payload,
+        )
+        self._log_and_record(
+            event_type="live_open_position_count",
+            identifier="live_risk_state",
+            payload={
+                "cycle_number": cycle_number,
+                "source": state.source,
+                "open_position_count": state.open_position_count,
+            },
+        )
+        self._log_and_record(
+            event_type="live_current_exposure_dollars",
+            identifier="live_risk_state",
+            payload={
+                "cycle_number": cycle_number,
+                "source": state.source,
+                "current_exposure_dollars": state.current_exposure_dollars,
+            },
+        )
+
     def _live_open_position_count(self) -> int:
         return sum(
             1
@@ -619,6 +762,16 @@ class LiveExecutionCoordinator:
                 record.filled_count * record.price_dollars
                 for record in self._live_position_ledger.values()
                 if _record_has_live_exposure(record)
+            ),
+            Decimal("0"),
+        )
+
+    def _raw_ledger_exposure_dollars(self) -> Decimal:
+        return sum(
+            (
+                record.filled_count * record.price_dollars
+                for record in self._live_position_ledger.values()
+                if record.filled_count > Decimal("0")
             ),
             Decimal("0"),
         )
@@ -950,7 +1103,9 @@ def _live_position_record_payload(record: LivePositionRecord) -> dict[str, objec
 def _record_has_live_exposure(record: LivePositionRecord) -> bool:
     return (
         record.filled_count > Decimal("0")
-        and record.classification not in {"rejected", "unknown_final_state"}
+        and record.classification == "partially_filled"
+        and record.status.lower()
+        not in {"canceled", "cancelled", "expired", "settled", "closed", "rejected"}
     )
 
 

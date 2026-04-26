@@ -58,6 +58,8 @@ DEFAULT_LIVE_VALIDATION_CLIENT_ORDER_ID_PREFIX = "live-smoke"
 DEFAULT_LIVE_TRADING_ENABLED = False
 DEFAULT_LIVE_KILL_SWITCH_ACTIVE = False
 DEFAULT_LIVE_RUNNER_EXECUTION_ENABLED = False
+DEFAULT_LIVE_MAX_ORDER_COUNT = 1
+DEFAULT_LIVE_MAX_OPEN_POSITIONS = 1
 DEFAULT_RUNNER_ENABLED = True
 DEFAULT_RUNNER_LOOP_INTERVAL_SECONDS = 5.0
 DEFAULT_RUNNER_STATUS_LOG_EVERY_N_CYCLES = 1
@@ -145,6 +147,8 @@ class KalshiSettings:
     live_trading_enabled: bool
     live_kill_switch_active: bool
     live_runner_execution_enabled: bool
+    live_max_order_count: int
+    live_max_open_positions: int
     runner_enabled: bool
     runner_loop_interval_seconds: float
     runner_status_log_every_n_cycles: int
@@ -373,6 +377,16 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         DEFAULT_LIVE_RUNNER_EXECUTION_ENABLED,
         "LIVE_RUNNER_EXECUTION_ENABLED",
     )
+    live_max_order_count = _parse_positive_int(
+        values.get("LIVE_MAX_ORDER_COUNT"),
+        DEFAULT_LIVE_MAX_ORDER_COUNT,
+        "LIVE_MAX_ORDER_COUNT",
+    )
+    live_max_open_positions = _parse_positive_int(
+        values.get("LIVE_MAX_OPEN_POSITIONS"),
+        DEFAULT_LIVE_MAX_OPEN_POSITIONS,
+        "LIVE_MAX_OPEN_POSITIONS",
+    )
     runner_enabled = _parse_bool(
         values.get("RUNNER_ENABLED"),
         DEFAULT_RUNNER_ENABLED,
@@ -560,6 +574,8 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_trading_enabled=live_trading_enabled,
         live_kill_switch_active=live_kill_switch_active,
         live_runner_execution_enabled=live_runner_execution_enabled,
+        live_max_order_count=live_max_order_count,
+        live_max_open_positions=live_max_open_positions,
         runner_enabled=runner_enabled,
         runner_loop_interval_seconds=runner_loop_interval_seconds,
         runner_status_log_every_n_cycles=runner_status_log_every_n_cycles,
@@ -673,6 +689,8 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_TRADING_ENABLED",
         "LIVE_KILL_SWITCH_ACTIVE",
         "LIVE_RUNNER_EXECUTION_ENABLED",
+        "LIVE_MAX_ORDER_COUNT",
+        "LIVE_MAX_OPEN_POSITIONS",
         "RUNNER_ENABLED",
         "RUNNER_LOOP_INTERVAL_SECONDS",
         "RUNNER_STATUS_LOG_EVERY_N_CYCLES",

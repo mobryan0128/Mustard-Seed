@@ -117,7 +117,7 @@ class RiskManager:
             live_kill_switch_active=settings.live_kill_switch_active,
             env=settings.env,
             live_validation_env=settings.live_validation_env,
-            max_live_order_count=1,
+            max_live_order_count=settings.live_max_order_count,
             required_time_in_force=settings.live_validation_time_in_force,
             account_balance_dollars=settings.risk_account_balance_dollars,
             min_percent_per_trade=settings.risk_min_percent_per_trade,
@@ -141,7 +141,7 @@ class RiskManager:
             return LiveSafetyDecision(allow=False, reason="live_env_not_prod")
         if _missing_live_order_field(order):
             return LiveSafetyDecision(allow=False, reason="missing_live_order_field")
-        if order.count != self._max_live_order_count:
+        if order.count <= 0 or order.count > self._max_live_order_count:
             return LiveSafetyDecision(allow=False, reason="order_count_exceeds_phase10_cap")
         if order.time_in_force.strip().lower() != self._required_time_in_force:
             return LiveSafetyDecision(allow=False, reason="unsupported_time_in_force")
