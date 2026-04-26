@@ -58,6 +58,9 @@ class BiasDiagnostic:
     confidence: int | None
     structure: str | None
     risk_flags: tuple[tuple[str, bool], ...]
+    impulse_direction: str | None
+    impulse_return_bps: Decimal | None
+    impulse_detected: bool
 
 
 @dataclass(frozen=True)
@@ -787,6 +790,15 @@ def _bias_diagnostics(
                 confidence=state.confidence if state is not None else None,
                 structure=state.structure if state is not None else None,
                 risk_flags=_risk_flags(state.risk_flags) if state is not None else (),
+                impulse_direction=(
+                    state.impulse_direction if state is not None else None
+                ),
+                impulse_return_bps=(
+                    state.impulse_return_bps if state is not None else None
+                ),
+                impulse_detected=(
+                    state.impulse_detected if state is not None else False
+                ),
             )
         )
     return tuple(diagnostics)
@@ -844,6 +856,9 @@ def _bias_diagnostic_payloads(
             "confidence": item.confidence,
             "structure": item.structure,
             "risk_flags": dict(item.risk_flags),
+            "impulse_direction": item.impulse_direction,
+            "impulse_return_bps": item.impulse_return_bps,
+            "impulse_detected": item.impulse_detected,
         }
         for item in diagnostics
     )

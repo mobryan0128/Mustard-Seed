@@ -177,6 +177,8 @@ def run_offline_fixtures(settings) -> list[str]:
         )
     )
     failures.extend(_run_pruning_case(settings, now))
+    failures.extend(_run_impulse_detection_case(settings, now))
+    failures.extend(_run_slow_move_no_impulse_case(settings, now))
     return failures
 
 
@@ -264,6 +266,70 @@ def _run_pruning_case(settings, now: datetime) -> list[str]:
         failures.append("pruning: history was not pruned to the lookback window")
     if state.lookback_return_bps is None or state.recent_return_bps is None:
         failures.append("pruning: expected returns were not computed after pruning")
+    return failures
+
+
+def _run_impulse_detection_case(settings, now: datetime) -> list[str]:
+    engine = BiasEngine.from_settings(settings)
+    product_id = settings.bias_products[0]
+    prices = (Decimal("100"),) * 21 + (Decimal("102"),) * 4
+    snapshot = None
+    for observed_at, price in _series(now, count=25, step_seconds=5, prices=prices):
+        snapshot = engine.ingest(
+            FixtureFeedSnapshot(
+                products={
+                    product_id: FixturePriceState(
+                        product_id=product_id,
+                        price=price,
+                        source_timestamp=observed_at.isoformat(),
+                    )
+                }
+            )
+        )
+
+    assert snapshot is not None
+    state = snapshot.products[product_id]
+    failures: list[str] = []
+    if not state.impulse_detected:
+        failures.append("impulse: fast move was not detected")
+    if state.impulse_direction != "up":
+        failures.append(f"impulse: direction={state.impulse_direction} expected=up")
+    if state.impulse_return_bps is None or state.impulse_return_bps <= 0:
+        failures.append(f"impulse: return_bps={state.impulse_return_bps} expected positive")
+    return failures
+
+
+def _run_slow_move_no_impulse_case(settings, now: datetime) -> list[str]:
+    engine = BiasEngine.from_settings(settings)
+    product_id = settings.bias_products[0]
+    snapshot = None
+    for observed_at, price in _series(
+        now,
+        count=25,
+        step_seconds=5,
+        prices=_linear_prices("100", "102"),
+    ):
+        snapshot = engine.ingest(
+            FixtureFeedSnapshot(
+                products={
+                    product_id: FixturePriceState(
+                        product_id=product_id,
+                        price=price,
+                        source_timestamp=observed_at.isoformat(),
+                    )
+                }
+            )
+        )
+
+    assert snapshot is not None
+    state = snapshot.products[product_id]
+    failures: list[str] = []
+    if state.impulse_detected:
+        failures.append("slow impulse: slow move was incorrectly detected")
+    if state.impulse_direction is not None:
+        failures.append(f"slow impulse: direction={state.impulse_direction} expected=None")
+    if state.impulse_return_bps is None:
+        failures.append("slow impulse: expected diagnostic return_bps")
     return failures
 
 

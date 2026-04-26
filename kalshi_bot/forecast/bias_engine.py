@@ -17,6 +17,9 @@ if TYPE_CHECKING:
 
 
 BASIS_POINTS_MULTIPLIER = Decimal("10000")
+IMPULSE_SHORT_WINDOW = timedelta(seconds=20)
+IMPULSE_AVERAGE_WINDOW = timedelta(seconds=120)
+IMPULSE_MULTIPLIER = Decimal("2")
 
 
 class BiasEngineError(ValueError):
@@ -54,6 +57,9 @@ class BiasState:
     recent_return_bps: Decimal | None
     observation_count: int
     as_of: str | None
+    impulse_direction: str | None = None
+    impulse_return_bps: Decimal | None = None
+    impulse_detected: bool = False
 
 
 @dataclass(frozen=True)
@@ -140,6 +146,7 @@ class BiasEngine:
             lookback_return_bps = _compute_return_bps(history, history[0] if history else None)
             recent_anchor = _recent_anchor(history, self._recent_window)
             recent_return_bps = _compute_return_bps(history, recent_anchor)
+            impulse_diagnostics = _impulse_diagnostics(history)
 
             risk_flags = BiasRiskFlags(
                 insufficient_history=(
@@ -177,6 +184,9 @@ class BiasEngine:
                 recent_return_bps=recent_return_bps,
                 observation_count=len(history),
                 as_of=as_of.isoformat() if as_of is not None else None,
+                impulse_direction=impulse_diagnostics.direction,
+                impulse_return_bps=impulse_diagnostics.return_bps,
+                impulse_detected=impulse_diagnostics.detected,
             )
 
         self._latest_snapshot = BiasSnapshot(products=products)
@@ -204,6 +214,13 @@ class BiasEngine:
         history = self._history[product_id]
         while history and history[0].observed_at < cutoff:
             history.popleft()
+
+
+@dataclass(frozen=True)
+class _ImpulseDiagnostics:
+    direction: str | None
+    return_bps: Decimal | None
+    detected: bool
 
 
 def _parse_timestamp(value: str) -> datetime:
@@ -235,6 +252,95 @@ def _recent_anchor(
     if candidate.observed_at == latest.observed_at:
         return None
     return candidate
+
+
+def _impulse_diagnostics(history: Deque[PriceObservation]) -> _ImpulseDiagnostics:
+    short_anchor = _recent_anchor(history, IMPULSE_SHORT_WINDOW)
+    short_return_bps = _compute_return_bps(history, short_anchor)
+    average_movement_bps = _average_absolute_movement_bps(
+        history,
+        average_window=IMPULSE_AVERAGE_WINDOW,
+        movement_window=IMPULSE_SHORT_WINDOW,
+    )
+    direction = _return_direction(short_return_bps)
+    detected = (
+        short_return_bps is not None
+        and average_movement_bps is not None
+        and average_movement_bps > 0
+        and abs(short_return_bps) > average_movement_bps * IMPULSE_MULTIPLIER
+    )
+    return _ImpulseDiagnostics(
+        direction=direction if detected else None,
+        return_bps=short_return_bps,
+        detected=detected,
+    )
+
+
+def _average_absolute_movement_bps(
+    history: Deque[PriceObservation],
+    *,
+    average_window: timedelta,
+    movement_window: timedelta,
+) -> Decimal | None:
+    if len(history) < 2:
+        return None
+    latest = history[-1]
+    cutoff = latest.observed_at - average_window
+    observations = tuple(history)
+    window_observations = tuple(
+        observation for observation in history if observation.observed_at >= cutoff
+    )
+    if len(window_observations) < 2:
+        return None
+
+    movements: list[Decimal] = []
+    for observation in window_observations:
+        anchor = _anchor_for_observation(
+            observations,
+            observation=observation,
+            window=movement_window,
+        )
+        if anchor is None or anchor.observed_at == observation.observed_at:
+            continue
+        if anchor.price <= 0:
+            raise BiasEngineError("Anchor price must be greater than zero.")
+        movement = (
+            (observation.price - anchor.price)
+            / anchor.price
+            * BASIS_POINTS_MULTIPLIER
+        ).quantize(Decimal("0.001"))
+        movements.append(abs(movement))
+
+    if not movements:
+        return None
+    return (sum(movements) / Decimal(len(movements))).quantize(Decimal("0.001"))
+
+
+def _anchor_for_observation(
+    observations: tuple[PriceObservation, ...],
+    *,
+    observation: PriceObservation,
+    window: timedelta,
+) -> PriceObservation | None:
+    cutoff = observation.observed_at - window
+    candidate: PriceObservation | None = None
+    for item in observations:
+        if item.observed_at > observation.observed_at:
+            break
+        if item.observed_at >= cutoff:
+            candidate = item
+            break
+    return candidate
+
+
+def _return_direction(return_bps: Decimal | None) -> str | None:
+    if return_bps is None:
+        return None
+    if return_bps > 0:
+        return "up"
+    if return_bps < 0:
+        return "down"
+    return None
 
 
 def _compute_return_bps(

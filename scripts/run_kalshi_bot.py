@@ -115,6 +115,9 @@ def _format_bias_diagnostics(bias_diagnostics) -> str:  # noqa: ANN001
             f"direction={_none_text(item.direction)},"
             f"confidence={_none_text(item.confidence)},"
             f"structure={_none_text(item.structure)},"
+            f"impulse={item.impulse_detected},"
+            f"impulse_direction={_none_text(item.impulse_direction)},"
+            f"impulse_return_bps={_none_text(item.impulse_return_bps)},"
             f"risk_flags={_format_risk_flags(item.risk_flags)}"
         )
         for item in bias_diagnostics
