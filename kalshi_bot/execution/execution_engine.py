@@ -91,6 +91,23 @@ class LiveValidationOrder:
 
 
 @dataclass(frozen=True)
+class LiveOrderIntent:
+    """Pure live order intent derived from a risk-approved simulated position."""
+
+    product_id: str
+    ticker: str
+    action: str
+    side: str
+    price_dollars: Decimal
+    count: int
+    client_order_id: str
+    stake_dollars: Decimal
+    direction: str
+    confidence: int
+    simulation_position_id: str
+
+
+@dataclass(frozen=True)
 class LiveValidationResult:
     """Outcome of one live execution smoke-test run."""
 
@@ -487,6 +504,42 @@ def _reference_timestamp(contract: ScannedContract) -> str | None:
     if contract.market_as_of:
         return contract.market_as_of
     return contract.bias_as_of
+
+
+def build_live_order_intent(
+    position: SimulatedPosition,
+    client_order_id_prefix: str = "sim-live",
+) -> LiveOrderIntent | None:
+    """Return a pure live order intent for a simulated position, without submitting."""
+
+    if position.direction == "up":
+        side = "yes"
+    elif position.direction == "down":
+        side = "no"
+    else:
+        return None
+
+    if position.stake_dollars is None or position.entry_price <= Decimal("0"):
+        return None
+
+    count = int(position.stake_dollars // position.entry_price)
+    if count < 1:
+        return None
+
+    normalized_prefix = client_order_id_prefix.strip() or "sim-live"
+    return LiveOrderIntent(
+        product_id=position.product_id,
+        ticker=position.market_ticker,
+        action="buy",
+        side=side,
+        price_dollars=position.entry_price,
+        count=count,
+        client_order_id=f"{normalized_prefix}-{position.position_id}",
+        stake_dollars=position.stake_dollars,
+        direction=position.direction,
+        confidence=position.confidence,
+        simulation_position_id=position.position_id,
+    )
 
 
 class LiveExecutionSmokeTester:
