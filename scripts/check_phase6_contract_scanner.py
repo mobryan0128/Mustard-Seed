@@ -74,6 +74,11 @@ def _run_fixtures(scanner: ContractScanner) -> list[str]:
     failures.extend(_validate_zero_confidence_skip(scanner))
     failures.extend(_validate_missing_quote_skip(scanner))
     failures.extend(_validate_ranking_tiebreak(scanner))
+    failures.extend(_validate_low_confidence_mature_impulse_skip(scanner))
+    failures.extend(_validate_low_confidence_small_impulse_ranks(scanner))
+    failures.extend(_validate_high_confidence_mature_impulse_ranks(scanner))
+    failures.extend(_validate_reversal_mature_impulse_ranks(scanner))
+    failures.extend(_validate_exhaustion_impulse_unchanged(scanner))
     return failures
 
 
@@ -171,6 +176,112 @@ def _validate_ranking_tiebreak(scanner: ContractScanner) -> list[str]:
     ranked_tickers = tuple(contract.market_ticker for contract in snapshot.ranked_contracts)
     if ranked_tickers[:2] != ("KXBTC-1", "KXBTC-2"):
         return [f"lexical tiebreak mismatch: {ranked_tickers}"]
+    return []
+
+
+def _validate_low_confidence_mature_impulse_skip(scanner: ContractScanner) -> list[str]:
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        confidence=40,
+        structure="trend",
+        impulse_detected=True,
+        impulse_direction="up",
+        impulse_return_bps=Decimal("6.000"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    reasons = {(item.market_ticker, item.reason) for item in snapshot.skipped_contracts}
+    expected = {
+        ("KXBTC-1", "too_late_after_expansion"),
+        ("KXBTC-2", "too_late_after_expansion"),
+    }
+    if not expected.issubset(reasons):
+        return [f"late expansion skip mismatch: {reasons}"]
+    return []
+
+
+def _validate_low_confidence_small_impulse_ranks(scanner: ContractScanner) -> list[str]:
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        confidence=40,
+        structure="trend",
+        impulse_detected=True,
+        impulse_direction="up",
+        impulse_return_bps=Decimal("5.999"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    ranked_tickers = {contract.market_ticker for contract in snapshot.ranked_contracts}
+    if not {"KXBTC-1", "KXBTC-2"}.issubset(ranked_tickers):
+        return [f"small impulse ranked mismatch: {ranked_tickers}"]
+    return []
+
+
+def _validate_high_confidence_mature_impulse_ranks(scanner: ContractScanner) -> list[str]:
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        confidence=60,
+        structure="trend",
+        impulse_detected=True,
+        impulse_direction="up",
+        impulse_return_bps=Decimal("9.000"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    ranked_tickers = {contract.market_ticker for contract in snapshot.ranked_contracts}
+    if not {"KXBTC-1", "KXBTC-2"}.issubset(ranked_tickers):
+        return [f"high confidence impulse ranked mismatch: {ranked_tickers}"]
+    return []
+
+
+def _validate_reversal_mature_impulse_ranks(scanner: ContractScanner) -> list[str]:
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        confidence=40,
+        structure="reversal",
+        impulse_detected=True,
+        impulse_direction="up",
+        impulse_return_bps=Decimal("9.000"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    ranked_tickers = {contract.market_ticker for contract in snapshot.ranked_contracts}
+    if not {"KXBTC-1", "KXBTC-2"}.issubset(ranked_tickers):
+        return [f"reversal mature impulse ranked mismatch: {ranked_tickers}"]
+    return []
+
+
+def _validate_exhaustion_impulse_unchanged(scanner: ContractScanner) -> list[str]:
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        direction="neutral",
+        confidence=30,
+        structure="exhaustion",
+        impulse_detected=True,
+        impulse_direction="up",
+        impulse_return_bps=Decimal("9.000"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    reasons = {(item.market_ticker, item.reason) for item in snapshot.skipped_contracts}
+    expected = {("KXBTC-1", "neutral_bias"), ("KXBTC-2", "neutral_bias")}
+    if not expected.issubset(reasons):
+        return [f"exhaustion impulse skip mismatch: {reasons}"]
     return []
 
 

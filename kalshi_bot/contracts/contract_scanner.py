@@ -13,6 +13,7 @@ from kalshi_bot.market.market_state_cache import MarketStateSnapshot, TickerStat
 
 
 TWO_DECIMAL = Decimal("2")
+LATE_EXPANSION_IMPULSE_RETURN_BPS = Decimal("6.000")
 
 
 class ContractScannerError(ValueError):
@@ -147,9 +148,25 @@ def _skip_reason(bias_state, ticker_state: TickerState) -> str | None:
         return "neutral_bias"
     if bias_state.confidence <= 0:
         return "zero_confidence"
+    if _is_late_expansion_bias(bias_state):
+        return "too_late_after_expansion"
     if ticker_state.yes_bid_dollars is None or ticker_state.yes_ask_dollars is None:
         return "missing_best_quote"
     return None
+
+
+def _is_late_expansion_bias(bias_state) -> bool:  # noqa: ANN001
+    impulse_return_bps = getattr(bias_state, "impulse_return_bps", None)
+    if impulse_return_bps is None:
+        return False
+    return (
+        bias_state.direction in {"up", "down"}
+        and bias_state.structure == "trend"
+        and bias_state.confidence <= 40
+        and getattr(bias_state, "impulse_detected", False)
+        and getattr(bias_state, "impulse_direction", None) == bias_state.direction
+        and abs(Decimal(str(impulse_return_bps))) >= LATE_EXPANSION_IMPULSE_RETURN_BPS
+    )
 
 
 def _market_as_of(ticker_state: TickerState) -> str | None:
