@@ -13,17 +13,23 @@ from kalshi_bot.clients.kalshi_client import (
     KalshiOrderSummary,
 )
 from kalshi_bot.config.settings import KalshiSettings
+from kalshi_bot.contracts.contract_scanner import ContractScanSnapshot, ScannedContract
 from kalshi_bot.execution.execution_engine import (
     LiveOrderIntent,
+    MAX_ENTRY_PRICE,
     SimulationSnapshot,
     build_live_order_intent,
+    build_live_order_intent_from_contract,
 )
 from kalshi_bot.observability.logger import StructuredLogger
 from kalshi_bot.observability.replay_engine import ReplayEngine
 from kalshi_bot.risk.risk_manager import RiskManager
 
 
-RISK_APPROVAL_SOURCE = "simulation_entry_risk_gate"
+RISK_APPROVAL_SOURCES = frozenset(
+    {"simulation_entry_risk_gate", "live_entry_risk_gate"}
+)
+LIVE_RUNNER_REALIZED_DAILY_PNL_DOLLARS = Decimal("0")
 
 
 @dataclass(frozen=True)
@@ -142,6 +148,123 @@ class LiveExecutionCoordinator:
             )
         return tuple(intents)
 
+    def process_contract_scan_snapshot(
+        self,
+        contract_scan_snapshot: ContractScanSnapshot,
+        *,
+        cycle_number: int | None = None,
+    ) -> tuple[LiveOrderIntent, ...]:
+        """Create live intents directly from ranked contracts after entry risk approval."""
+
+        if not contract_scan_snapshot.ranked_contracts:
+            self._log_intent_skipped(
+                reason="no_ranked_contracts",
+                product_id="",
+                market_ticker=None,
+                simulation_position_id=None,
+                details={"cycle_number": cycle_number},
+            )
+            return ()
+
+        intents: list[LiveOrderIntent] = []
+        for contract in contract_scan_snapshot.ranked_contracts:
+            if contract.direction not in {"up", "down"}:
+                self._log_contract_intent_skipped(
+                    reason="invalid_direction",
+                    contract=contract,
+                    cycle_number=cycle_number,
+                )
+                continue
+            if contract.midpoint <= Decimal("0"):
+                self._log_contract_intent_skipped(
+                    reason="invalid_entry_price",
+                    contract=contract,
+                    cycle_number=cycle_number,
+                )
+                continue
+            if contract.midpoint > MAX_ENTRY_PRICE:
+                self._log_contract_intent_skipped(
+                    reason="entry_price_too_high",
+                    contract=contract,
+                    cycle_number=cycle_number,
+                )
+                continue
+
+            current_exposure_dollars = self._live_current_exposure_dollars()
+            risk_decision = self._risk_manager.evaluate_entry_risk(
+                product_id=contract.product_id,
+                confidence=contract.confidence,
+                open_position_count=self._live_open_position_count(),
+                current_exposure_dollars=current_exposure_dollars,
+                realized_daily_pnl_dollars=LIVE_RUNNER_REALIZED_DAILY_PNL_DOLLARS,
+            )
+            if not risk_decision.allowed:
+                self._log_contract_intent_skipped(
+                    reason=risk_decision.reason,
+                    contract=contract,
+                    cycle_number=cycle_number,
+                    details={
+                        "current_exposure_dollars": current_exposure_dollars,
+                        "realized_daily_pnl_dollars": (
+                            LIVE_RUNNER_REALIZED_DAILY_PNL_DOLLARS
+                        ),
+                    },
+                )
+                continue
+
+            stake_dollars = risk_decision.stake_dollars
+            if stake_dollars is None:
+                self._log_contract_intent_skipped(
+                    reason="risk_stake_unavailable",
+                    contract=contract,
+                    cycle_number=cycle_number,
+                )
+                continue
+            if int(stake_dollars // contract.midpoint) < 1:
+                self._log_contract_intent_skipped(
+                    reason="count_below_one",
+                    contract=contract,
+                    cycle_number=cycle_number,
+                    details={"stake_dollars": stake_dollars},
+                )
+                continue
+
+            intent = build_live_order_intent_from_contract(
+                contract,
+                stake_dollars=stake_dollars,
+                source_id=f"cycle-{cycle_number}-{contract.product_id}-{contract.market_ticker}"
+                if cycle_number is not None
+                else None,
+            )
+            if intent is None:
+                self._log_contract_intent_skipped(
+                    reason="intent_unavailable",
+                    contract=contract,
+                    cycle_number=cycle_number,
+                    details={"stake_dollars": stake_dollars},
+                )
+                continue
+
+            intents.append(intent)
+            self._log_and_record(
+                event_type="live_intent_created",
+                identifier=intent.client_order_id,
+                payload={
+                    "cycle_number": cycle_number,
+                    "product_id": intent.product_id,
+                    "ticker": intent.ticker,
+                    "side": intent.side,
+                    "action": intent.action,
+                    "price_dollars": intent.price_dollars,
+                    "count": intent.count,
+                    "stake_dollars": intent.stake_dollars,
+                    "direction": intent.direction,
+                    "confidence": intent.confidence,
+                    "risk_approval_source": intent.risk_approval_source,
+                },
+            )
+        return tuple(intents)
+
     def submit_live_order(self, intent: LiveOrderIntent) -> LiveSubmissionResult:
         """Submit one intent only after all live guardrails allow it."""
 
@@ -217,9 +340,19 @@ class LiveExecutionCoordinator:
         order_placed = False
         poll_attempts_used = 0
         try:
+            self._log_and_record(
+                event_type="live_order_submit_attempt",
+                identifier=order_request.client_order_id,
+                payload=_order_request_payload(order_request),
+            )
             created_order = self._client.create_order(order_request)
             order_placed = True
             final_order = created_order
+            self._log_and_record(
+                event_type="kalshi_order_response",
+                identifier=created_order.order_id,
+                payload=_order_summary_payload(created_order),
+            )
             self._log_and_record(
                 event_type="live_order_submitted",
                 identifier=created_order.order_id,
@@ -269,6 +402,15 @@ class LiveExecutionCoordinator:
         )
         if final_record is not None:
             self._log_order_outcome(final_record)
+        if classification == "filled":
+            self._log_and_record(
+                event_type="order_filled",
+                identifier=final_order.order_id,
+                payload={
+                    "classification": classification,
+                    **_order_summary_payload(final_order),
+                },
+            )
         return LiveSubmissionResult(
             classification=classification,
             decision_reason=None,
@@ -285,19 +427,65 @@ class LiveExecutionCoordinator:
         reason: str,
         product_id: str,
         market_ticker: str | None,
-        simulation_position_id: str,
+        simulation_position_id: str | None,
+        details: dict[str, object] | None = None,
     ) -> None:
+        payload: dict[str, object] = {
+            "reason": reason,
+            "product_id": product_id,
+            "market_ticker": market_ticker,
+            "simulation_position_id": simulation_position_id,
+        }
+        if details:
+            payload.update(details)
         self._logger.log_event(
             category="live_execution",
             event_type="live_order_intent_skipped",
             source="live_execution_coordinator",
             identifier=simulation_position_id,
-            payload={
-                "reason": reason,
-                "product_id": product_id,
-                "market_ticker": market_ticker,
-                "simulation_position_id": simulation_position_id,
-            },
+            payload=payload,
+        )
+
+    def _log_contract_intent_skipped(
+        self,
+        *,
+        reason: str,
+        contract: ScannedContract,
+        cycle_number: int | None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        payload = {
+            "cycle_number": cycle_number,
+            "direction": contract.direction,
+            "structure": contract.structure,
+            "confidence": contract.confidence,
+            "entry_price": contract.midpoint,
+        }
+        if details:
+            payload.update(details)
+        self._log_intent_skipped(
+            reason=reason,
+            product_id=contract.product_id,
+            market_ticker=contract.market_ticker,
+            simulation_position_id=None,
+            details=payload,
+        )
+
+    def _live_open_position_count(self) -> int:
+        return sum(
+            1
+            for record in self._live_position_ledger.values()
+            if _record_has_live_exposure(record)
+        )
+
+    def _live_current_exposure_dollars(self) -> Decimal:
+        return sum(
+            (
+                record.filled_count * record.price_dollars
+                for record in self._live_position_ledger.values()
+                if _record_has_live_exposure(record)
+            ),
+            Decimal("0"),
         )
 
     def _poll_order(
@@ -458,7 +646,7 @@ def _order_request_from_intent(
 def _intent_is_risk_approved(intent: LiveOrderIntent) -> bool:
     return (
         intent.risk_approved
-        and intent.risk_approval_source == RISK_APPROVAL_SOURCE
+        and intent.risk_approval_source in RISK_APPROVAL_SOURCES
     )
 
 
@@ -556,6 +744,13 @@ def _live_position_record_payload(record: LivePositionRecord) -> dict[str, objec
         "opened_at": record.opened_at,
         "updated_at": record.updated_at,
     }
+
+
+def _record_has_live_exposure(record: LivePositionRecord) -> bool:
+    return (
+        record.filled_count > Decimal("0")
+        and record.classification not in {"rejected", "unknown_final_state"}
+    )
 
 
 def _classify_order_result(order: KalshiOrderSummary) -> str:

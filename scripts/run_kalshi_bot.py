@@ -41,8 +41,10 @@ def main() -> int:
 
     if settings.live_runner_execution_enabled:
         print(
-            "Runner note: live runner execution is enabled; guarded submissions "
-            "still require all live safeguards."
+            "Runner note: autonomous live runner execution is enabled; guarded "
+            "submissions still require strategy ranking, entry risk approval, and "
+            "live order safeguards. LIVE_VALIDATION_ENABLED is not required for "
+            "this mode."
         )
     elif settings.live_validation_enabled or settings.live_trading_enabled:
         print(

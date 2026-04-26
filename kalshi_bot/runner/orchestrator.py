@@ -34,6 +34,7 @@ from kalshi_bot.market.crypto_market_discovery import (
 from kalshi_bot.market.market_state_cache import MarketStateCache, MarketStateSnapshot
 from kalshi_bot.observability.logger import StructuredLogger
 from kalshi_bot.observability.replay_engine import ReplayEngine
+from kalshi_bot.risk.risk_manager import RiskManager
 
 
 class RunnerError(RuntimeError):
@@ -128,7 +129,7 @@ class KalshiBotRunner:
         bias_engine: BiasEngine,
         contract_scanner: ContractScanner | None,
         market_discovery: CryptoMarketDiscovery | None,
-        simulation_engine: SimulationExecutionEngine,
+        simulation_engine: SimulationExecutionEngine | None,
         logger: StructuredLogger,
         replay_engine: ReplayEngine,
         live_execution_coordinator: LiveExecutionCoordinator | None = None,
@@ -190,15 +191,25 @@ class KalshiBotRunner:
             else:
                 market_discovery = None
                 contract_scanner = ContractScanner.from_settings(settings)
-            simulation_engine = SimulationExecutionEngine.from_settings(settings)
+            simulation_engine = (
+                SimulationExecutionEngine.from_settings(settings)
+                if settings.simulation_enabled
+                else None
+            )
             live_execution_client = (
                 KalshiClient.from_settings(settings, logger=logger)
+                if settings.live_runner_execution_enabled
+                else None
+            )
+            live_execution_risk_manager = (
+                _live_runner_risk_manager_from_settings(settings)
                 if settings.live_runner_execution_enabled
                 else None
             )
             live_execution_coordinator = LiveExecutionCoordinator(
                 settings=settings,
                 client=live_execution_client,
+                risk_manager=live_execution_risk_manager,
             )
         except (
             KalshiWebSocketError,
@@ -284,20 +295,31 @@ class KalshiBotRunner:
             bias_snapshot=bias_snapshot,
             market_snapshot=market_snapshot,
         )
-        simulation_snapshot = self._simulation_engine.evaluate(contract_scan_snapshot)
-        self._record_simulation_trade_events(
-            cycle_number=cycle_number,
-            simulation_snapshot=simulation_snapshot,
-        )
+        simulation_snapshot = _empty_simulation_snapshot()
+        if self._simulation_engine is not None:
+            simulation_snapshot = self._simulation_engine.evaluate(contract_scan_snapshot)
+            self._record_simulation_trade_events(
+                cycle_number=cycle_number,
+                simulation_snapshot=simulation_snapshot,
+            )
         live_intents = ()
         if self._live_execution_coordinator is not None:
-            live_intents = self._live_execution_coordinator.process_simulation_snapshot(
-                simulation_snapshot
-            )
             if self._settings.live_runner_execution_enabled:
+                live_intents = (
+                    self._live_execution_coordinator.process_contract_scan_snapshot(
+                        contract_scan_snapshot,
+                        cycle_number=cycle_number,
+                    )
+                )
                 self._submit_live_runner_intents(
                     cycle_number=cycle_number,
                     intents=live_intents,
+                )
+            elif self._simulation_engine is not None:
+                live_intents = (
+                    self._live_execution_coordinator.process_simulation_snapshot(
+                        simulation_snapshot
+                    )
                 )
         self._last_successful_cycle_at = _utc_now_iso()
         self._last_error = None
@@ -454,7 +476,11 @@ class KalshiBotRunner:
         market_snapshot = market_snapshot or self._market_state_cache.snapshot()
         bias_snapshot = bias_snapshot or self._bias_engine.snapshot()
         crypto_snapshot = self._crypto_feed_client.snapshot()
-        simulation_snapshot = self._simulation_engine.snapshot()
+        simulation_snapshot = (
+            self._simulation_engine.snapshot()
+            if self._simulation_engine is not None
+            else _empty_simulation_snapshot()
+        )
         return RunnerStatus(
             cycle_count=self._cycle_count,
             mode="simulation",
@@ -716,6 +742,36 @@ class KalshiBotRunner:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _empty_simulation_snapshot() -> SimulationSnapshot:
+    return SimulationSnapshot(
+        open_positions={},
+        closed_positions=(),
+        decisions=(),
+        evaluation_count=0,
+    )
+
+
+def _live_runner_risk_manager_from_settings(settings: KalshiSettings) -> RiskManager:
+    return RiskManager(
+        live_validation_enabled=True,
+        live_trading_enabled=settings.live_trading_enabled,
+        live_kill_switch_active=settings.live_kill_switch_active,
+        env=settings.env,
+        live_validation_env="prod",
+        max_live_order_count=1,
+        required_time_in_force=settings.live_validation_time_in_force,
+        account_balance_dollars=settings.risk_account_balance_dollars,
+        min_percent_per_trade=settings.risk_min_percent_per_trade,
+        max_percent_per_trade=settings.risk_max_percent_per_trade,
+        min_stake_dollars=settings.risk_min_stake_dollars,
+        max_stake_dollars=settings.risk_max_stake_dollars,
+        max_open_positions=settings.risk_max_open_positions,
+        max_total_exposure_dollars=settings.risk_max_total_exposure_dollars,
+        daily_loss_limit_dollars=settings.risk_daily_loss_limit_dollars,
+        risk_kill_switch_active=settings.risk_kill_switch_active,
+    )
 
 
 @dataclass(frozen=True)

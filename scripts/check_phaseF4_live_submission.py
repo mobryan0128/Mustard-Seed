@@ -148,10 +148,16 @@ def _validate_allowed_fake_flow() -> list[str]:
         failures.append(f"allowed create_order_calls={state.create_order_calls}")
     if state.get_order_calls != 2:
         failures.append(f"allowed get_order_calls={state.get_order_calls}")
+    if not _has_event(state.runtime_records, "live_order_submit_attempt"):
+        failures.append("allowed live_order_submit_attempt log missing")
+    if not _has_event(state.runtime_records, "kalshi_order_response"):
+        failures.append("allowed kalshi_order_response log missing")
     if not _has_event(state.runtime_records, "live_order_submitted"):
         failures.append("allowed live_order_submitted log missing")
     if not _has_event(state.runtime_records, "live_order_final_state"):
         failures.append("allowed live_order_final_state log missing")
+    if not _has_event(state.runtime_records, "order_filled"):
+        failures.append("allowed order_filled log missing")
     if not state.replay_written:
         failures.append("allowed flow did not write replay artifact")
     return failures

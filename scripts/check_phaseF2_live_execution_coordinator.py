@@ -14,6 +14,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
+from kalshi_bot.contracts.contract_scorer import ContractScore  # noqa: E402
+from kalshi_bot.contracts.contract_scanner import (  # noqa: E402
+    ContractScanSnapshot,
+    ScannedContract,
+)
 from kalshi_bot.execution.execution_engine import (  # noqa: E402
     SimulatedPosition,
     SimulationDecision,
@@ -33,6 +38,8 @@ def main() -> int:
     failures.extend(_validate_up_down_mapping())
     failures.extend(_validate_count_below_one_logs_skip())
     failures.extend(_validate_candidate_log_payload())
+    failures.extend(_validate_direct_contract_scan_creates_live_intent())
+    failures.extend(_validate_direct_contract_scan_count_below_one_skip())
 
     if failures:
         for failure in failures:
@@ -143,12 +150,101 @@ def _validate_candidate_log_payload() -> list[str]:
         return failures
 
 
+def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(temp_path)
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    market_ticker="KXBTC15M-DIRECT",
+                    midpoint=Decimal("0.10"),
+                )
+            ),
+            cycle_number=42,
+        )
+        failures: list[str] = []
+        if len(intents) != 1:
+            failures.append(f"direct intent count={len(intents)} expected=1")
+            return failures
+        intent = intents[0]
+        if intent.risk_approval_source != "live_entry_risk_gate":
+            failures.append(f"direct risk source={intent.risk_approval_source}")
+        if intent.count != 2:
+            failures.append(f"direct count={intent.count} expected=2")
+        payload = _first_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_intent_created",
+        )
+        if payload is None:
+            failures.append("direct live_intent_created log missing")
+        elif payload.get("ticker") != "KXBTC15M-DIRECT":
+            failures.append(f"direct log ticker={payload.get('ticker')}")
+        return failures
+
+
+def _validate_direct_contract_scan_count_below_one_skip() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(temp_path)
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(_contract(midpoint=Decimal("0.46"))),
+            cycle_number=43,
+        )
+        if intents:
+            return [f"direct small-count intents={intents} expected empty"]
+        payload = _first_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            return ["direct small-count skip log missing"]
+        if payload.get("reason") != "count_below_one":
+            return [f"direct small-count reason={payload.get('reason')}"]
+        return []
+
+
 def _coordinator(temp_path: Path) -> LiveExecutionCoordinator:
     return LiveExecutionCoordinator(
         settings=_Settings(
             log_directory=temp_path,
             log_jsonl_enabled=True,
         )
+    )
+
+
+def _contract_snapshot(*contracts: ScannedContract) -> ContractScanSnapshot:
+    return ContractScanSnapshot(
+        ranked_contracts=contracts,
+        skipped_contracts=(),
+    )
+
+
+def _contract(
+    *,
+    product_id: str = "BTC-USD",
+    market_ticker: str = "KXBTC15M-TEST",
+    direction: str = "up",
+    confidence: int = 70,
+    midpoint: Decimal = Decimal("0.10"),
+) -> ScannedContract:
+    return ScannedContract(
+        product_id=product_id,
+        market_ticker=market_ticker,
+        direction=direction,
+        structure="trend",
+        confidence=confidence,
+        best_bid=midpoint - Decimal("0.01"),
+        best_ask=midpoint + Decimal("0.01"),
+        midpoint=midpoint,
+        bias_as_of="2026-04-23T12:00:00+00:00",
+        market_as_of="2026-04-23T12:00:03+00:00",
+        score=ContractScore(
+            confidence=confidence,
+            spread_width=Decimal("0.02"),
+            top_of_book_liquidity=Decimal("100"),
+            dollar_volume=Decimal("1000"),
+        ),
     )
 
 

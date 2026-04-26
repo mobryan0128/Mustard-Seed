@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -16,7 +16,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from kalshi_bot.config.settings import KalshiSettings  # noqa: E402
-from kalshi_bot.clients.kalshi_client import KalshiMarketPage, KalshiMarketSummary  # noqa: E402
+from kalshi_bot.clients.kalshi_client import (  # noqa: E402
+    KalshiMarketPage,
+    KalshiMarketSummary,
+    KalshiOrderRequest,
+)
 from kalshi_bot.execution.execution_engine import (  # noqa: E402
     LiveOrderIntent,
     SimulatedPosition,
@@ -34,7 +38,11 @@ from kalshi_bot.market.crypto_market_discovery import (  # noqa: E402
 from kalshi_bot.market.market_state_cache import MarketStateCache  # noqa: E402
 from kalshi_bot.observability.logger import StructuredLogger  # noqa: E402
 from kalshi_bot.observability.replay_engine import ReplayEngine  # noqa: E402
-from kalshi_bot.runner.orchestrator import KalshiBotRunner, RunnerError  # noqa: E402
+from kalshi_bot.runner.orchestrator import (  # noqa: E402
+    KalshiBotRunner,
+    RunnerError,
+    _live_runner_risk_manager_from_settings,
+)
 
 
 def main() -> int:
@@ -57,6 +65,8 @@ def main() -> int:
     failures.extend(_validate_live_runner_disabled_does_not_submit())
     failures.extend(_validate_live_runner_enabled_submits_one_intent())
     failures.extend(_validate_live_runner_blocked_submission_logged())
+    failures.extend(_validate_live_runner_starts_without_simulation())
+    failures.extend(_validate_live_runner_risk_does_not_require_live_validation())
 
     if failures:
         for failure in failures:
@@ -494,6 +504,11 @@ def _validate_live_runner_enabled_submits_one_intent() -> list[str]:
         )
     if not results[0].status.live_flags_present:
         failures.append("live runner enabled did not report live_flags_present")
+    if coordinator.contract_process_calls != 1:
+        failures.append(
+            "live runner enabled contract process calls="
+            f"{coordinator.contract_process_calls}"
+        )
     if state.log_written_ref is None:
         return failures + ["live runner enabled missing runtime path"]
     records = _jsonl_records(state.log_written_ref)
@@ -548,6 +563,82 @@ def _validate_live_runner_blocked_submission_logged() -> list[str]:
     return failures
 
 
+def _validate_live_runner_starts_without_simulation() -> list[str]:
+    coordinator = _FakeLiveExecutionCoordinator(intents=(_approved_intent("live-0001"),))
+    runner, state = _build_runner(
+        live_flags_present=True,
+        live_runner_execution_enabled=True,
+        simulation_enabled=False,
+        live_execution_coordinator=coordinator,
+    )
+    results = runner.run_cycles(1)
+    failures: list[str] = []
+    if len(results) != 1:
+        failures.append(f"live runner no simulation cycle count={len(results)}")
+        return failures
+    if state.log_written_ref is None:
+        return failures + ["live runner no simulation missing runtime path"]
+    records = _jsonl_records(state.log_written_ref)
+    if _first_event_payload(
+        records,
+        key="event_type",
+        value="simulation_position_opened",
+    ) is not None:
+        failures.append("live runner no simulation wrote simulation trade event")
+    if len(coordinator.submit_calls) != 1:
+        failures.append(
+            f"live runner no simulation submit calls={len(coordinator.submit_calls)}"
+        )
+    if coordinator.simulation_process_calls:
+        failures.append(
+            "live runner no simulation process_simulation calls="
+            f"{coordinator.simulation_process_calls}"
+        )
+    if coordinator.contract_process_calls != 1:
+        failures.append(
+            "live runner no simulation process_contract calls="
+            f"{coordinator.contract_process_calls}"
+        )
+    if results[0].status.open_position_count != 0:
+        failures.append(
+            "live runner no simulation open positions="
+            f"{results[0].status.open_position_count}"
+        )
+    return failures
+
+
+def _validate_live_runner_risk_does_not_require_live_validation() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        settings = replace(
+            _settings(
+                Path(temp_dir),
+                live_flags_present=False,
+                live_runner_execution_enabled=True,
+                simulation_enabled=False,
+                fail_fast_on_startup=True,
+            ),
+            env="prod",
+            live_validation_enabled=False,
+            live_trading_enabled=True,
+            live_kill_switch_active=False,
+        )
+        risk_manager = _live_runner_risk_manager_from_settings(settings)
+        decision = risk_manager.evaluate_live_order(
+            KalshiOrderRequest(
+                ticker="KXBTC15M-TEST",
+                action="buy",
+                side="yes",
+                count=1,
+                price_dollars=Decimal("0.50"),
+                time_in_force="immediate_or_cancel",
+                client_order_id="live-runner-test",
+            )
+        )
+    if not decision.allow:
+        return [f"live runner risk decision={decision.reason}"]
+    return []
+
+
 def _build_runner(
     *,
     stop_after_first_cycle: bool = False,
@@ -560,6 +651,7 @@ def _build_runner(
     simulation_risk_denied_events: bool = False,
     live_order_candidate_events: bool = False,
     live_order_intent_skip_events: bool = False,
+    simulation_enabled: bool = True,
     live_execution_coordinator=None,  # noqa: ANN001
 ):
     temp_dir = TemporaryDirectory()
@@ -573,6 +665,7 @@ def _build_runner(
             tmp_path,
             live_flags_present=live_flags_present,
             live_runner_execution_enabled=live_runner_execution_enabled,
+            simulation_enabled=simulation_enabled,
             fail_fast_on_startup=fail_fast_on_startup,
         ),
         market_state_cache=cache,
@@ -585,19 +678,24 @@ def _build_runner(
         bias_engine=_FakeBiasEngine(),
         contract_scanner=None,
         market_discovery=_FakeMarketDiscovery(state=state),
-        simulation_engine=_FakeSimulationEngine(
-            stop_after_first_cycle=stop_after_first_cycle,
-            runner_ref=None,
-            trade_events=simulation_trade_events,
-            risk_denied_events=simulation_risk_denied_events,
-            live_order_candidate_events=live_order_candidate_events,
-            live_order_intent_skip_events=live_order_intent_skip_events,
+        simulation_engine=(
+            _FakeSimulationEngine(
+                stop_after_first_cycle=stop_after_first_cycle,
+                runner_ref=None,
+                trade_events=simulation_trade_events,
+                risk_denied_events=simulation_risk_denied_events,
+                live_order_candidate_events=live_order_candidate_events,
+                live_order_intent_skip_events=live_order_intent_skip_events,
+            )
+            if simulation_enabled
+            else None
         ),
         live_execution_coordinator=live_execution_coordinator or LiveExecutionCoordinator(
             settings=_settings(
                 tmp_path,
                 live_flags_present=live_flags_present,
                 live_runner_execution_enabled=live_runner_execution_enabled,
+                simulation_enabled=simulation_enabled,
                 fail_fast_on_startup=fail_fast_on_startup,
             )
         ),
@@ -605,7 +703,8 @@ def _build_runner(
         replay_engine=replay_engine,
         sleep_fn=lambda _: None,
     )
-    runner._simulation_engine._runner_ref = runner  # type: ignore[attr-defined]
+    if runner._simulation_engine is not None:  # type: ignore[attr-defined]
+        runner._simulation_engine._runner_ref = runner  # type: ignore[attr-defined]
     state.log_written_ref = logger.path
     state.replay_written_ref = replay_engine.path
     return runner, state
@@ -617,6 +716,7 @@ def _settings(
     live_flags_present: bool,
     fail_fast_on_startup: bool,
     live_runner_execution_enabled: bool = False,
+    simulation_enabled: bool = True,
 ) -> KalshiSettings:
     return KalshiSettings(
         env="demo",
@@ -659,7 +759,7 @@ def _settings(
             "ETH-USD": ("KXETH15M", "KXETH30M"),
         },
         market_discovery_refresh_cycles=2,
-        simulation_enabled=True,
+        simulation_enabled=simulation_enabled,
         simulation_max_new_positions_per_evaluation=1,
         simulation_position_id_prefix="sim",
         simulation_exit_enabled=True,
@@ -1034,10 +1134,18 @@ class _FakeLiveExecutionCoordinator:
         self._result_classification = result_classification
         self._decision_reason = decision_reason
         self.process_calls = 0
+        self.simulation_process_calls = 0
+        self.contract_process_calls = 0
         self.submit_calls: list[LiveOrderIntent] = []
 
     def process_simulation_snapshot(self, simulation_snapshot):  # noqa: ANN001
         self.process_calls += 1
+        self.simulation_process_calls += 1
+        return self._intents
+
+    def process_contract_scan_snapshot(self, contract_scan_snapshot, *, cycle_number=None):  # noqa: ANN001
+        self.process_calls += 1
+        self.contract_process_calls += 1
         return self._intents
 
     def submit_live_order(self, intent: LiveOrderIntent):

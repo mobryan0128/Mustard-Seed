@@ -546,6 +546,52 @@ def build_live_order_intent(
     )
 
 
+def build_live_order_intent_from_contract(
+    contract: ScannedContract,
+    *,
+    stake_dollars: Decimal,
+    client_order_id_prefix: str = "live-runner",
+    source_id: str | None = None,
+) -> LiveOrderIntent | None:
+    """Return a pure live order intent for a risk-approved scanned contract."""
+
+    if contract.direction == "up":
+        side = "yes"
+    elif contract.direction == "down":
+        side = "no"
+    else:
+        return None
+
+    if stake_dollars <= Decimal("0") or contract.midpoint <= Decimal("0"):
+        return None
+
+    count = int(stake_dollars // contract.midpoint)
+    if count < 1:
+        return None
+
+    normalized_prefix = client_order_id_prefix.strip() or "live-runner"
+    normalized_source_id = (
+        source_id.strip()
+        if source_id is not None and source_id.strip()
+        else f"{contract.product_id}-{contract.market_ticker}"
+    )
+    return LiveOrderIntent(
+        product_id=contract.product_id,
+        ticker=contract.market_ticker,
+        action="buy",
+        side=side,
+        price_dollars=contract.midpoint,
+        count=count,
+        client_order_id=f"{normalized_prefix}-{normalized_source_id}",
+        stake_dollars=stake_dollars,
+        direction=contract.direction,
+        confidence=contract.confidence,
+        simulation_position_id=normalized_source_id,
+        risk_approved=True,
+        risk_approval_source="live_entry_risk_gate",
+    )
+
+
 class LiveExecutionSmokeTester:
     """Submit one tiny live IOC order and inspect the resulting state."""
 
