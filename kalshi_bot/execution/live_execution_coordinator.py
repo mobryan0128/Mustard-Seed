@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from kalshi_bot.clients.kalshi_client import (
@@ -166,6 +166,11 @@ class LiveExecutionCoordinator:
             )
             return ()
 
+        balance_dollars = self._fetch_live_balance_for_sizing(cycle_number=cycle_number)
+        if balance_dollars is None:
+            return ()
+        entry_risk_manager = self._entry_risk_manager_for_balance(balance_dollars)
+
         intents: list[LiveOrderIntent] = []
         for contract in contract_scan_snapshot.ranked_contracts:
             if contract.direction not in {"up", "down"}:
@@ -191,7 +196,7 @@ class LiveExecutionCoordinator:
                 continue
 
             current_exposure_dollars = self._live_current_exposure_dollars()
-            risk_decision = self._risk_manager.evaluate_entry_risk(
+            risk_decision = entry_risk_manager.evaluate_entry_risk(
                 product_id=contract.product_id,
                 confidence=contract.confidence,
                 open_position_count=self._live_open_position_count(),
@@ -220,6 +225,20 @@ class LiveExecutionCoordinator:
                     cycle_number=cycle_number,
                 )
                 continue
+            self._log_and_record(
+                event_type="live_stake_computed",
+                identifier=contract.market_ticker,
+                payload={
+                    "cycle_number": cycle_number,
+                    "product_id": contract.product_id,
+                    "market_ticker": contract.market_ticker,
+                    "confidence": contract.confidence,
+                    "balance_dollars": balance_dollars,
+                    "stake_dollars": stake_dollars,
+                    "current_exposure_dollars": current_exposure_dollars,
+                    "entry_price": contract.midpoint,
+                },
+            )
             if int(stake_dollars // contract.midpoint) < 1:
                 self._log_contract_intent_skipped(
                     reason="count_below_one",
@@ -262,8 +281,100 @@ class LiveExecutionCoordinator:
                     "confidence": intent.confidence,
                     "risk_approval_source": intent.risk_approval_source,
                 },
-            )
+                )
         return tuple(intents)
+
+    def _fetch_live_balance_for_sizing(
+        self,
+        *,
+        cycle_number: int | None,
+    ) -> Decimal | None:
+        if self._client is None:
+            self._log_intent_skipped(
+                reason="balance_fetch_failed",
+                product_id="",
+                market_ticker=None,
+                simulation_position_id=None,
+                details={
+                    "cycle_number": cycle_number,
+                    "message": "live_client_unavailable",
+                },
+            )
+            return None
+        try:
+            payload = self._client.get_balance()
+            balance_dollars = _balance_dollars_from_payload(payload)
+        except (KalshiClientError, ValueError) as exc:
+            self._log_intent_skipped(
+                reason="balance_fetch_failed",
+                product_id="",
+                market_ticker=None,
+                simulation_position_id=None,
+                details={
+                    "cycle_number": cycle_number,
+                    "message": str(exc),
+                },
+            )
+            return None
+
+        self._log_and_record(
+            event_type="balance_fetched_for_sizing",
+            identifier="live_runner_balance",
+            payload={
+                "cycle_number": cycle_number,
+                "balance_dollars": balance_dollars,
+                "keys": tuple(sorted(payload.keys())),
+            },
+        )
+        return balance_dollars
+
+    def _entry_risk_manager_for_balance(self, balance_dollars: Decimal) -> RiskManager:
+        return RiskManager(
+            live_validation_enabled=True,
+            live_trading_enabled=getattr(self._settings, "live_trading_enabled", False),
+            live_kill_switch_active=getattr(
+                self._settings,
+                "live_kill_switch_active",
+                True,
+            ),
+            env=getattr(self._settings, "env", "demo"),
+            live_validation_env="prod",
+            max_live_order_count=1,
+            required_time_in_force=getattr(
+                self._settings,
+                "live_validation_time_in_force",
+                "immediate_or_cancel",
+            ),
+            account_balance_dollars=balance_dollars,
+            min_percent_per_trade=Decimal("0.01"),
+            max_percent_per_trade=Decimal("0.01"),
+            min_stake_dollars=getattr(
+                self._settings,
+                "risk_min_stake_dollars",
+                Decimal("0.10"),
+            ),
+            max_stake_dollars=getattr(
+                self._settings,
+                "risk_max_stake_dollars",
+                Decimal("3"),
+            ),
+            max_open_positions=getattr(self._settings, "risk_max_open_positions", 2),
+            max_total_exposure_dollars=getattr(
+                self._settings,
+                "risk_max_total_exposure_dollars",
+                Decimal("10"),
+            ),
+            daily_loss_limit_dollars=getattr(
+                self._settings,
+                "risk_daily_loss_limit_dollars",
+                Decimal("5"),
+            ),
+            risk_kill_switch_active=getattr(
+                self._settings,
+                "risk_kill_switch_active",
+                False,
+            ),
+        )
 
     def submit_live_order(self, intent: LiveOrderIntent) -> LiveSubmissionResult:
         """Submit one intent only after all live guardrails allow it."""
@@ -625,6 +736,26 @@ def _replay_engine_from_settings(settings: KalshiSettings) -> ReplayEngine | Non
         replay_directory=replay_directory,
         enabled=getattr(settings, "replay_write_enabled", False),
     )
+
+
+def _balance_dollars_from_payload(payload: dict[str, object]) -> Decimal:
+    if "balance" not in payload:
+        raise ValueError("balance missing from Kalshi balance payload.")
+    raw_balance = payload["balance"]
+    if isinstance(raw_balance, bool):
+        raise ValueError("balance is not decimal-compatible.")
+    try:
+        balance = Decimal(str(raw_balance))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError("balance is not decimal-compatible.") from exc
+
+    if balance <= Decimal("0"):
+        raise ValueError("balance must be greater than zero.")
+    if isinstance(raw_balance, int):
+        return balance / Decimal("100")
+    if isinstance(raw_balance, str) and raw_balance.strip().isdigit():
+        return balance / Decimal("100")
+    return balance
 
 
 def _order_request_from_intent(

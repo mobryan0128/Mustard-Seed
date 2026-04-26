@@ -25,6 +25,7 @@ from kalshi_bot.execution.execution_engine import (  # noqa: E402
     SimulationSnapshot,
 )
 from kalshi_bot.execution.live_execution_coordinator import LiveExecutionCoordinator  # noqa: E402
+from kalshi_bot.clients.kalshi_client import KalshiClientError  # noqa: E402
 
 
 def main() -> int:
@@ -39,7 +40,10 @@ def main() -> int:
     failures.extend(_validate_count_below_one_logs_skip())
     failures.extend(_validate_candidate_log_payload())
     failures.extend(_validate_direct_contract_scan_creates_live_intent())
+    failures.extend(_validate_direct_contract_scan_min_balance_clamps_stake())
     failures.extend(_validate_direct_contract_scan_count_below_one_skip())
+    failures.extend(_validate_direct_contract_scan_balance_fetch_failure_skips())
+    failures.extend(_validate_direct_contract_scan_missing_client_skips())
 
     if failures:
         for failure in failures:
@@ -153,12 +157,12 @@ def _validate_candidate_log_payload() -> list[str]:
 def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
     with TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
-        coordinator = _coordinator(temp_path)
+        coordinator = _coordinator(temp_path, balance_payload={"balance": 25000})
         intents = coordinator.process_contract_scan_snapshot(
             _contract_snapshot(
                 _contract(
                     market_ticker="KXBTC15M-DIRECT",
-                    midpoint=Decimal("0.10"),
+                    midpoint=Decimal("0.50"),
                 )
             ),
             cycle_number=42,
@@ -170,8 +174,10 @@ def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
         intent = intents[0]
         if intent.risk_approval_source != "live_entry_risk_gate":
             failures.append(f"direct risk source={intent.risk_approval_source}")
-        if intent.count != 2:
-            failures.append(f"direct count={intent.count} expected=2")
+        if intent.stake_dollars != Decimal("2.50"):
+            failures.append(f"direct stake={intent.stake_dollars} expected=2.50")
+        if intent.count != 5:
+            failures.append(f"direct count={intent.count} expected=5")
         payload = _first_event_payload(
             _jsonl_records(temp_path / "runtime.jsonl"),
             event_type="live_intent_created",
@@ -180,16 +186,49 @@ def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
             failures.append("direct live_intent_created log missing")
         elif payload.get("ticker") != "KXBTC15M-DIRECT":
             failures.append(f"direct log ticker={payload.get('ticker')}")
+        stake_payload = _first_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_stake_computed",
+        )
+        if stake_payload is None:
+            failures.append("direct live_stake_computed log missing")
+        elif stake_payload.get("balance_dollars") != "250":
+            failures.append(f"direct balance={stake_payload.get('balance_dollars')}")
+        return failures
+
+
+def _validate_direct_contract_scan_min_balance_clamps_stake() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(temp_path, balance_payload={"balance": 980})
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(_contract(midpoint=Decimal("0.10"))),
+            cycle_number=43,
+        )
+        failures: list[str] = []
+        if len(intents) != 1:
+            failures.append(f"min-balance intent count={len(intents)} expected=1")
+            return failures
+        if intents[0].stake_dollars != Decimal("0.10"):
+            failures.append(f"min-balance stake={intents[0].stake_dollars}")
+        payload = _first_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="balance_fetched_for_sizing",
+        )
+        if payload is None:
+            failures.append("balance_fetched_for_sizing log missing")
+        elif payload.get("balance_dollars") != "9.8":
+            failures.append(f"min-balance dollars={payload.get('balance_dollars')}")
         return failures
 
 
 def _validate_direct_contract_scan_count_below_one_skip() -> list[str]:
     with TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
-        coordinator = _coordinator(temp_path)
+        coordinator = _coordinator(temp_path, balance_payload={"balance": 980})
         intents = coordinator.process_contract_scan_snapshot(
             _contract_snapshot(_contract(midpoint=Decimal("0.46"))),
-            cycle_number=43,
+            cycle_number=44,
         )
         if intents:
             return [f"direct small-count intents={intents} expected empty"]
@@ -204,12 +243,69 @@ def _validate_direct_contract_scan_count_below_one_skip() -> list[str]:
         return []
 
 
-def _coordinator(temp_path: Path) -> LiveExecutionCoordinator:
+def _validate_direct_contract_scan_balance_fetch_failure_skips() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(temp_path, balance_error="balance unavailable")
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(_contract(midpoint=Decimal("0.10"))),
+            cycle_number=45,
+        )
+        if intents:
+            return [f"balance failure intents={intents} expected empty"]
+        payload = _first_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            return ["balance failure skip log missing"]
+        if payload.get("reason") != "balance_fetch_failed":
+            return [f"balance failure reason={payload.get('reason')}"]
+        return []
+
+
+def _validate_direct_contract_scan_missing_client_skips() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(temp_path, client_enabled=False)
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(_contract(midpoint=Decimal("0.10"))),
+            cycle_number=46,
+        )
+        if intents:
+            return [f"missing client intents={intents} expected empty"]
+        payload = _first_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            return ["missing client skip log missing"]
+        if payload.get("reason") != "balance_fetch_failed":
+            return [f"missing client reason={payload.get('reason')}"]
+        return []
+
+
+def _coordinator(
+    temp_path: Path,
+    *,
+    balance_payload: dict[str, object] | None = None,
+    balance_error: str | None = None,
+    client_enabled: bool = True,
+) -> LiveExecutionCoordinator:
+    client = (
+        _FakeBalanceClient(
+            balance_payload=balance_payload or {"balance": "10.00"},
+            balance_error=balance_error,
+        )
+        if client_enabled
+        else None
+    )
     return LiveExecutionCoordinator(
         settings=_Settings(
             log_directory=temp_path,
             log_jsonl_enabled=True,
-        )
+        ),
+        client=client,
     )
 
 
@@ -319,6 +415,22 @@ def _first_event_payload(
 class _Settings:
     log_directory: Path
     log_jsonl_enabled: bool
+
+
+class _FakeBalanceClient:
+    def __init__(
+        self,
+        *,
+        balance_payload: dict[str, object],
+        balance_error: str | None,
+    ) -> None:
+        self._balance_payload = balance_payload
+        self._balance_error = balance_error
+
+    def get_balance(self) -> dict[str, object]:
+        if self._balance_error is not None:
+            raise KalshiClientError(self._balance_error)
+        return dict(self._balance_payload)
 
 
 if __name__ == "__main__":
