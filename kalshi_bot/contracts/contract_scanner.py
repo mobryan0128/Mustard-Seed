@@ -14,6 +14,7 @@ from kalshi_bot.market.market_state_cache import MarketStateSnapshot, TickerStat
 
 TWO_DECIMAL = Decimal("2")
 LATE_EXPANSION_IMPULSE_RETURN_BPS = Decimal("6.000")
+IMPULSE_CONFIRMATION_RETURN_BPS = Decimal("3.000")
 
 
 class ContractScannerError(ValueError):
@@ -150,6 +151,8 @@ def _skip_reason(bias_state, ticker_state: TickerState) -> str | None:
         return "zero_confidence"
     if _is_late_expansion_bias(bias_state):
         return "too_late_after_expansion"
+    if _is_unconfirmed_impulse_bias(bias_state):
+        return "impulse_unconfirmed"
     if ticker_state.yes_bid_dollars is None or ticker_state.yes_ask_dollars is None:
         return "missing_best_quote"
     return None
@@ -167,6 +170,32 @@ def _is_late_expansion_bias(bias_state) -> bool:  # noqa: ANN001
         and getattr(bias_state, "impulse_direction", None) == bias_state.direction
         and abs(Decimal(str(impulse_return_bps))) >= LATE_EXPANSION_IMPULSE_RETURN_BPS
     )
+
+
+def _is_unconfirmed_impulse_bias(bias_state) -> bool:  # noqa: ANN001
+    if not (
+        bias_state.direction in {"up", "down"}
+        and bias_state.structure == "trend"
+        and bias_state.confidence == 40
+        and getattr(bias_state, "impulse_detected", False)
+        and getattr(bias_state, "impulse_direction", None) == bias_state.direction
+    ):
+        return False
+
+    recent_return_bps = getattr(bias_state, "recent_return_bps", None)
+    lookback_return_bps = getattr(bias_state, "lookback_return_bps", None)
+    if recent_return_bps is None or lookback_return_bps is None:
+        return True
+
+    recent_return = Decimal(str(recent_return_bps))
+    lookback_return = Decimal(str(lookback_return_bps))
+    if abs(recent_return) < IMPULSE_CONFIRMATION_RETURN_BPS:
+        return True
+    if abs(lookback_return) < IMPULSE_CONFIRMATION_RETURN_BPS:
+        return True
+    if bias_state.direction == "up":
+        return recent_return <= 0 or lookback_return <= 0
+    return recent_return >= 0 or lookback_return >= 0
 
 
 def _market_as_of(ticker_state: TickerState) -> str | None:

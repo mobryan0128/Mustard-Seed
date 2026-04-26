@@ -76,6 +76,12 @@ def _run_fixtures(scanner: ContractScanner) -> list[str]:
     failures.extend(_validate_ranking_tiebreak(scanner))
     failures.extend(_validate_low_confidence_mature_impulse_skip(scanner))
     failures.extend(_validate_low_confidence_small_impulse_ranks(scanner))
+    failures.extend(_validate_low_confidence_down_impulse_ranks(scanner))
+    failures.extend(_validate_low_confidence_impulse_weak_recent_skips(scanner))
+    failures.extend(_validate_low_confidence_impulse_opposite_lookback_skips(scanner))
+    failures.extend(_validate_low_confidence_down_impulse_opposite_recent_skips(scanner))
+    failures.extend(_validate_low_confidence_impulse_missing_return_skips(scanner))
+    failures.extend(_validate_late_expansion_precedes_unconfirmed_impulse(scanner))
     failures.extend(_validate_high_confidence_mature_impulse_ranks(scanner))
     failures.extend(_validate_reversal_mature_impulse_ranks(scanner))
     failures.extend(_validate_exhaustion_impulse_unchanged(scanner))
@@ -220,6 +226,160 @@ def _validate_low_confidence_small_impulse_ranks(scanner: ContractScanner) -> li
     ranked_tickers = {contract.market_ticker for contract in snapshot.ranked_contracts}
     if not {"KXBTC-1", "KXBTC-2"}.issubset(ranked_tickers):
         return [f"small impulse ranked mismatch: {ranked_tickers}"]
+    return []
+
+
+def _validate_low_confidence_down_impulse_ranks(scanner: ContractScanner) -> list[str]:
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        direction="down",
+        confidence=40,
+        structure="trend",
+        recent_return_bps=Decimal("-4.000"),
+        lookback_return_bps=Decimal("-12.000"),
+        impulse_detected=True,
+        impulse_direction="down",
+        impulse_return_bps=Decimal("-5.000"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    ranked_tickers = {contract.market_ticker for contract in snapshot.ranked_contracts}
+    if not {"KXBTC-1", "KXBTC-2"}.issubset(ranked_tickers):
+        return [f"down impulse ranked mismatch: {ranked_tickers}"]
+    return []
+
+
+def _validate_low_confidence_impulse_weak_recent_skips(scanner: ContractScanner) -> list[str]:
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        confidence=40,
+        structure="trend",
+        recent_return_bps=Decimal("2.999"),
+        lookback_return_bps=Decimal("12.000"),
+        impulse_detected=True,
+        impulse_direction="up",
+        impulse_return_bps=Decimal("5.000"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    reasons = {(item.market_ticker, item.reason) for item in snapshot.skipped_contracts}
+    expected = {
+        ("KXBTC-1", "impulse_unconfirmed"),
+        ("KXBTC-2", "impulse_unconfirmed"),
+    }
+    if not expected.issubset(reasons):
+        return [f"weak recent impulse skip mismatch: {reasons}"]
+    return []
+
+
+def _validate_low_confidence_impulse_opposite_lookback_skips(scanner: ContractScanner) -> list[str]:
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        confidence=40,
+        structure="trend",
+        recent_return_bps=Decimal("6.000"),
+        lookback_return_bps=Decimal("-4.000"),
+        impulse_detected=True,
+        impulse_direction="up",
+        impulse_return_bps=Decimal("5.000"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    reasons = {(item.market_ticker, item.reason) for item in snapshot.skipped_contracts}
+    expected = {
+        ("KXBTC-1", "impulse_unconfirmed"),
+        ("KXBTC-2", "impulse_unconfirmed"),
+    }
+    if not expected.issubset(reasons):
+        return [f"opposite lookback impulse skip mismatch: {reasons}"]
+    return []
+
+
+def _validate_low_confidence_down_impulse_opposite_recent_skips(scanner: ContractScanner) -> list[str]:
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        direction="down",
+        confidence=40,
+        structure="trend",
+        recent_return_bps=Decimal("4.000"),
+        lookback_return_bps=Decimal("-12.000"),
+        impulse_detected=True,
+        impulse_direction="down",
+        impulse_return_bps=Decimal("-5.000"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    reasons = {(item.market_ticker, item.reason) for item in snapshot.skipped_contracts}
+    expected = {
+        ("KXBTC-1", "impulse_unconfirmed"),
+        ("KXBTC-2", "impulse_unconfirmed"),
+    }
+    if not expected.issubset(reasons):
+        return [f"opposite recent down impulse skip mismatch: {reasons}"]
+    return []
+
+
+def _validate_low_confidence_impulse_missing_return_skips(scanner: ContractScanner) -> list[str]:
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        confidence=40,
+        structure="trend",
+        recent_return_bps=None,
+        lookback_return_bps=Decimal("12.000"),
+        impulse_detected=True,
+        impulse_direction="up",
+        impulse_return_bps=Decimal("5.000"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    reasons = {(item.market_ticker, item.reason) for item in snapshot.skipped_contracts}
+    expected = {
+        ("KXBTC-1", "impulse_unconfirmed"),
+        ("KXBTC-2", "impulse_unconfirmed"),
+    }
+    if not expected.issubset(reasons):
+        return [f"missing return impulse skip mismatch: {reasons}"]
+    return []
+
+
+def _validate_late_expansion_precedes_unconfirmed_impulse(scanner: ContractScanner) -> list[str]:
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        confidence=40,
+        structure="trend",
+        recent_return_bps=Decimal("2.000"),
+        lookback_return_bps=Decimal("-4.000"),
+        impulse_detected=True,
+        impulse_direction="up",
+        impulse_return_bps=Decimal("6.000"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    reasons = {(item.market_ticker, item.reason) for item in snapshot.skipped_contracts}
+    expected = {
+        ("KXBTC-1", "too_late_after_expansion"),
+        ("KXBTC-2", "too_late_after_expansion"),
+    }
+    if not expected.issubset(reasons):
+        return [f"late expansion precedence mismatch: {reasons}"]
     return []
 
 
