@@ -40,6 +40,10 @@ def main() -> int:
     failures.extend(_validate_count_below_one_logs_skip())
     failures.extend(_validate_candidate_log_payload())
     failures.extend(_validate_direct_contract_scan_creates_live_intent())
+    failures.extend(_validate_direct_buy_no_uses_executable_no_ask())
+    failures.extend(_validate_direct_missing_executable_price_skips())
+    failures.extend(_validate_direct_executable_price_above_limit_skips())
+    failures.extend(_validate_direct_unsafe_spread_skips())
     failures.extend(_validate_direct_contract_scan_min_balance_clamps_stake())
     failures.extend(_validate_direct_contract_scan_count_below_one_skip())
     failures.extend(_validate_direct_contract_scan_balance_fetch_failure_skips())
@@ -162,7 +166,9 @@ def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
             _contract_snapshot(
                 _contract(
                     market_ticker="KXBTC15M-DIRECT",
-                    midpoint=Decimal("0.50"),
+                    midpoint=Decimal("0.45"),
+                    best_bid=Decimal("0.40"),
+                    best_ask=Decimal("0.50"),
                 )
             ),
             cycle_number=42,
@@ -176,6 +182,8 @@ def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
             failures.append(f"direct risk source={intent.risk_approval_source}")
         if intent.stake_dollars != Decimal("2.50"):
             failures.append(f"direct stake={intent.stake_dollars} expected=2.50")
+        if intent.price_dollars != Decimal("0.50"):
+            failures.append(f"direct price={intent.price_dollars} expected=0.50")
         if intent.count != 5:
             failures.append(f"direct count={intent.count} expected=5")
         payload = _first_event_payload(
@@ -194,7 +202,102 @@ def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
             failures.append("direct live_stake_computed log missing")
         elif stake_payload.get("balance_dollars") != "250":
             failures.append(f"direct balance={stake_payload.get('balance_dollars')}")
+        price_payload = _first_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="executable_price_selected",
+        )
+        if price_payload is None:
+            failures.append("direct executable_price_selected log missing")
+        elif price_payload.get("executable_price") != "0.50":
+            failures.append(
+                f"direct executable price={price_payload.get('executable_price')}"
+            )
         return failures
+
+
+def _validate_direct_buy_no_uses_executable_no_ask() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        coordinator = _coordinator(Path(temp_dir), balance_payload={"balance": 25000})
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    market_ticker="KXBTC15M-DOWN",
+                    direction="down",
+                    midpoint=Decimal("0.65"),
+                    best_bid=Decimal("0.62"),
+                    best_ask=Decimal("0.68"),
+                )
+            ),
+            cycle_number=47,
+        )
+        if len(intents) != 1:
+            return [f"direct no intent count={len(intents)} expected=1"]
+        intent = intents[0]
+        failures: list[str] = []
+        if intent.side != "no":
+            failures.append(f"direct no side={intent.side}")
+        if intent.price_dollars != Decimal("0.38"):
+            failures.append(f"direct no price={intent.price_dollars} expected=0.38")
+        if intent.count != 6:
+            failures.append(f"direct no count={intent.count} expected=6")
+        return failures
+
+
+def _validate_direct_missing_executable_price_skips() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(temp_path, balance_payload={"balance": 25000})
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    midpoint=Decimal("0.45"),
+                    best_bid=Decimal("0.40"),
+                    omit_best_ask=True,
+                )
+            ),
+            cycle_number=48,
+        )
+        if intents:
+            return [f"missing executable intents={intents} expected empty"]
+        return _assert_skip_reason(temp_path, "executable_price_missing")
+
+
+def _validate_direct_executable_price_above_limit_skips() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(temp_path, balance_payload={"balance": 25000})
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    midpoint=Decimal("0.78"),
+                    best_bid=Decimal("0.75"),
+                    best_ask=Decimal("0.81"),
+                )
+            ),
+            cycle_number=49,
+        )
+        if intents:
+            return [f"above-limit executable intents={intents} expected empty"]
+        return _assert_skip_reason(temp_path, "executable_price_above_limit")
+
+
+def _validate_direct_unsafe_spread_skips() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(temp_path, balance_payload={"balance": 25000})
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    midpoint=Decimal("0.40"),
+                    best_bid=Decimal("0.30"),
+                    best_ask=Decimal("0.45"),
+                )
+            ),
+            cycle_number=50,
+        )
+        if intents:
+            return [f"unsafe spread intents={intents} expected empty"]
+        return _assert_skip_reason(temp_path, "unsafe_executable_spread")
 
 
 def _validate_direct_contract_scan_min_balance_clamps_stake() -> list[str]:
@@ -202,7 +305,13 @@ def _validate_direct_contract_scan_min_balance_clamps_stake() -> list[str]:
         temp_path = Path(temp_dir)
         coordinator = _coordinator(temp_path, balance_payload={"balance": 980})
         intents = coordinator.process_contract_scan_snapshot(
-            _contract_snapshot(_contract(midpoint=Decimal("0.10"))),
+            _contract_snapshot(
+                _contract(
+                    midpoint=Decimal("0.09"),
+                    best_bid=Decimal("0.08"),
+                    best_ask=Decimal("0.10"),
+                )
+            ),
             cycle_number=43,
         )
         failures: list[str] = []
@@ -227,7 +336,13 @@ def _validate_direct_contract_scan_count_below_one_skip() -> list[str]:
         temp_path = Path(temp_dir)
         coordinator = _coordinator(temp_path, balance_payload={"balance": 980})
         intents = coordinator.process_contract_scan_snapshot(
-            _contract_snapshot(_contract(midpoint=Decimal("0.46"))),
+            _contract_snapshot(
+                _contract(
+                    midpoint=Decimal("0.45"),
+                    best_bid=Decimal("0.44"),
+                    best_ask=Decimal("0.46"),
+                )
+            ),
             cycle_number=44,
         )
         if intents:
@@ -323,21 +438,40 @@ def _contract(
     direction: str = "up",
     confidence: int = 70,
     midpoint: Decimal = Decimal("0.10"),
+    best_bid: Decimal | None = None,
+    best_ask: Decimal | None = None,
+    omit_best_bid: bool = False,
+    omit_best_ask: bool = False,
 ) -> ScannedContract:
+    resolved_best_bid = (
+        None
+        if omit_best_bid
+        else best_bid if best_bid is not None else midpoint - Decimal("0.01")
+    )
+    resolved_best_ask = (
+        None
+        if omit_best_ask
+        else best_ask if best_ask is not None else midpoint + Decimal("0.01")
+    )
+    spread_width = (
+        resolved_best_ask - resolved_best_bid
+        if resolved_best_bid is not None and resolved_best_ask is not None
+        else Decimal("0")
+    )
     return ScannedContract(
         product_id=product_id,
         market_ticker=market_ticker,
         direction=direction,
         structure="trend",
         confidence=confidence,
-        best_bid=midpoint - Decimal("0.01"),
-        best_ask=midpoint + Decimal("0.01"),
+        best_bid=resolved_best_bid,
+        best_ask=resolved_best_ask,
         midpoint=midpoint,
         bias_as_of="2026-04-23T12:00:00+00:00",
         market_as_of="2026-04-23T12:00:03+00:00",
         score=ContractScore(
             confidence=confidence,
-            spread_width=Decimal("0.02"),
+            spread_width=spread_width,
             top_of_book_liquidity=Decimal("100"),
             dollar_volume=Decimal("1000"),
         ),
@@ -409,6 +543,18 @@ def _first_event_payload(
         if isinstance(payload, dict):
             return payload
     return None
+
+
+def _assert_skip_reason(temp_path: Path, expected_reason: str) -> list[str]:
+    payload = _first_event_payload(
+        _jsonl_records(temp_path / "runtime.jsonl"),
+        event_type="live_order_intent_skipped",
+    )
+    if payload is None:
+        return [f"{expected_reason} skip log missing"]
+    if payload.get("reason") != expected_reason:
+        return [f"{expected_reason} reason={payload.get('reason')}"]
+    return []
 
 
 @dataclass(frozen=True)

@@ -33,6 +33,7 @@ def main() -> int:
     failures.extend(_validate_non_prod_blocks_submission())
     failures.extend(_validate_count_cap_blocks_submission())
     failures.extend(_validate_allowed_fake_flow())
+    failures.extend(_validate_created_terminal_fill_does_not_poll())
 
     if failures:
         for failure in failures:
@@ -160,6 +161,37 @@ def _validate_allowed_fake_flow() -> list[str]:
         failures.append("allowed order_filled log missing")
     if not state.replay_written:
         failures.append("allowed flow did not write replay artifact")
+    return failures
+
+
+def _validate_created_terminal_fill_does_not_poll() -> list[str]:
+    result, state = _run_submission(
+        intent=_intent(
+            count=1,
+            client_order_id="sim-live-created-filled",
+            risk_approved=True,
+        ),
+        risk_manager=_risk_manager(),
+        created_order=_order_summary(
+            order_id="ord-created-filled",
+            client_order_id="sim-live-created-filled",
+            status="executed",
+            fill_count_fp="1.00",
+            remaining_count_fp="0.00",
+            initial_count_fp="1.00",
+        ),
+        polled_orders=[],
+    )
+
+    failures: list[str] = []
+    if result.classification != "filled":
+        failures.append(f"created-filled classification={result.classification}")
+    if state.create_order_calls != 1:
+        failures.append(f"created-filled create_order_calls={state.create_order_calls}")
+    if state.get_order_calls != 0:
+        failures.append(f"created-filled get_order_calls={state.get_order_calls}")
+    if not _has_event(state.runtime_records, "order_filled"):
+        failures.append("created-filled order_filled log missing")
     return failures
 
 

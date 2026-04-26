@@ -550,6 +550,7 @@ def build_live_order_intent_from_contract(
     contract: ScannedContract,
     *,
     stake_dollars: Decimal,
+    price_dollars: Decimal | None = None,
     client_order_id_prefix: str = "live-runner",
     source_id: str | None = None,
 ) -> LiveOrderIntent | None:
@@ -562,10 +563,11 @@ def build_live_order_intent_from_contract(
     else:
         return None
 
-    if stake_dollars <= Decimal("0") or contract.midpoint <= Decimal("0"):
+    intent_price = price_dollars if price_dollars is not None else contract.midpoint
+    if stake_dollars <= Decimal("0") or intent_price <= Decimal("0"):
         return None
 
-    count = int(stake_dollars // contract.midpoint)
+    count = int(stake_dollars // intent_price)
     if count < 1:
         return None
 
@@ -580,7 +582,7 @@ def build_live_order_intent_from_contract(
         ticker=contract.market_ticker,
         action="buy",
         side=side,
-        price_dollars=contract.midpoint,
+        price_dollars=intent_price,
         count=count,
         client_order_id=f"{normalized_prefix}-{normalized_source_id}",
         stake_dollars=stake_dollars,
@@ -739,7 +741,13 @@ class LiveExecutionSmokeTester:
                 identifier=created_order.order_id,
                 payload=_order_summary_payload(created_order),
             )
-            final_order, poll_attempts_used = self._poll_order(created_order.order_id)
+            if _is_terminal_order(created_order):
+                final_order = created_order
+                poll_attempts_used = 0
+            else:
+                final_order, poll_attempts_used = self._poll_order(
+                    created_order.order_id
+                )
             classification = _classify_order_result(final_order)
         except KalshiClientError as exc:
             classification = "rejected"
@@ -900,16 +908,17 @@ def _order_summary_payload(order: KalshiOrderSummary) -> dict[str, object]:
 
 
 def _classify_order_result(order: KalshiOrderSummary) -> str:
-    if order.status == "rejected":
+    status = order.status.lower()
+    if status == "rejected":
         return "rejected"
+    if status in {"canceled", "cancelled", "expired"}:
+        return "canceled_or_expired"
     fill_count = order.fill_count_fp or Decimal("0")
     initial_count = order.initial_count_fp or Decimal("0")
     if fill_count > 0 and initial_count > 0 and fill_count >= initial_count:
         return "filled"
     if fill_count > 0:
         return "partially_filled"
-    if order.status in {"canceled", "cancelled", "expired"}:
-        return "canceled_or_expired"
     return "unknown_final_state"
 
 

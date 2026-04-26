@@ -30,6 +30,7 @@ RISK_APPROVAL_SOURCES = frozenset(
     {"simulation_entry_risk_gate", "live_entry_risk_gate"}
 )
 LIVE_RUNNER_REALIZED_DAILY_PNL_DOLLARS = Decimal("0")
+MAX_EXECUTION_SPREAD_DOLLARS = Decimal("0.100")
 
 
 @dataclass(frozen=True)
@@ -180,20 +181,34 @@ class LiveExecutionCoordinator:
                     cycle_number=cycle_number,
                 )
                 continue
-            if contract.midpoint <= Decimal("0"):
+
+            executable_price, skip_reason = _select_executable_price(contract)
+            if skip_reason is not None or executable_price is None:
                 self._log_contract_intent_skipped(
-                    reason="invalid_entry_price",
+                    reason=skip_reason or "executable_price_missing",
                     contract=contract,
                     cycle_number=cycle_number,
+                    details=_executable_price_details(
+                        contract,
+                        executable_price=executable_price,
+                    ),
                 )
                 continue
-            if contract.midpoint > MAX_ENTRY_PRICE:
-                self._log_contract_intent_skipped(
-                    reason="entry_price_too_high",
-                    contract=contract,
-                    cycle_number=cycle_number,
-                )
-                continue
+            self._log_and_record(
+                event_type="executable_price_selected",
+                identifier=contract.market_ticker,
+                payload={
+                    "cycle_number": cycle_number,
+                    "product_id": contract.product_id,
+                    "market_ticker": contract.market_ticker,
+                    "direction": contract.direction,
+                    "side": "yes" if contract.direction == "up" else "no",
+                    "executable_price": executable_price,
+                    "best_bid": contract.best_bid,
+                    "best_ask": contract.best_ask,
+                    "spread_width": contract.best_ask - contract.best_bid,
+                },
+            )
 
             current_exposure_dollars = self._live_current_exposure_dollars()
             risk_decision = entry_risk_manager.evaluate_entry_risk(
@@ -236,21 +251,26 @@ class LiveExecutionCoordinator:
                     "balance_dollars": balance_dollars,
                     "stake_dollars": stake_dollars,
                     "current_exposure_dollars": current_exposure_dollars,
-                    "entry_price": contract.midpoint,
+                    "entry_price": executable_price,
+                    "executable_price": executable_price,
                 },
             )
-            if int(stake_dollars // contract.midpoint) < 1:
+            if int(stake_dollars // executable_price) < 1:
                 self._log_contract_intent_skipped(
                     reason="count_below_one",
                     contract=contract,
                     cycle_number=cycle_number,
-                    details={"stake_dollars": stake_dollars},
+                    details={
+                        "stake_dollars": stake_dollars,
+                        "executable_price": executable_price,
+                    },
                 )
                 continue
 
             intent = build_live_order_intent_from_contract(
                 contract,
                 stake_dollars=stake_dollars,
+                price_dollars=executable_price,
                 source_id=f"cycle-{cycle_number}-{contract.product_id}-{contract.market_ticker}"
                 if cycle_number is not None
                 else None,
@@ -281,7 +301,7 @@ class LiveExecutionCoordinator:
                     "confidence": intent.confidence,
                     "risk_approval_source": intent.risk_approval_source,
                 },
-                )
+            )
         return tuple(intents)
 
     def _fetch_live_balance_for_sizing(
@@ -473,10 +493,14 @@ class LiveExecutionCoordinator:
                 intent=intent,
                 order=created_order,
             )
-            final_order, poll_attempts_used = self._poll_order(
-                created_order.order_id,
-                intent=intent,
-            )
+            if _is_terminal_order(created_order):
+                final_order = created_order
+                poll_attempts_used = 0
+            else:
+                final_order, poll_attempts_used = self._poll_order(
+                    created_order.order_id,
+                    intent=intent,
+                )
             classification = _classify_order_result(final_order)
         except KalshiClientError as exc:
             error_message = str(exc)
@@ -738,6 +762,52 @@ def _replay_engine_from_settings(settings: KalshiSettings) -> ReplayEngine | Non
     )
 
 
+def _select_executable_price(
+    contract: ScannedContract,
+) -> tuple[Decimal | None, str | None]:
+    best_bid = contract.best_bid
+    best_ask = contract.best_ask
+    if best_bid is None or best_ask is None:
+        return None, "executable_price_missing"
+
+    spread_width = best_ask - best_bid
+    if spread_width < Decimal("0") or spread_width > MAX_EXECUTION_SPREAD_DOLLARS:
+        return None, "unsafe_executable_spread"
+
+    if contract.direction == "up":
+        executable_price = best_ask
+    elif contract.direction == "down":
+        executable_price = Decimal("1") - best_bid
+    else:
+        return None, "invalid_direction"
+
+    if executable_price <= Decimal("0"):
+        return None, "executable_price_missing"
+    if executable_price > MAX_ENTRY_PRICE:
+        return executable_price, "executable_price_above_limit"
+    return executable_price, None
+
+
+def _executable_price_details(
+    contract: ScannedContract,
+    *,
+    executable_price: Decimal | None,
+) -> dict[str, object]:
+    best_bid = contract.best_bid
+    best_ask = contract.best_ask
+    spread_width = None
+    if best_bid is not None and best_ask is not None:
+        spread_width = best_ask - best_bid
+    return {
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "spread_width": spread_width,
+        "executable_price": executable_price,
+        "max_entry_price": MAX_ENTRY_PRICE,
+        "max_execution_spread_dollars": MAX_EXECUTION_SPREAD_DOLLARS,
+    }
+
+
 def _balance_dollars_from_payload(payload: dict[str, object]) -> Decimal:
     if "balance" not in payload:
         raise ValueError("balance missing from Kalshi balance payload.")
@@ -885,14 +955,15 @@ def _record_has_live_exposure(record: LivePositionRecord) -> bool:
 
 
 def _classify_order_result(order: KalshiOrderSummary) -> str:
-    if order.status == "rejected":
+    status = order.status.lower()
+    if status == "rejected":
         return "rejected"
+    if status in {"canceled", "cancelled", "expired"}:
+        return "canceled_or_expired"
     fill_count = order.fill_count_fp or Decimal("0")
     initial_count = order.initial_count_fp or Decimal("0")
     if fill_count > 0 and initial_count > 0 and fill_count >= initial_count:
         return "filled"
-    if order.status in {"canceled", "cancelled", "expired"}:
-        return "canceled_or_expired"
     if fill_count > 0:
         return "partially_filled"
     return "unknown_final_state"
