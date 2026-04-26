@@ -39,8 +39,16 @@ def main() -> int:
 
     _install_signal_handlers(runner)
 
-    if settings.live_validation_enabled or settings.live_trading_enabled:
-        print("Runner note: live flags are present, but the continuous runner remains simulation-only.")
+    if settings.live_runner_execution_enabled:
+        print(
+            "Runner note: live runner execution is enabled; guarded submissions "
+            "still require all live safeguards."
+        )
+    elif settings.live_validation_enabled or settings.live_trading_enabled:
+        print(
+            "Runner note: live flags are present, but LIVE_RUNNER_EXECUTION_ENABLED "
+            "is false, so the continuous runner remains dry-run."
+        )
 
     try:
         results = runner.run_cycles(args.max_cycles) if args.max_cycles else runner.run_forever()

@@ -18,6 +18,7 @@ if str(REPO_ROOT) not in sys.path:
 from kalshi_bot.config.settings import KalshiSettings  # noqa: E402
 from kalshi_bot.clients.kalshi_client import KalshiMarketPage, KalshiMarketSummary  # noqa: E402
 from kalshi_bot.execution.execution_engine import (  # noqa: E402
+    LiveOrderIntent,
     SimulatedPosition,
     SimulationDecision,
     SimulationSnapshot,
@@ -52,6 +53,10 @@ def main() -> int:
     failures.extend(_validate_simulation_risk_denied_event_persisted())
     failures.extend(_validate_live_order_candidate_logged())
     failures.extend(_validate_live_order_intent_skip_logged())
+    failures.extend(_validate_live_runner_no_intents_logged())
+    failures.extend(_validate_live_runner_disabled_does_not_submit())
+    failures.extend(_validate_live_runner_enabled_submits_one_intent())
+    failures.extend(_validate_live_runner_blocked_submission_logged())
 
     if failures:
         for failure in failures:
@@ -424,10 +429,130 @@ def _validate_live_order_intent_skip_logged() -> list[str]:
     return failures
 
 
+def _validate_live_runner_disabled_does_not_submit() -> list[str]:
+    coordinator = _FakeLiveExecutionCoordinator(intents=(_approved_intent("sim-0001"),))
+    runner, _ = _build_runner(
+        live_order_candidate_events=True,
+        live_execution_coordinator=coordinator,
+    )
+    results = runner.run_cycles(1)
+    failures: list[str] = []
+    if len(results) != 1:
+        failures.append(f"live runner disabled cycle count={len(results)}")
+    if coordinator.submit_calls:
+        failures.append(f"live runner disabled submit calls={len(coordinator.submit_calls)}")
+    if results and results[0].status.mode != "simulation":
+        failures.append(f"live runner disabled mode={results[0].status.mode}")
+    return failures
+
+
+def _validate_live_runner_no_intents_logged() -> list[str]:
+    coordinator = _FakeLiveExecutionCoordinator(intents=())
+    runner, state = _build_runner(
+        live_flags_present=True,
+        live_runner_execution_enabled=True,
+        live_execution_coordinator=coordinator,
+    )
+    results = runner.run_cycles(1)
+    failures: list[str] = []
+    if len(results) != 1:
+        failures.append(f"live runner no intents cycle count={len(results)}")
+        return failures
+    if coordinator.submit_calls:
+        failures.append(f"live runner no intents submit calls={len(coordinator.submit_calls)}")
+    if state.log_written_ref is None:
+        return failures + ["live runner no intents missing runtime path"]
+    if _first_event_payload(
+        _jsonl_records(state.log_written_ref),
+        key="event_type",
+        value="live_runner_no_intents",
+    ) is None:
+        failures.append("live runner no intents log missing")
+    return failures
+
+
+def _validate_live_runner_enabled_submits_one_intent() -> list[str]:
+    intents = (_approved_intent("sim-0001"), _approved_intent("sim-0002"))
+    coordinator = _FakeLiveExecutionCoordinator(intents=intents)
+    runner, state = _build_runner(
+        live_flags_present=True,
+        live_runner_execution_enabled=True,
+        live_order_candidate_events=True,
+        live_execution_coordinator=coordinator,
+    )
+    results = runner.run_cycles(1)
+    failures: list[str] = []
+    if len(results) != 1:
+        failures.append(f"live runner enabled cycle count={len(results)}")
+        return failures
+    if len(coordinator.submit_calls) != 1:
+        failures.append(f"live runner enabled submit calls={len(coordinator.submit_calls)}")
+    elif coordinator.submit_calls[0].simulation_position_id != "sim-0001":
+        failures.append(
+            "live runner enabled submitted "
+            f"{coordinator.submit_calls[0].simulation_position_id}"
+        )
+    if not results[0].status.live_flags_present:
+        failures.append("live runner enabled did not report live_flags_present")
+    if state.log_written_ref is None:
+        return failures + ["live runner enabled missing runtime path"]
+    records = _jsonl_records(state.log_written_ref)
+    if _first_event_payload(
+        records,
+        key="event_type",
+        value="live_runner_submission_attempted",
+    ) is None:
+        failures.append("live runner submission attempted log missing")
+    if _first_event_payload(
+        records,
+        key="event_type",
+        value="live_runner_submission_completed",
+    ) is None:
+        failures.append("live runner submission completed log missing")
+    return failures
+
+
+def _validate_live_runner_blocked_submission_logged() -> list[str]:
+    coordinator = _FakeLiveExecutionCoordinator(
+        intents=(_approved_intent("sim-0001"),),
+        result_classification="blocked_by_safeguard",
+        decision_reason="live_intent_not_risk_approved",
+    )
+    runner, state = _build_runner(
+        live_flags_present=True,
+        live_runner_execution_enabled=True,
+        live_order_candidate_events=True,
+        live_execution_coordinator=coordinator,
+    )
+    results = runner.run_cycles(1)
+    failures: list[str] = []
+    if len(results) != 1:
+        failures.append(f"live runner blocked cycle count={len(results)}")
+        return failures
+    if len(coordinator.submit_calls) != 1:
+        failures.append(f"live runner blocked submit calls={len(coordinator.submit_calls)}")
+    if state.log_written_ref is None:
+        return failures + ["live runner blocked missing runtime path"]
+    payload = _first_event_payload(
+        _jsonl_records(state.log_written_ref),
+        key="event_type",
+        value="live_runner_submission_blocked",
+    )
+    if payload is None:
+        failures.append("live runner submission blocked log missing")
+    elif payload.get("decision_reason") != "live_intent_not_risk_approved":
+        failures.append(
+            "live runner blocked reason="
+            f"{payload.get('decision_reason')} expected=live_intent_not_risk_approved"
+        )
+    return failures
+
+
 def _build_runner(
     *,
     stop_after_first_cycle: bool = False,
     live_flags_present: bool = False,
+    live_runner_execution_enabled: bool = False,
     kalshi_error: str | None = None,
     kalshi_market_data: bool = True,
     fail_fast_on_startup: bool = True,
@@ -435,6 +560,7 @@ def _build_runner(
     simulation_risk_denied_events: bool = False,
     live_order_candidate_events: bool = False,
     live_order_intent_skip_events: bool = False,
+    live_execution_coordinator=None,  # noqa: ANN001
 ):
     temp_dir = TemporaryDirectory()
     tmp_path = Path(temp_dir.name)
@@ -446,6 +572,7 @@ def _build_runner(
         settings=_settings(
             tmp_path,
             live_flags_present=live_flags_present,
+            live_runner_execution_enabled=live_runner_execution_enabled,
             fail_fast_on_startup=fail_fast_on_startup,
         ),
         market_state_cache=cache,
@@ -466,10 +593,11 @@ def _build_runner(
             live_order_candidate_events=live_order_candidate_events,
             live_order_intent_skip_events=live_order_intent_skip_events,
         ),
-        live_execution_coordinator=LiveExecutionCoordinator(
+        live_execution_coordinator=live_execution_coordinator or LiveExecutionCoordinator(
             settings=_settings(
                 tmp_path,
                 live_flags_present=live_flags_present,
+                live_runner_execution_enabled=live_runner_execution_enabled,
                 fail_fast_on_startup=fail_fast_on_startup,
             )
         ),
@@ -488,6 +616,7 @@ def _settings(
     *,
     live_flags_present: bool,
     fail_fast_on_startup: bool,
+    live_runner_execution_enabled: bool = False,
 ) -> KalshiSettings:
     return KalshiSettings(
         env="demo",
@@ -557,6 +686,7 @@ def _settings(
         live_validation_client_order_id_prefix="live-smoke",
         live_trading_enabled=live_flags_present,
         live_kill_switch_active=False,
+        live_runner_execution_enabled=live_runner_execution_enabled,
         runner_enabled=True,
         runner_loop_interval_seconds=0.001,
         runner_status_log_every_n_cycles=1,
@@ -872,6 +1002,63 @@ class _FakeSimulationEngine:
             ),
             evaluation_count=self._cycle,
         )
+
+
+def _approved_intent(position_id: str) -> LiveOrderIntent:
+    return LiveOrderIntent(
+        product_id="BTC-USD",
+        ticker="KXBTC15M-OLD",
+        action="buy",
+        side="yes",
+        price_dollars=Decimal("0.460"),
+        count=1,
+        client_order_id=f"sim-live-{position_id}",
+        stake_dollars=Decimal("0.46"),
+        direction="up",
+        confidence=70,
+        simulation_position_id=position_id,
+        risk_approved=True,
+        risk_approval_source="simulation_entry_risk_gate",
+    )
+
+
+class _FakeLiveExecutionCoordinator:
+    def __init__(
+        self,
+        *,
+        intents: tuple[LiveOrderIntent, ...],
+        result_classification: str = "submitted",
+        decision_reason: str | None = None,
+    ) -> None:
+        self._intents = intents
+        self._result_classification = result_classification
+        self._decision_reason = decision_reason
+        self.process_calls = 0
+        self.submit_calls: list[LiveOrderIntent] = []
+
+    def process_simulation_snapshot(self, simulation_snapshot):  # noqa: ANN001
+        self.process_calls += 1
+        return self._intents
+
+    def submit_live_order(self, intent: LiveOrderIntent):
+        self.submit_calls.append(intent)
+        blocked = self._result_classification == "blocked_by_safeguard"
+        return _FakeLiveSubmissionResult(
+            classification=self._result_classification,
+            decision_reason=self._decision_reason,
+            order_placed=not blocked,
+            order_id=None if blocked else "order-1",
+            poll_attempts_used=0 if blocked else 1,
+        )
+
+
+@dataclass(frozen=True)
+class _FakeLiveSubmissionResult:
+    classification: str
+    decision_reason: str | None
+    order_placed: bool
+    order_id: str | None
+    poll_attempts_used: int
 
 
 @dataclass(frozen=True)

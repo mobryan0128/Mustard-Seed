@@ -188,7 +188,15 @@ class KalshiBotRunner:
                 market_discovery = None
                 contract_scanner = ContractScanner.from_settings(settings)
             simulation_engine = SimulationExecutionEngine.from_settings(settings)
-            live_execution_coordinator = LiveExecutionCoordinator(settings=settings)
+            live_execution_client = (
+                KalshiClient.from_settings(settings, logger=logger)
+                if settings.live_runner_execution_enabled
+                else None
+            )
+            live_execution_coordinator = LiveExecutionCoordinator(
+                settings=settings,
+                client=live_execution_client,
+            )
         except (
             KalshiWebSocketError,
             CryptoFeedClientError,
@@ -278,10 +286,16 @@ class KalshiBotRunner:
             cycle_number=cycle_number,
             simulation_snapshot=simulation_snapshot,
         )
+        live_intents = ()
         if self._live_execution_coordinator is not None:
-            self._live_execution_coordinator.process_simulation_snapshot(
+            live_intents = self._live_execution_coordinator.process_simulation_snapshot(
                 simulation_snapshot
             )
+            if self._settings.live_runner_execution_enabled:
+                self._submit_live_runner_intents(
+                    cycle_number=cycle_number,
+                    intents=live_intents,
+                )
         self._last_successful_cycle_at = _utc_now_iso()
         self._last_error = None
 
@@ -476,8 +490,56 @@ class KalshiBotRunner:
                 self._settings.live_validation_enabled
                 or self._settings.live_trading_enabled
                 or self._settings.live_kill_switch_active
+                or self._settings.live_runner_execution_enabled
             ),
         )
+
+    def _submit_live_runner_intents(
+        self,
+        *,
+        cycle_number: int,
+        intents: tuple[Any, ...],
+    ) -> None:
+        if self._live_execution_coordinator is None:
+            return
+        if not intents:
+            self._log_cycle_event(
+                "live_runner_no_intents",
+                {"cycle_number": cycle_number},
+            )
+            return
+
+        for intent in intents[:1]:
+            self._log_cycle_event(
+                "live_runner_submission_attempted",
+                {
+                    "cycle_number": cycle_number,
+                    "client_order_id": getattr(intent, "client_order_id", None),
+                    "ticker": getattr(intent, "ticker", None),
+                    "side": getattr(intent, "side", None),
+                    "count": getattr(intent, "count", None),
+                    "simulation_position_id": getattr(
+                        intent,
+                        "simulation_position_id",
+                        None,
+                    ),
+                },
+            )
+            result = self._live_execution_coordinator.submit_live_order(intent)
+            payload = {
+                "cycle_number": cycle_number,
+                "client_order_id": getattr(intent, "client_order_id", None),
+                "ticker": getattr(intent, "ticker", None),
+                "classification": getattr(result, "classification", None),
+                "decision_reason": getattr(result, "decision_reason", None),
+                "order_placed": getattr(result, "order_placed", None),
+                "order_id": getattr(result, "order_id", None),
+                "poll_attempts_used": getattr(result, "poll_attempts_used", None),
+            }
+            if getattr(result, "classification", None) == "blocked_by_safeguard":
+                self._log_cycle_event("live_runner_submission_blocked", payload)
+                continue
+            self._log_cycle_event("live_runner_submission_completed", payload)
 
     def _record_cycle_snapshot(self, result: RunnerCycleResult) -> None:
         payload = {
