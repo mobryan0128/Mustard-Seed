@@ -179,6 +179,11 @@ def run_offline_fixtures(settings) -> list[str]:
     failures.extend(_run_pruning_case(settings, now))
     failures.extend(_run_impulse_detection_case(settings, now))
     failures.extend(_run_slow_move_no_impulse_case(settings, now))
+    failures.extend(_run_impulse_override_case(settings, now, direction="up"))
+    failures.extend(_run_impulse_override_case(settings, now, direction="down"))
+    failures.extend(_run_stale_impulse_no_override_case(settings, now))
+    failures.extend(_run_insufficient_history_impulse_no_override_case(settings, now))
+    failures.extend(_run_exhaustion_impulse_no_override_case(settings, now))
     return failures
 
 
@@ -333,6 +338,113 @@ def _run_slow_move_no_impulse_case(settings, now: datetime) -> list[str]:
     return failures
 
 
+def _run_impulse_override_case(settings, now: datetime, *, direction: str) -> list[str]:
+    engine = BiasEngine.from_settings(settings)
+    product_id = settings.bias_products[0]
+    prices = _neutral_chop_impulse_prices(direction=direction)
+    snapshot = _ingest_series(
+        engine=engine,
+        product_id=product_id,
+        observations=_series(now, count=25, step_seconds=5, prices=prices),
+    )
+
+    state = snapshot.products[product_id]
+    failures: list[str] = []
+    if not state.impulse_detected:
+        failures.append(f"impulse override {direction}: impulse was not detected")
+    if state.direction != direction:
+        failures.append(
+            f"impulse override {direction}: direction={state.direction} expected={direction}"
+        )
+    if state.structure != "trend":
+        failures.append(
+            f"impulse override {direction}: structure={state.structure} expected=trend"
+        )
+    if state.confidence != 40:
+        failures.append(
+            f"impulse override {direction}: confidence={state.confidence} expected=40"
+        )
+    return failures
+
+
+def _run_stale_impulse_no_override_case(settings, now: datetime) -> list[str]:
+    engine = BiasEngine.from_settings(settings)
+    product_id = settings.bias_products[0]
+    stale_now = now - timedelta(seconds=settings.bias_stale_data_seconds + 60)
+    snapshot = _ingest_series(
+        engine=engine,
+        product_id=product_id,
+        observations=_series(
+            stale_now,
+            count=25,
+            step_seconds=5,
+            prices=_neutral_chop_impulse_prices(direction="down"),
+        ),
+    )
+
+    state = snapshot.products[product_id]
+    failures: list[str] = []
+    if not state.risk_flags.stale_data:
+        failures.append("stale impulse: stale_data flag was not set")
+    if state.direction != "neutral" or state.structure != "chop" or state.confidence != 0:
+        failures.append(
+            "stale impulse: classification="
+            f"{state.direction}/{state.structure}/{state.confidence} expected neutral/chop/0"
+        )
+    return failures
+
+
+def _run_insufficient_history_impulse_no_override_case(
+    settings,
+    now: datetime,
+) -> list[str]:
+    engine = BiasEngine.from_settings(settings)
+    product_id = settings.bias_products[0]
+    prices = (Decimal("100"),) * 5 + (Decimal("102"),) * 4
+    snapshot = _ingest_series(
+        engine=engine,
+        product_id=product_id,
+        observations=_series(now, count=9, step_seconds=5, prices=prices),
+    )
+
+    state = snapshot.products[product_id]
+    failures: list[str] = []
+    if not state.risk_flags.insufficient_history:
+        failures.append("insufficient impulse: insufficient_history flag was not set")
+    if state.direction != "neutral" or state.structure != "chop" or state.confidence != 0:
+        failures.append(
+            "insufficient impulse: classification="
+            f"{state.direction}/{state.structure}/{state.confidence} expected neutral/chop/0"
+        )
+    return failures
+
+
+def _run_exhaustion_impulse_no_override_case(settings, now: datetime) -> list[str]:
+    engine = BiasEngine.from_settings(settings)
+    product_id = settings.bias_products[0]
+    prices = (
+        (Decimal("98"),) * 12
+        + (Decimal("100"),) * 8
+        + (Decimal("98"),)
+        + (Decimal("100"),) * 4
+    )
+    snapshot = _ingest_series(
+        engine=engine,
+        product_id=product_id,
+        observations=_series(now, count=25, step_seconds=5, prices=prices),
+    )
+
+    state = snapshot.products[product_id]
+    failures: list[str] = []
+    if state.structure != "exhaustion":
+        failures.append(f"exhaustion impulse: structure={state.structure} expected=exhaustion")
+    if state.direction != "neutral":
+        failures.append(f"exhaustion impulse: direction={state.direction} expected=neutral")
+    if state.confidence != 30:
+        failures.append(f"exhaustion impulse: confidence={state.confidence} expected=30")
+    return failures
+
+
 async def run_live_smoke(settings, message_limit: int | None) -> int:
     try:
         from kalshi_bot.clients.crypto_feed_client import CryptoFeedClient, CryptoFeedClientError
@@ -375,6 +487,34 @@ def _series(
         (start_time + timedelta(seconds=index * step_seconds), prices[index])
         for index in range(count)
     )
+
+
+def _ingest_series(
+    *,
+    engine: BiasEngine,
+    product_id: str,
+    observations: tuple[tuple[datetime, Decimal], ...],
+):
+    snapshot = None
+    for observed_at, price in observations:
+        snapshot = engine.ingest(
+            FixtureFeedSnapshot(
+                products={
+                    product_id: FixturePriceState(
+                        product_id=product_id,
+                        price=price,
+                        source_timestamp=observed_at.isoformat(),
+                    )
+                }
+            )
+        )
+    assert snapshot is not None
+    return snapshot
+
+
+def _neutral_chop_impulse_prices(*, direction: str) -> tuple[Decimal, ...]:
+    impulse_anchor = Decimal("98") if direction == "up" else Decimal("102")
+    return (Decimal("100"),) * 20 + (impulse_anchor,) + (Decimal("100"),) * 4
 
 
 def _linear_prices(

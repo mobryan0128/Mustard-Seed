@@ -9,7 +9,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Deque, Mapping
 
 from kalshi_bot.config.settings import KalshiSettings
-from kalshi_bot.forecast.state_classifier import classify_bias_state
+from kalshi_bot.forecast.state_classifier import BiasClassification, classify_bias_state
 from kalshi_bot.timing.time_sync_checker import TimeSyncObservation
 
 if TYPE_CHECKING:
@@ -172,6 +172,11 @@ class BiasEngine:
                 stale_data=risk_flags.stale_data,
                 time_sync_failed=risk_flags.time_sync_failed,
             )
+            classification = _apply_impulse_bias_override(
+                classification=classification,
+                risk_flags=risk_flags,
+                impulse_diagnostics=impulse_diagnostics,
+            )
 
             products[product_id] = BiasState(
                 product_id=product_id,
@@ -221,6 +226,33 @@ class _ImpulseDiagnostics:
     direction: str | None
     return_bps: Decimal | None
     detected: bool
+
+
+def _apply_impulse_bias_override(
+    *,
+    classification: BiasClassification,
+    risk_flags: BiasRiskFlags,
+    impulse_diagnostics: _ImpulseDiagnostics,
+) -> BiasClassification:
+    clean_risk = not (
+        risk_flags.insufficient_history
+        or risk_flags.stale_data
+        or risk_flags.time_sync_failed
+    )
+    if (
+        classification.direction == "neutral"
+        and classification.structure == "chop"
+        and classification.confidence <= 10
+        and clean_risk
+        and impulse_diagnostics.detected
+        and impulse_diagnostics.direction in {"up", "down"}
+    ):
+        return BiasClassification(
+            direction=impulse_diagnostics.direction,
+            structure="trend",
+            confidence=40,
+        )
+    return classification
 
 
 def _parse_timestamp(value: str) -> datetime:
