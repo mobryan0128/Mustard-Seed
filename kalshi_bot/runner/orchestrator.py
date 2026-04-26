@@ -24,6 +24,7 @@ from kalshi_bot.execution.execution_engine import (
     SimulationExecutionError,
     SimulationSnapshot,
 )
+from kalshi_bot.execution.live_execution_coordinator import LiveExecutionCoordinator
 from kalshi_bot.forecast.bias_engine import BiasEngine, BiasEngineError, BiasSnapshot
 from kalshi_bot.market.crypto_market_discovery import (
     CryptoMarketDiscovery,
@@ -127,6 +128,7 @@ class KalshiBotRunner:
         simulation_engine: SimulationExecutionEngine,
         logger: StructuredLogger,
         replay_engine: ReplayEngine,
+        live_execution_coordinator: LiveExecutionCoordinator | None = None,
         sleep_fn=time.sleep,
     ) -> None:
         if not settings.runner_enabled:
@@ -139,6 +141,7 @@ class KalshiBotRunner:
         self._contract_scanner = contract_scanner
         self._market_discovery = market_discovery
         self._simulation_engine = simulation_engine
+        self._live_execution_coordinator = live_execution_coordinator
         self._logger = logger
         self._replay_engine = replay_engine
         self._sleep_fn = sleep_fn
@@ -185,6 +188,7 @@ class KalshiBotRunner:
                 market_discovery = None
                 contract_scanner = ContractScanner.from_settings(settings)
             simulation_engine = SimulationExecutionEngine.from_settings(settings)
+            live_execution_coordinator = LiveExecutionCoordinator(settings=settings)
         except (
             KalshiWebSocketError,
             CryptoFeedClientError,
@@ -207,6 +211,7 @@ class KalshiBotRunner:
             simulation_engine=simulation_engine,
             logger=logger,
             replay_engine=replay_engine,
+            live_execution_coordinator=live_execution_coordinator,
         )
 
     def stop(self) -> None:
@@ -273,6 +278,10 @@ class KalshiBotRunner:
             cycle_number=cycle_number,
             simulation_snapshot=simulation_snapshot,
         )
+        if self._live_execution_coordinator is not None:
+            self._live_execution_coordinator.process_simulation_snapshot(
+                simulation_snapshot
+            )
         self._last_successful_cycle_at = _utc_now_iso()
         self._last_error = None
 

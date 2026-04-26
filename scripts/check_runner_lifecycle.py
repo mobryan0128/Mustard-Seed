@@ -23,6 +23,7 @@ from kalshi_bot.execution.execution_engine import (  # noqa: E402
     SimulationSnapshot,
 )
 from kalshi_bot.execution.exit_manager import ClosedSimulatedPosition  # noqa: E402
+from kalshi_bot.execution.live_execution_coordinator import LiveExecutionCoordinator  # noqa: E402
 from kalshi_bot.forecast.bias_engine import BiasRiskFlags, BiasSnapshot, BiasState  # noqa: E402
 from kalshi_bot.market.crypto_market_discovery import (  # noqa: E402
     CryptoMarketDiscovery,
@@ -49,6 +50,8 @@ def main() -> int:
     failures.extend(_validate_subscription_ack_without_market_data_is_not_connected())
     failures.extend(_validate_simulation_trade_events_persisted())
     failures.extend(_validate_simulation_risk_denied_event_persisted())
+    failures.extend(_validate_live_order_candidate_logged())
+    failures.extend(_validate_live_order_intent_skip_logged())
 
     if failures:
         for failure in failures:
@@ -358,6 +361,69 @@ def _validate_simulation_risk_denied_event_persisted() -> list[str]:
     return failures
 
 
+def _validate_live_order_candidate_logged() -> list[str]:
+    runner, state = _build_runner(live_order_candidate_events=True)
+    results = runner.run_cycles(1)
+    failures: list[str] = []
+    if len(results) != 1:
+        failures.append(f"live order candidate cycle count={len(results)}")
+        return failures
+    if results[0].status.mode != "simulation":
+        failures.append(f"live order candidate mode={results[0].status.mode}")
+    if state.log_written_ref is None:
+        return ["live order candidate missing runtime path"]
+    payload = _first_event_payload(
+        _jsonl_records(state.log_written_ref),
+        key="event_type",
+        value="live_order_candidate",
+    )
+    if payload is None:
+        return ["live order candidate log missing"]
+    expected = {
+        "ticker": "KXBTC15M-OLD",
+        "side": "yes",
+        "price_dollars": "0.460",
+        "count": 6,
+        "stake_dollars": "3.00",
+        "confidence": 70,
+        "simulation_position_id": "sim-0001",
+    }
+    for key, value in expected.items():
+        if payload.get(key) != value:
+            failures.append(f"live order candidate {key}={payload.get(key)} expected={value}")
+    return failures
+
+
+def _validate_live_order_intent_skip_logged() -> list[str]:
+    runner, state = _build_runner(live_order_intent_skip_events=True)
+    results = runner.run_cycles(1)
+    failures: list[str] = []
+    if len(results) != 1:
+        failures.append(f"live order skip cycle count={len(results)}")
+        return failures
+    if results[0].status.mode != "simulation":
+        failures.append(f"live order skip mode={results[0].status.mode}")
+    if state.log_written_ref is None:
+        return ["live order skip missing runtime path"]
+    payload = _first_event_payload(
+        _jsonl_records(state.log_written_ref),
+        key="event_type",
+        value="live_order_intent_skipped",
+    )
+    if payload is None:
+        return ["live order intent skipped log missing"]
+    expected = {
+        "reason": "intent_unavailable",
+        "product_id": "BTC-USD",
+        "market_ticker": "KXBTC15M-OLD",
+        "simulation_position_id": "sim-0001",
+    }
+    for key, value in expected.items():
+        if payload.get(key) != value:
+            failures.append(f"live order skip {key}={payload.get(key)} expected={value}")
+    return failures
+
+
 def _build_runner(
     *,
     stop_after_first_cycle: bool = False,
@@ -367,6 +433,8 @@ def _build_runner(
     fail_fast_on_startup: bool = True,
     simulation_trade_events: bool = False,
     simulation_risk_denied_events: bool = False,
+    live_order_candidate_events: bool = False,
+    live_order_intent_skip_events: bool = False,
 ):
     temp_dir = TemporaryDirectory()
     tmp_path = Path(temp_dir.name)
@@ -395,6 +463,15 @@ def _build_runner(
             runner_ref=None,
             trade_events=simulation_trade_events,
             risk_denied_events=simulation_risk_denied_events,
+            live_order_candidate_events=live_order_candidate_events,
+            live_order_intent_skip_events=live_order_intent_skip_events,
+        ),
+        live_execution_coordinator=LiveExecutionCoordinator(
+            settings=_settings(
+                tmp_path,
+                live_flags_present=live_flags_present,
+                fail_fast_on_startup=fail_fast_on_startup,
+            )
         ),
         logger=logger,
         replay_engine=replay_engine,
@@ -613,12 +690,16 @@ class _FakeSimulationEngine:
         runner_ref,  # noqa: ANN001
         trade_events: bool,
         risk_denied_events: bool,
+        live_order_candidate_events: bool,
+        live_order_intent_skip_events: bool,
     ) -> None:
         self._cycle = 0
         self._runner_ref = runner_ref
         self._stop_after_first_cycle = stop_after_first_cycle
         self._trade_events = trade_events
         self._risk_denied_events = risk_denied_events
+        self._live_order_candidate_events = live_order_candidate_events
+        self._live_order_intent_skip_events = live_order_intent_skip_events
         self._latest = SimulationSnapshot(
             open_positions={},
             closed_positions=(),
@@ -632,6 +713,10 @@ class _FakeSimulationEngine:
             self._latest = self._trade_event_snapshot()
         elif self._risk_denied_events:
             self._latest = self._risk_denied_event_snapshot()
+        elif self._live_order_candidate_events:
+            self._latest = self._live_order_candidate_snapshot()
+        elif self._live_order_intent_skip_events:
+            self._latest = self._live_order_intent_skip_snapshot()
         else:
             self._latest = SimulationSnapshot(
                 open_positions={"sim-0001": object()} if self._cycle >= 1 else {},
@@ -708,6 +793,60 @@ class _FakeSimulationEngine:
                 ),
             ),
             evaluation_count=self._cycle,
+        )
+
+
+    def _live_order_candidate_snapshot(self) -> SimulationSnapshot:
+        opened = self._opened_position(stake_dollars=Decimal("3.00"))
+        return SimulationSnapshot(
+            open_positions={opened.position_id: opened},
+            closed_positions=(),
+            decisions=(
+                SimulationDecision(
+                    action="open_position",
+                    position_id=opened.position_id,
+                    product_id=opened.product_id,
+                    market_ticker=opened.market_ticker,
+                    reason=None,
+                ),
+            ),
+            evaluation_count=self._cycle,
+        )
+
+
+    def _live_order_intent_skip_snapshot(self) -> SimulationSnapshot:
+        opened = self._opened_position(stake_dollars=Decimal("0.20"))
+        return SimulationSnapshot(
+            open_positions={opened.position_id: opened},
+            closed_positions=(),
+            decisions=(
+                SimulationDecision(
+                    action="open_position",
+                    position_id=opened.position_id,
+                    product_id=opened.product_id,
+                    market_ticker=opened.market_ticker,
+                    reason=None,
+                ),
+            ),
+            evaluation_count=self._cycle,
+        )
+
+
+    def _opened_position(self, *, stake_dollars: Decimal) -> SimulatedPosition:
+        return SimulatedPosition(
+            position_id="sim-0001",
+            product_id="BTC-USD",
+            market_ticker="KXBTC15M-OLD",
+            direction="up",
+            structure="trend",
+            confidence=70,
+            entry_price=Decimal("0.460"),
+            latest_price=Decimal("0.460"),
+            stake_dollars=stake_dollars,
+            status="open",
+            opened_at="2026-04-23T12:00:03+00:00",
+            updated_at="2026-04-23T12:00:03+00:00",
+            update_count=0,
         )
 
 
