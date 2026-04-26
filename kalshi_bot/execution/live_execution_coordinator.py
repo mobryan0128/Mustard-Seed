@@ -23,6 +23,9 @@ from kalshi_bot.observability.replay_engine import ReplayEngine
 from kalshi_bot.risk.risk_manager import RiskManager
 
 
+RISK_APPROVAL_SOURCE = "simulation_entry_risk_gate"
+
+
 @dataclass(frozen=True)
 class LiveSubmissionResult:
     """Outcome from one guarded live submission attempt."""
@@ -150,6 +153,26 @@ class LiveExecutionCoordinator:
                 "immediate_or_cancel",
             ),
         )
+        if not _intent_is_risk_approved(intent):
+            reason = "live_intent_not_risk_approved"
+            self._log_and_record(
+                event_type="live_submission_blocked",
+                identifier=order_request.client_order_id,
+                payload={
+                    "reason": reason,
+                    **_order_request_payload(order_request),
+                },
+            )
+            return LiveSubmissionResult(
+                classification="blocked_by_safeguard",
+                decision_reason=reason,
+                order_placed=False,
+                order_id=None,
+                final_order=None,
+                poll_attempts_used=0,
+                error_message=None,
+            )
+
         safety_decision = self._risk_manager.evaluate_live_order(order_request)
         if not safety_decision.allow:
             self._log_and_record(
@@ -429,6 +452,13 @@ def _order_request_from_intent(
         price_dollars=intent.price_dollars,
         time_in_force=time_in_force,
         client_order_id=intent.client_order_id,
+    )
+
+
+def _intent_is_risk_approved(intent: LiveOrderIntent) -> bool:
+    return (
+        intent.risk_approved
+        and intent.risk_approval_source == RISK_APPROVAL_SOURCE
     )
 
 

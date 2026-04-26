@@ -28,6 +28,7 @@ def main() -> int:
 
     failures: list[str] = []
     failures.extend(_validate_live_disabled_blocks_submission())
+    failures.extend(_validate_unapproved_intent_blocks_submission())
     failures.extend(_validate_kill_switch_blocks_submission())
     failures.extend(_validate_non_prod_blocks_submission())
     failures.extend(_validate_count_cap_blocks_submission())
@@ -44,7 +45,7 @@ def main() -> int:
 
 def _validate_live_disabled_blocks_submission() -> list[str]:
     result, state = _run_submission(
-        intent=_intent(count=1),
+        intent=_intent(count=1, risk_approved=True),
         risk_manager=_risk_manager(live_trading_enabled=False),
     )
     return _assert_blocked(
@@ -54,9 +55,21 @@ def _validate_live_disabled_blocks_submission() -> list[str]:
     )
 
 
-def _validate_kill_switch_blocks_submission() -> list[str]:
+def _validate_unapproved_intent_blocks_submission() -> list[str]:
     result, state = _run_submission(
         intent=_intent(count=1),
+        risk_manager=_risk_manager(),
+    )
+    return _assert_blocked(
+        result=result,
+        state=state,
+        expected_reason="live_intent_not_risk_approved",
+    )
+
+
+def _validate_kill_switch_blocks_submission() -> list[str]:
+    result, state = _run_submission(
+        intent=_intent(count=1, risk_approved=True),
         risk_manager=_risk_manager(live_kill_switch_active=True),
     )
     return _assert_blocked(
@@ -68,7 +81,7 @@ def _validate_kill_switch_blocks_submission() -> list[str]:
 
 def _validate_non_prod_blocks_submission() -> list[str]:
     result, state = _run_submission(
-        intent=_intent(count=1),
+        intent=_intent(count=1, risk_approved=True),
         risk_manager=_risk_manager(env="demo"),
     )
     return _assert_blocked(
@@ -80,7 +93,7 @@ def _validate_non_prod_blocks_submission() -> list[str]:
 
 def _validate_count_cap_blocks_submission() -> list[str]:
     result, state = _run_submission(
-        intent=_intent(count=2),
+        intent=_intent(count=2, risk_approved=True),
         risk_manager=_risk_manager(),
     )
     return _assert_blocked(
@@ -92,7 +105,11 @@ def _validate_count_cap_blocks_submission() -> list[str]:
 
 def _validate_allowed_fake_flow() -> list[str]:
     result, state = _run_submission(
-        intent=_intent(count=1, client_order_id="sim-live-allowed"),
+        intent=_intent(
+            count=1,
+            client_order_id="sim-live-allowed",
+            risk_approved=True,
+        ),
         risk_manager=_risk_manager(),
         created_order=_order_summary(
             order_id="ord-live-allowed",
@@ -201,6 +218,7 @@ def _intent(
     *,
     count: int,
     client_order_id: str = "sim-live-0001",
+    risk_approved: bool = False,
 ) -> LiveOrderIntent:
     return LiveOrderIntent(
         product_id="BTC-USD",
@@ -214,6 +232,10 @@ def _intent(
         direction="up",
         confidence=70,
         simulation_position_id="sim-0001",
+        risk_approved=risk_approved,
+        risk_approval_source=(
+            "simulation_entry_risk_gate" if risk_approved else None
+        ),
     )
 
 

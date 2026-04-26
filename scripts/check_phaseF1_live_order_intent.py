@@ -118,6 +118,8 @@ def _validate_intent_preserves_trace_fields() -> list[str]:
         "client_order_id": "phase-f1-sim-0042",
         "price_dollars": Decimal("0.50"),
         "count": 8,
+        "risk_approved": True,
+        "risk_approval_source": "simulation_entry_risk_gate",
     }
     for field_name, expected in expectations.items():
         actual = getattr(intent, field_name)

@@ -254,6 +254,8 @@ def _intent(*, client_order_id: str) -> LiveOrderIntent:
         direction="up",
         confidence=70,
         simulation_position_id="sim-0001",
+        risk_approved=True,
+        risk_approval_source="simulation_entry_risk_gate",
     )
 
 

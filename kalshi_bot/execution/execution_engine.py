@@ -105,6 +105,8 @@ class LiveOrderIntent:
     direction: str
     confidence: int
     simulation_position_id: str
+    risk_approved: bool = False
+    risk_approval_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -539,6 +541,8 @@ def build_live_order_intent(
         direction=position.direction,
         confidence=position.confidence,
         simulation_position_id=position.position_id,
+        risk_approved=True,
+        risk_approval_source="simulation_entry_risk_gate",
     )
 
 
