@@ -41,6 +41,9 @@ class RunnerError(RuntimeError):
     """Raised when runner configuration or lifecycle handling fails."""
 
 
+KALSHI_FEED_TIMEOUT_DISCOVERY_THRESHOLD = 2
+
+
 @dataclass(frozen=True)
 class SkipReasonDiagnostic:
     """Aggregated skipped-contract reason for runner diagnostics."""
@@ -155,6 +158,8 @@ class KalshiBotRunner:
         self._last_error: str | None = None
         self._latest_result: RunnerCycleResult | None = None
         self._last_market_discovery_cycle: int | None = None
+        self._consecutive_kalshi_feed_timeouts = 0
+        self._force_market_discovery_next_cycle = False
         self._active_product_markets = (
             {}
             if settings.auto_market_discovery_enabled
@@ -289,6 +294,10 @@ class KalshiBotRunner:
         self._refresh_market_discovery_if_due(cycle_number)
 
         kalshi_result, crypto_result = asyncio.run(self._run_ingestion_cycle())
+        self._update_kalshi_feed_timeout_recovery(
+            cycle_number=cycle_number,
+            kalshi_result=kalshi_result,
+        )
         bias_snapshot = self._bias_engine.ingest(self._crypto_feed_client.snapshot())
         market_snapshot = self._market_state_cache.snapshot()
         contract_scan_snapshot = self._scan_contracts(
@@ -377,6 +386,50 @@ class KalshiBotRunner:
             )
         return result
 
+    def _update_kalshi_feed_timeout_recovery(
+        self,
+        *,
+        cycle_number: int,
+        kalshi_result: Any,
+    ) -> None:
+        market_data_messages = _market_data_message_count(kalshi_result)
+        if market_data_messages > 0:
+            self._consecutive_kalshi_feed_timeouts = 0
+            return
+        if not self._market_tickers:
+            self._consecutive_kalshi_feed_timeouts = 0
+            return
+        if not bool(getattr(kalshi_result, "timed_out", False)):
+            self._consecutive_kalshi_feed_timeouts = 0
+            return
+
+        self._consecutive_kalshi_feed_timeouts += 1
+        if (
+            self._consecutive_kalshi_feed_timeouts
+            < KALSHI_FEED_TIMEOUT_DISCOVERY_THRESHOLD
+            or self._force_market_discovery_next_cycle
+        ):
+            return
+
+        self._force_market_discovery_next_cycle = True
+        self._log_cycle_event(
+            "kalshi_feed_reconnect_triggered",
+            {
+                "cycle_number": cycle_number,
+                "consecutive_kalshi_feed_timeouts": (
+                    self._consecutive_kalshi_feed_timeouts
+                ),
+                "active_market_tickers": list(self._market_tickers),
+                "kalshi_subscribed_market_tickers": list(
+                    _subscribed_market_tickers(kalshi_result)
+                ),
+                "kalshi_market_data_message_count": market_data_messages,
+                "kalshi_subscription_message_count": _subscription_message_count(
+                    kalshi_result
+                ),
+            },
+        )
+
     async def _run_ingestion_cycle(self):
         if not self._market_tickers:
             crypto_result = await self._crypto_feed_client.run(
@@ -396,8 +449,10 @@ class KalshiBotRunner:
     def _refresh_market_discovery_if_due(self, cycle_number: int) -> None:
         if self._market_discovery is None:
             return
+        force_refresh = self._force_market_discovery_next_cycle
         if (
-            self._last_market_discovery_cycle is not None
+            not force_refresh
+            and self._last_market_discovery_cycle is not None
             and cycle_number - self._last_market_discovery_cycle
             < self._settings.market_discovery_refresh_cycles
         ):
@@ -405,13 +460,38 @@ class KalshiBotRunner:
 
         snapshot = self._market_discovery.discover()
         self._last_market_discovery_cycle = cycle_number
-        self._apply_market_discovery(snapshot)
+        self._apply_market_discovery(snapshot, force_refresh=force_refresh)
+        if force_refresh:
+            self._force_market_discovery_next_cycle = False
+            self._consecutive_kalshi_feed_timeouts = 0
 
-    def _apply_market_discovery(self, snapshot: CryptoMarketDiscoverySnapshot) -> None:
-        previous_tickers = set(self._market_tickers)
+    def _apply_market_discovery(
+        self,
+        snapshot: CryptoMarketDiscoverySnapshot,
+        *,
+        force_refresh: bool = False,
+    ) -> None:
+        previous_ticker_list = self._market_tickers
+        previous_tickers = set(previous_ticker_list)
         next_product_markets = dict(snapshot.product_markets)
         next_tickers = _flatten_product_markets(next_product_markets)
         next_ticker_set = set(next_tickers)
+        added_tickers = sorted(next_ticker_set - previous_tickers)
+        dropped_tickers = sorted(previous_tickers - next_ticker_set)
+        ticker_set_changed = previous_tickers != next_ticker_set
+
+        if ticker_set_changed:
+            self._log_cycle_event(
+                "kalshi_feed_resubscribe_started",
+                {
+                    "cycle_number": self._cycle_count,
+                    "force_refresh": force_refresh,
+                    "previous_active_market_tickers": list(previous_ticker_list),
+                    "next_active_market_tickers": list(next_tickers),
+                    "added_market_tickers": added_tickers,
+                    "dropped_market_tickers": dropped_tickers,
+                },
+            )
 
         self._active_product_markets = next_product_markets
         self._market_tickers = next_tickers
@@ -422,10 +502,30 @@ class KalshiBotRunner:
         )
         self._market_state_cache.retain_markets(next_tickers)
 
+        if dropped_tickers:
+            self._log_cycle_event(
+                "stale_market_tickers_dropped",
+                {
+                    "cycle_number": self._cycle_count,
+                    "dropped_market_tickers": dropped_tickers,
+                },
+            )
+        if ticker_set_changed:
+            update_payload = {
+                "cycle_number": self._cycle_count,
+                "force_refresh": force_refresh,
+                "previous_active_market_tickers": list(previous_ticker_list),
+                "active_market_tickers": list(next_tickers),
+                "added_market_tickers": added_tickers,
+                "dropped_market_tickers": dropped_tickers,
+            }
+            self._log_cycle_event("active_market_tickers_updated", update_payload)
+            self._log_cycle_event("kalshi_feed_resubscribe_completed", update_payload)
+
         payload = {
             "cycle_number": self._cycle_count,
-            "added_market_tickers": sorted(next_ticker_set - previous_tickers),
-            "dropped_market_tickers": sorted(previous_tickers - next_ticker_set),
+            "added_market_tickers": added_tickers,
+            "dropped_market_tickers": dropped_tickers,
             "active_product_markets": _product_markets_payload(next_product_markets),
             "discovered_markets": tuple(
                 {

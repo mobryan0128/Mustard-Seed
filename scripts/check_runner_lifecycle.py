@@ -57,6 +57,7 @@ def main() -> int:
     failures.extend(_validate_startup_fail_closed())
     failures.extend(_validate_market_discovery_tradable_filter())
     failures.extend(_validate_subscription_ack_without_market_data_is_not_connected())
+    failures.extend(_validate_feed_timeout_forces_market_discovery_resubscribe())
     failures.extend(_validate_simulation_trade_events_persisted())
     failures.extend(_validate_simulation_risk_denied_event_persisted())
     failures.extend(_validate_live_order_candidate_logged())
@@ -268,6 +269,90 @@ def _validate_subscription_ack_without_market_data_is_not_connected() -> list[st
         )
     if state.subscribed_tickers_by_call != (("KXBTC15M-OLD",),):
         failures.append(f"ack-only subscriptions={state.subscribed_tickers_by_call}")
+    return failures
+
+
+def _validate_feed_timeout_forces_market_discovery_resubscribe() -> list[str]:
+    runner, state = _build_runner(
+        kalshi_market_data=False,
+        market_discovery_refresh_cycles=99,
+    )
+    state.cache.replace_orderbook(
+        market_ticker="KXBTC15M-OLD",
+        yes_levels=(("0.44", "100"),),
+        no_levels=(("0.52", "100"),),
+        sid=1,
+        seq=1,
+    )
+    results = runner.run_cycles(3)
+    failures: list[str] = []
+    if len(results) != 3:
+        failures.append(f"timeout recovery count={len(results)}")
+        return failures
+    if state.discovery_calls != 2:
+        failures.append(f"timeout recovery discovery calls={state.discovery_calls}")
+    expected_subscriptions = (
+        ("KXBTC15M-OLD",),
+        ("KXBTC15M-OLD",),
+        ("KXBTC15M-NEW", "KXETH15M-NEW"),
+    )
+    if state.subscribed_tickers_by_call != expected_subscriptions:
+        failures.append(
+            "timeout recovery subscriptions="
+            f"{state.subscribed_tickers_by_call} expected={expected_subscriptions}"
+        )
+    final_status = results[-1].status
+    if final_status.last_market_discovery_cycle != 3:
+        failures.append(
+            f"timeout recovery discovery cycle={final_status.last_market_discovery_cycle}"
+        )
+    if final_status.active_market_tickers != ("KXBTC15M-NEW", "KXETH15M-NEW"):
+        failures.append(f"timeout recovery active={final_status.active_market_tickers}")
+    if final_status.ranked_contract_count != 0:
+        failures.append(f"timeout recovery ranked={final_status.ranked_contract_count}")
+    if "KXBTC15M-OLD" in state.cache.snapshot().tickers:
+        failures.append("timeout recovery stale ticker was not pruned")
+    if state.log_written_ref is None:
+        return failures + ["timeout recovery missing runtime path"]
+
+    records = _jsonl_records(state.log_written_ref)
+    if _first_event_payload(
+        records,
+        key="event_type",
+        value="kalshi_feed_reconnect_triggered",
+    ) is None:
+        failures.append("timeout recovery reconnect trigger log missing")
+    dropped = _first_event_payload(
+        records,
+        key="event_type",
+        value="stale_market_tickers_dropped",
+    )
+    if dropped is None:
+        failures.append("timeout recovery stale ticker drop log missing")
+    elif dropped.get("dropped_market_tickers") != ["KXBTC15M-OLD"]:
+        failures.append(
+            "timeout recovery dropped="
+            f"{dropped.get('dropped_market_tickers')} expected=['KXBTC15M-OLD']"
+        )
+
+    for event_type in (
+        "kalshi_feed_resubscribe_started",
+        "kalshi_feed_resubscribe_completed",
+        "active_market_tickers_updated",
+    ):
+        payloads = _event_payloads(records, key="event_type", value=event_type)
+        rollover_payload = next(
+            (
+                payload
+                for payload in payloads
+                if payload.get("dropped_market_tickers") == ["KXBTC15M-OLD"]
+                and payload.get("added_market_tickers")
+                == ["KXBTC15M-NEW", "KXETH15M-NEW"]
+            ),
+            None,
+        )
+        if rollover_payload is None:
+            failures.append(f"timeout recovery {event_type} rollover log missing")
     return failures
 
 
@@ -653,6 +738,7 @@ def _build_runner(
     live_order_intent_skip_events: bool = False,
     simulation_enabled: bool = True,
     live_execution_coordinator=None,  # noqa: ANN001
+    market_discovery_refresh_cycles: int = 2,
 ):
     temp_dir = TemporaryDirectory()
     tmp_path = Path(temp_dir.name)
@@ -667,6 +753,7 @@ def _build_runner(
             live_runner_execution_enabled=live_runner_execution_enabled,
             simulation_enabled=simulation_enabled,
             fail_fast_on_startup=fail_fast_on_startup,
+            market_discovery_refresh_cycles=market_discovery_refresh_cycles,
         ),
         market_state_cache=cache,
         kalshi_ws_client=_FakeKalshiClient(
@@ -697,6 +784,7 @@ def _build_runner(
                 live_runner_execution_enabled=live_runner_execution_enabled,
                 simulation_enabled=simulation_enabled,
                 fail_fast_on_startup=fail_fast_on_startup,
+                market_discovery_refresh_cycles=market_discovery_refresh_cycles,
             )
         ),
         logger=logger,
@@ -717,6 +805,7 @@ def _settings(
     fail_fast_on_startup: bool,
     live_runner_execution_enabled: bool = False,
     simulation_enabled: bool = True,
+    market_discovery_refresh_cycles: int = 2,
 ) -> KalshiSettings:
     return KalshiSettings(
         env="demo",
@@ -758,7 +847,7 @@ def _settings(
             "BTC-USD": ("KXBTC15M", "KXBTC30M"),
             "ETH-USD": ("KXETH15M", "KXETH30M"),
         },
-        market_discovery_refresh_cycles=2,
+        market_discovery_refresh_cycles=market_discovery_refresh_cycles,
         simulation_enabled=simulation_enabled,
         simulation_max_new_positions_per_evaluation=1,
         simulation_position_id_prefix="sim",
@@ -1269,6 +1358,22 @@ def _first_event_payload(
         if isinstance(payload, dict):
             return payload
     return None
+
+
+def _event_payloads(
+    records: list[dict[str, object]],
+    *,
+    key: str,
+    value: str,
+) -> list[dict[str, object]]:
+    payloads: list[dict[str, object]] = []
+    for record in records:
+        if record.get(key) != value:
+            continue
+        payload = record.get("payload")
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return payloads
 
 
 def _discovery_snapshot(
