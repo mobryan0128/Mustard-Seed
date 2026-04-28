@@ -74,6 +74,16 @@ def _validate_settings_defaults() -> list[str]:
             "default live_min_entry_price_dollars="
             f"{settings.live_min_entry_price_dollars}"
         )
+    if settings.live_max_entry_price_dollars != Decimal("0.800"):
+        failures.append(
+            "default live_max_entry_price_dollars="
+            f"{settings.live_max_entry_price_dollars}"
+        )
+    if settings.live_max_execution_spread_dollars != Decimal("0.100"):
+        failures.append(
+            "default live_max_execution_spread_dollars="
+            f"{settings.live_max_execution_spread_dollars}"
+        )
     return failures
 
 
@@ -84,7 +94,9 @@ def _validate_settings_overrides() -> list[str]:
             _base_env()
             + "\nLIVE_MAX_ORDER_COUNT=5\n"
             + "LIVE_MAX_OPEN_POSITIONS=2\n"
-            + "LIVE_MIN_ENTRY_PRICE_DOLLARS=0.25\n",
+            + "LIVE_MIN_ENTRY_PRICE_DOLLARS=0.25\n"
+            + "LIVE_MAX_ENTRY_PRICE_DOLLARS=0.850\n"
+            + "LIVE_MAX_EXECUTION_SPREAD_DOLLARS=0.150\n",
             encoding="utf-8",
         )
         settings = load_settings(env_path)
@@ -99,6 +111,16 @@ def _validate_settings_overrides() -> list[str]:
         failures.append(
             "override live_min_entry_price_dollars="
             f"{settings.live_min_entry_price_dollars}"
+        )
+    if settings.live_max_entry_price_dollars != Decimal("0.850"):
+        failures.append(
+            "override live_max_entry_price_dollars="
+            f"{settings.live_max_entry_price_dollars}"
+        )
+    if settings.live_max_execution_spread_dollars != Decimal("0.150"):
+        failures.append(
+            "override live_max_execution_spread_dollars="
+            f"{settings.live_max_execution_spread_dollars}"
         )
     return failures
 

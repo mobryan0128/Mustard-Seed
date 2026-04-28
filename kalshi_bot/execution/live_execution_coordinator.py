@@ -12,11 +12,14 @@ from kalshi_bot.clients.kalshi_client import (
     KalshiOrderRequest,
     KalshiOrderSummary,
 )
-from kalshi_bot.config.settings import KalshiSettings
+from kalshi_bot.config.settings import (
+    DEFAULT_LIVE_MAX_ENTRY_PRICE_DOLLARS,
+    DEFAULT_LIVE_MAX_EXECUTION_SPREAD_DOLLARS,
+    KalshiSettings,
+)
 from kalshi_bot.contracts.contract_scanner import ContractScanSnapshot, ScannedContract
 from kalshi_bot.execution.execution_engine import (
     LiveOrderIntent,
-    MAX_ENTRY_PRICE,
     SimulationSnapshot,
     build_live_order_intent,
     build_live_order_intent_from_contract,
@@ -30,7 +33,6 @@ RISK_APPROVAL_SOURCES = frozenset(
     {"simulation_entry_risk_gate", "live_entry_risk_gate"}
 )
 LIVE_RUNNER_REALIZED_DAILY_PNL_DOLLARS = Decimal("0")
-MAX_EXECUTION_SPREAD_DOLLARS = Decimal("0.100")
 
 
 @dataclass(frozen=True)
@@ -184,6 +186,21 @@ class LiveExecutionCoordinator:
 
         intents: list[LiveOrderIntent] = []
         for contract in contract_scan_snapshot.ranked_contracts:
+            min_entry_price = getattr(
+                self._settings,
+                "live_min_entry_price_dollars",
+                Decimal("0"),
+            )
+            max_entry_price = getattr(
+                self._settings,
+                "live_max_entry_price_dollars",
+                DEFAULT_LIVE_MAX_ENTRY_PRICE_DOLLARS,
+            )
+            max_execution_spread_dollars = getattr(
+                self._settings,
+                "live_max_execution_spread_dollars",
+                DEFAULT_LIVE_MAX_EXECUTION_SPREAD_DOLLARS,
+            )
             if contract.direction not in {"up", "down"}:
                 self._log_contract_intent_skipped(
                     reason="invalid_direction",
@@ -192,7 +209,11 @@ class LiveExecutionCoordinator:
                 )
                 continue
 
-            executable_price, skip_reason = _select_executable_price(contract)
+            executable_price, skip_reason = _select_executable_price(
+                contract,
+                max_entry_price=max_entry_price,
+                max_execution_spread_dollars=max_execution_spread_dollars,
+            )
             if skip_reason is not None or executable_price is None:
                 self._log_contract_intent_skipped(
                     reason=skip_reason or "executable_price_missing",
@@ -201,14 +222,12 @@ class LiveExecutionCoordinator:
                     details=_executable_price_details(
                         contract,
                         executable_price=executable_price,
+                        min_entry_price=min_entry_price,
+                        max_entry_price=max_entry_price,
+                        max_execution_spread_dollars=max_execution_spread_dollars,
                     ),
                 )
                 continue
-            min_entry_price = getattr(
-                self._settings,
-                "live_min_entry_price_dollars",
-                Decimal("0"),
-            )
             if (
                 min_entry_price > Decimal("0")
                 and executable_price < min_entry_price
@@ -221,8 +240,12 @@ class LiveExecutionCoordinator:
                         **_executable_price_details(
                             contract,
                             executable_price=executable_price,
+                            min_entry_price=min_entry_price,
+                            max_entry_price=max_entry_price,
+                            max_execution_spread_dollars=(
+                                max_execution_spread_dollars
+                            ),
                         ),
-                        "min_entry_price": min_entry_price,
                     },
                 )
                 continue
@@ -239,6 +262,9 @@ class LiveExecutionCoordinator:
                     "best_bid": contract.best_bid,
                     "best_ask": contract.best_ask,
                     "spread_width": contract.best_ask - contract.best_bid,
+                    "min_entry_price": min_entry_price,
+                    "max_entry_price": max_entry_price,
+                    "max_execution_spread_dollars": max_execution_spread_dollars,
                 },
             )
 
@@ -939,6 +965,9 @@ def _replay_engine_from_settings(settings: KalshiSettings) -> ReplayEngine | Non
 
 def _select_executable_price(
     contract: ScannedContract,
+    *,
+    max_entry_price: Decimal,
+    max_execution_spread_dollars: Decimal,
 ) -> tuple[Decimal | None, str | None]:
     best_bid = contract.best_bid
     best_ask = contract.best_ask
@@ -946,7 +975,7 @@ def _select_executable_price(
         return None, "executable_price_missing"
 
     spread_width = best_ask - best_bid
-    if spread_width < Decimal("0") or spread_width > MAX_EXECUTION_SPREAD_DOLLARS:
+    if spread_width < Decimal("0") or spread_width > max_execution_spread_dollars:
         return None, "unsafe_executable_spread"
 
     if contract.direction == "up":
@@ -958,7 +987,7 @@ def _select_executable_price(
 
     if executable_price <= Decimal("0"):
         return None, "executable_price_missing"
-    if executable_price > MAX_ENTRY_PRICE:
+    if executable_price > max_entry_price:
         return executable_price, "executable_price_above_limit"
     return executable_price, None
 
@@ -967,6 +996,9 @@ def _executable_price_details(
     contract: ScannedContract,
     *,
     executable_price: Decimal | None,
+    min_entry_price: Decimal,
+    max_entry_price: Decimal,
+    max_execution_spread_dollars: Decimal,
 ) -> dict[str, object]:
     best_bid = contract.best_bid
     best_ask = contract.best_ask
@@ -978,8 +1010,9 @@ def _executable_price_details(
         "best_ask": best_ask,
         "spread_width": spread_width,
         "executable_price": executable_price,
-        "max_entry_price": MAX_ENTRY_PRICE,
-        "max_execution_spread_dollars": MAX_EXECUTION_SPREAD_DOLLARS,
+        "min_entry_price": min_entry_price,
+        "max_entry_price": max_entry_price,
+        "max_execution_spread_dollars": max_execution_spread_dollars,
     }
 
 

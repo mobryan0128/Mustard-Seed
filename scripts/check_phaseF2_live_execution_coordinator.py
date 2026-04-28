@@ -41,6 +41,9 @@ def main() -> int:
     failures.extend(_validate_candidate_log_payload())
     failures.extend(_validate_direct_contract_scan_creates_live_intent())
     failures.extend(_validate_direct_buy_no_uses_executable_no_ask())
+    failures.extend(_validate_default_execution_thresholds_preserved())
+    failures.extend(_validate_max_execution_spread_override_allows_wider_spread())
+    failures.extend(_validate_max_entry_price_override_allows_higher_entry())
     failures.extend(_validate_default_min_entry_price_disabled())
     failures.extend(_validate_min_entry_price_blocks_lower_price())
     failures.extend(_validate_min_entry_price_allows_equal_price())
@@ -219,6 +222,18 @@ def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
             failures.append(
                 f"direct executable price={price_payload.get('executable_price')}"
             )
+        else:
+            expected_thresholds = {
+                "min_entry_price": "0",
+                "max_entry_price": "0.800",
+                "max_execution_spread_dollars": "0.100",
+            }
+            for key, value in expected_thresholds.items():
+                if price_payload.get(key) != value:
+                    failures.append(
+                        f"direct executable {key}={price_payload.get(key)} "
+                        f"expected={value}"
+                    )
         return failures
 
 
@@ -256,6 +271,85 @@ def _validate_direct_buy_no_uses_executable_no_ask() -> list[str]:
                 f"{actual_notional}/{intent.stake_dollars}"
             )
         return failures
+
+
+def _validate_default_execution_thresholds_preserved() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(temp_path, balance_payload={"balance": 25000})
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    midpoint=Decimal("0.78"),
+                    best_bid=Decimal("0.75"),
+                    best_ask=Decimal("0.81"),
+                )
+            ),
+            cycle_number=55,
+        )
+        failures: list[str] = []
+        if intents:
+            failures.append(f"default max entry intents={intents} expected empty")
+        failures.extend(
+            _assert_skip_payload(
+                temp_path,
+                {
+                    "reason": "executable_price_above_limit",
+                    "executable_price": "0.81",
+                    "max_entry_price": "0.800",
+                    "max_execution_spread_dollars": "0.100",
+                },
+            )
+        )
+        return failures
+
+
+def _validate_max_execution_spread_override_allows_wider_spread() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        coordinator = _coordinator(
+            Path(temp_dir),
+            balance_payload={"balance": 25000},
+            live_max_execution_spread_dollars=Decimal("0.200"),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    midpoint=Decimal("0.40"),
+                    best_bid=Decimal("0.30"),
+                    best_ask=Decimal("0.45"),
+                )
+            ),
+            cycle_number=56,
+        )
+        if len(intents) != 1:
+            return [f"wide-spread override intent count={len(intents)} expected=1"]
+        if intents[0].price_dollars != Decimal("0.45"):
+            return [f"wide-spread override price={intents[0].price_dollars}"]
+    return []
+
+
+def _validate_max_entry_price_override_allows_higher_entry() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        coordinator = _coordinator(
+            Path(temp_dir),
+            balance_payload={"balance": 25000},
+            live_max_entry_price_dollars=Decimal("0.850"),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    midpoint=Decimal("0.78"),
+                    best_bid=Decimal("0.75"),
+                    best_ask=Decimal("0.81"),
+                )
+            ),
+            cycle_number=57,
+        )
+        if len(intents) != 1:
+            return [f"max-entry override intent count={len(intents)} expected=1"]
+        if intents[0].price_dollars != Decimal("0.81"):
+            return [f"max-entry override price={intents[0].price_dollars}"]
+    return []
 
 
 def _validate_default_min_entry_price_disabled() -> list[str]:
@@ -310,6 +404,9 @@ def _validate_min_entry_price_blocks_lower_price() -> list[str]:
                 "reason": "executable_price_below_minimum",
                 "executable_price": "0.24",
                 "min_entry_price": "0.25",
+                "max_entry_price": "0.800",
+                "spread_width": "0.04",
+                "max_execution_spread_dollars": "0.100",
             }
             for key, value in expected.items():
                 if payload.get(key) != value:
@@ -402,7 +499,17 @@ def _validate_direct_executable_price_above_limit_skips() -> list[str]:
         )
         if intents:
             return [f"above-limit executable intents={intents} expected empty"]
-        return _assert_skip_reason(temp_path, "executable_price_above_limit")
+        return _assert_skip_payload(
+            temp_path,
+            {
+                "reason": "executable_price_above_limit",
+                "executable_price": "0.81",
+                "min_entry_price": "0",
+                "max_entry_price": "0.800",
+                "spread_width": "0.06",
+                "max_execution_spread_dollars": "0.100",
+            },
+        )
 
 
 def _validate_direct_unsafe_spread_skips() -> list[str]:
@@ -421,7 +528,17 @@ def _validate_direct_unsafe_spread_skips() -> list[str]:
         )
         if intents:
             return [f"unsafe spread intents={intents} expected empty"]
-        return _assert_skip_reason(temp_path, "unsafe_executable_spread")
+        return _assert_skip_payload(
+            temp_path,
+            {
+                "reason": "unsafe_executable_spread",
+                "executable_price": None,
+                "min_entry_price": "0",
+                "max_entry_price": "0.800",
+                "spread_width": "0.15",
+                "max_execution_spread_dollars": "0.100",
+            },
+        )
 
 
 def _validate_direct_contract_scan_min_balance_clamps_stake() -> list[str]:
@@ -531,6 +648,8 @@ def _coordinator(
     balance_error: str | None = None,
     client_enabled: bool = True,
     live_min_entry_price_dollars: Decimal = Decimal("0"),
+    live_max_entry_price_dollars: Decimal = Decimal("0.800"),
+    live_max_execution_spread_dollars: Decimal = Decimal("0.100"),
 ) -> LiveExecutionCoordinator:
     client = (
         _FakeBalanceClient(
@@ -545,6 +664,8 @@ def _coordinator(
             log_directory=temp_path,
             log_jsonl_enabled=True,
             live_min_entry_price_dollars=live_min_entry_price_dollars,
+            live_max_entry_price_dollars=live_max_entry_price_dollars,
+            live_max_execution_spread_dollars=live_max_execution_spread_dollars,
         ),
         client=client,
     )
@@ -672,15 +793,26 @@ def _first_event_payload(
 
 
 def _assert_skip_reason(temp_path: Path, expected_reason: str) -> list[str]:
+    return _assert_skip_payload(temp_path, {"reason": expected_reason})
+
+
+def _assert_skip_payload(
+    temp_path: Path,
+    expected: dict[str, object],
+) -> list[str]:
     payload = _first_event_payload(
         _jsonl_records(temp_path / "runtime.jsonl"),
         event_type="live_order_intent_skipped",
     )
     if payload is None:
-        return [f"{expected_reason} skip log missing"]
-    if payload.get("reason") != expected_reason:
-        return [f"{expected_reason} reason={payload.get('reason')}"]
-    return []
+        return [f"{expected.get('reason')} skip log missing"]
+    failures: list[str] = []
+    for key, value in expected.items():
+        if payload.get(key) != value:
+            failures.append(
+                f"{expected.get('reason')} {key}={payload.get(key)} expected={value}"
+            )
+    return failures
 
 
 @dataclass(frozen=True)
@@ -688,6 +820,8 @@ class _Settings:
     log_directory: Path
     log_jsonl_enabled: bool
     live_min_entry_price_dollars: Decimal = Decimal("0")
+    live_max_entry_price_dollars: Decimal = Decimal("0.800")
+    live_max_execution_spread_dollars: Decimal = Decimal("0.100")
 
 
 class _FakeBalanceClient:

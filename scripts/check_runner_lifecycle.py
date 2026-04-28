@@ -879,6 +879,8 @@ def _settings(
         live_max_order_count=1,
         live_max_open_positions=1,
         live_min_entry_price_dollars=Decimal("0"),
+        live_max_entry_price_dollars=Decimal("0.800"),
+        live_max_execution_spread_dollars=Decimal("0.100"),
         runner_enabled=True,
         runner_loop_interval_seconds=0.001,
         runner_status_log_every_n_cycles=1,
