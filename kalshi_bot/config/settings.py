@@ -60,6 +60,7 @@ DEFAULT_LIVE_KILL_SWITCH_ACTIVE = False
 DEFAULT_LIVE_RUNNER_EXECUTION_ENABLED = False
 DEFAULT_LIVE_MAX_ORDER_COUNT = 1
 DEFAULT_LIVE_MAX_OPEN_POSITIONS = 1
+DEFAULT_LIVE_MIN_ENTRY_PRICE_DOLLARS = Decimal("0")
 DEFAULT_RUNNER_ENABLED = True
 DEFAULT_RUNNER_LOOP_INTERVAL_SECONDS = 5.0
 DEFAULT_RUNNER_STATUS_LOG_EVERY_N_CYCLES = 1
@@ -149,6 +150,7 @@ class KalshiSettings:
     live_runner_execution_enabled: bool
     live_max_order_count: int
     live_max_open_positions: int
+    live_min_entry_price_dollars: Decimal
     runner_enabled: bool
     runner_loop_interval_seconds: float
     runner_status_log_every_n_cycles: int
@@ -387,6 +389,11 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         DEFAULT_LIVE_MAX_OPEN_POSITIONS,
         "LIVE_MAX_OPEN_POSITIONS",
     )
+    live_min_entry_price_dollars = _parse_non_negative_price_dollars(
+        values.get("LIVE_MIN_ENTRY_PRICE_DOLLARS"),
+        DEFAULT_LIVE_MIN_ENTRY_PRICE_DOLLARS,
+        "LIVE_MIN_ENTRY_PRICE_DOLLARS",
+    )
     runner_enabled = _parse_bool(
         values.get("RUNNER_ENABLED"),
         DEFAULT_RUNNER_ENABLED,
@@ -576,6 +583,7 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_runner_execution_enabled=live_runner_execution_enabled,
         live_max_order_count=live_max_order_count,
         live_max_open_positions=live_max_open_positions,
+        live_min_entry_price_dollars=live_min_entry_price_dollars,
         runner_enabled=runner_enabled,
         runner_loop_interval_seconds=runner_loop_interval_seconds,
         runner_status_log_every_n_cycles=runner_status_log_every_n_cycles,
@@ -691,6 +699,7 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_RUNNER_EXECUTION_ENABLED",
         "LIVE_MAX_ORDER_COUNT",
         "LIVE_MAX_OPEN_POSITIONS",
+        "LIVE_MIN_ENTRY_PRICE_DOLLARS",
         "RUNNER_ENABLED",
         "RUNNER_LOOP_INTERVAL_SECONDS",
         "RUNNER_STATUS_LOG_EVERY_N_CYCLES",
@@ -804,6 +813,24 @@ def _parse_price_dollars(value: str | None, key: str) -> Decimal | None:
     if parsed.as_tuple().exponent < -4:
         raise SettingsError(f"{key} must have at most four decimal places.")
     return parsed.quantize(Decimal("0.0001"))
+
+
+def _parse_non_negative_price_dollars(
+    value: str | None,
+    default: Decimal,
+    key: str,
+) -> Decimal:
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = Decimal(value.strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise SettingsError(f"{key} must be a valid decimal string.") from exc
+    if parsed < Decimal("0") or parsed > Decimal("0.99"):
+        raise SettingsError(f"{key} must be between 0 and 0.99 inclusive.")
+    if parsed.as_tuple().exponent < -4:
+        raise SettingsError(f"{key} must have at most four decimal places.")
+    return parsed
 
 
 def _parse_positive_decimal(value: str | None, default: Decimal, key: str) -> Decimal:

@@ -41,6 +41,10 @@ def main() -> int:
     failures.extend(_validate_candidate_log_payload())
     failures.extend(_validate_direct_contract_scan_creates_live_intent())
     failures.extend(_validate_direct_buy_no_uses_executable_no_ask())
+    failures.extend(_validate_default_min_entry_price_disabled())
+    failures.extend(_validate_min_entry_price_blocks_lower_price())
+    failures.extend(_validate_min_entry_price_allows_equal_price())
+    failures.extend(_validate_min_entry_price_allows_higher_price())
     failures.extend(_validate_direct_missing_executable_price_skips())
     failures.extend(_validate_direct_executable_price_above_limit_skips())
     failures.extend(_validate_direct_unsafe_spread_skips())
@@ -186,6 +190,9 @@ def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
             failures.append(f"direct price={intent.price_dollars} expected=0.50")
         if intent.count != 5:
             failures.append(f"direct count={intent.count} expected=5")
+        actual_notional = intent.price_dollars * intent.count
+        if actual_notional != Decimal("2.50"):
+            failures.append(f"direct notional={actual_notional} expected=2.50")
         payload = _first_event_payload(
             _jsonl_records(temp_path / "runtime.jsonl"),
             event_type="live_intent_created",
@@ -240,7 +247,124 @@ def _validate_direct_buy_no_uses_executable_no_ask() -> list[str]:
             failures.append(f"direct no price={intent.price_dollars} expected=0.38")
         if intent.count != 6:
             failures.append(f"direct no count={intent.count} expected=6")
+        actual_notional = intent.price_dollars * intent.count
+        if actual_notional != Decimal("2.28"):
+            failures.append(f"direct no notional={actual_notional} expected=2.28")
+        if actual_notional >= intent.stake_dollars:
+            failures.append(
+                "direct no floored notional did not stay below stake "
+                f"{actual_notional}/{intent.stake_dollars}"
+            )
         return failures
+
+
+def _validate_default_min_entry_price_disabled() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        coordinator = _coordinator(Path(temp_dir), balance_payload={"balance": 25000})
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    midpoint=Decimal("0.22"),
+                    best_bid=Decimal("0.20"),
+                    best_ask=Decimal("0.24"),
+                )
+            ),
+            cycle_number=51,
+        )
+        if len(intents) != 1:
+            return [f"default min entry intent count={len(intents)} expected=1"]
+        if intents[0].price_dollars != Decimal("0.24"):
+            return [f"default min entry price={intents[0].price_dollars}"]
+    return []
+
+
+def _validate_min_entry_price_blocks_lower_price() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            balance_payload={"balance": 25000},
+            live_min_entry_price_dollars=Decimal("0.25"),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    midpoint=Decimal("0.22"),
+                    best_bid=Decimal("0.20"),
+                    best_ask=Decimal("0.24"),
+                )
+            ),
+            cycle_number=52,
+        )
+        failures: list[str] = []
+        if intents:
+            failures.append(f"below-min entry intents={intents} expected empty")
+        payload = _first_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            failures.append("below-min entry skip log missing")
+        else:
+            expected = {
+                "reason": "executable_price_below_minimum",
+                "executable_price": "0.24",
+                "min_entry_price": "0.25",
+            }
+            for key, value in expected.items():
+                if payload.get(key) != value:
+                    failures.append(
+                        f"below-min entry {key}={payload.get(key)} expected={value}"
+                    )
+        return failures
+
+
+def _validate_min_entry_price_allows_equal_price() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        coordinator = _coordinator(
+            Path(temp_dir),
+            balance_payload={"balance": 25000},
+            live_min_entry_price_dollars=Decimal("0.25"),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    midpoint=Decimal("0.23"),
+                    best_bid=Decimal("0.21"),
+                    best_ask=Decimal("0.25"),
+                )
+            ),
+            cycle_number=53,
+        )
+        if len(intents) != 1:
+            return [f"equal-min entry intent count={len(intents)} expected=1"]
+        if intents[0].price_dollars != Decimal("0.25"):
+            return [f"equal-min entry price={intents[0].price_dollars}"]
+    return []
+
+
+def _validate_min_entry_price_allows_higher_price() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        coordinator = _coordinator(
+            Path(temp_dir),
+            balance_payload={"balance": 25000},
+            live_min_entry_price_dollars=Decimal("0.25"),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    midpoint=Decimal("0.45"),
+                    best_bid=Decimal("0.40"),
+                    best_ask=Decimal("0.50"),
+                )
+            ),
+            cycle_number=54,
+        )
+        if len(intents) != 1:
+            return [f"higher-min entry intent count={len(intents)} expected=1"]
+        if intents[0].price_dollars != Decimal("0.50"):
+            return [f"higher-min entry price={intents[0].price_dollars}"]
+    return []
 
 
 def _validate_direct_missing_executable_price_skips() -> list[str]:
@@ -406,6 +530,7 @@ def _coordinator(
     balance_payload: dict[str, object] | None = None,
     balance_error: str | None = None,
     client_enabled: bool = True,
+    live_min_entry_price_dollars: Decimal = Decimal("0"),
 ) -> LiveExecutionCoordinator:
     client = (
         _FakeBalanceClient(
@@ -419,6 +544,7 @@ def _coordinator(
         settings=_Settings(
             log_directory=temp_path,
             log_jsonl_enabled=True,
+            live_min_entry_price_dollars=live_min_entry_price_dollars,
         ),
         client=client,
     )
@@ -561,6 +687,7 @@ def _assert_skip_reason(temp_path: Path, expected_reason: str) -> list[str]:
 class _Settings:
     log_directory: Path
     log_jsonl_enabled: bool
+    live_min_entry_price_dollars: Decimal = Decimal("0")
 
 
 class _FakeBalanceClient:

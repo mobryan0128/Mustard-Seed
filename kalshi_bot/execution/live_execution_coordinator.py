@@ -204,6 +204,28 @@ class LiveExecutionCoordinator:
                     ),
                 )
                 continue
+            min_entry_price = getattr(
+                self._settings,
+                "live_min_entry_price_dollars",
+                Decimal("0"),
+            )
+            if (
+                min_entry_price > Decimal("0")
+                and executable_price < min_entry_price
+            ):
+                self._log_contract_intent_skipped(
+                    reason="executable_price_below_minimum",
+                    contract=contract,
+                    cycle_number=cycle_number,
+                    details={
+                        **_executable_price_details(
+                            contract,
+                            executable_price=executable_price,
+                        ),
+                        "min_entry_price": min_entry_price,
+                    },
+                )
+                continue
             self._log_and_record(
                 event_type="executable_price_selected",
                 identifier=contract.market_ticker,
