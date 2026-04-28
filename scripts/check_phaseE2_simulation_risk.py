@@ -29,6 +29,7 @@ def main() -> int:
     failures.extend(_validate_kill_switch_denial())
     failures.extend(_validate_max_open_positions_denial())
     failures.extend(_validate_max_exposure_denial())
+    failures.extend(_validate_simulation_uses_base_exposure_cap())
     failures.extend(_validate_daily_loss_denial())
     failures.extend(_validate_day_scoped_daily_loss())
     failures.extend(_validate_denied_candidate_continues_to_next())
@@ -133,6 +134,25 @@ def _validate_max_exposure_denial() -> list[str]:
     return _expect_single_skip(
         snapshot,
         scenario="max exposure",
+        reason="risk_max_total_exposure",
+    )
+
+
+def _validate_simulation_uses_base_exposure_cap() -> list[str]:
+    engine = _engine(max_total_exposure_dollars=Decimal("0.15"))
+    snapshot = engine.evaluate(
+        _snapshot(
+            _contract(
+                product_id="BTC-USD",
+                market_ticker="KXBTC-BASE-RISK",
+                confidence=60,
+                midpoint=Decimal("0.500"),
+            )
+        )
+    )
+    return _expect_single_skip(
+        snapshot,
+        scenario="simulation base exposure cap",
         reason="risk_max_total_exposure",
     )
 

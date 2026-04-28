@@ -63,6 +63,7 @@ DEFAULT_LIVE_MAX_OPEN_POSITIONS = 1
 DEFAULT_LIVE_MIN_ENTRY_PRICE_DOLLARS = Decimal("0")
 DEFAULT_LIVE_MAX_ENTRY_PRICE_DOLLARS = Decimal("0.800")
 DEFAULT_LIVE_MAX_EXECUTION_SPREAD_DOLLARS = Decimal("0.100")
+DEFAULT_LIVE_MAX_TOTAL_EXPOSURE_DOLLARS: Decimal | None = None
 DEFAULT_LIVE_REQUIRE_MOMENTUM_ALIGNMENT = False
 DEFAULT_LIVE_REQUIRE_TREND_MOMENTUM_CONFIRMATION = False
 DEFAULT_LIVE_REQUIRE_REVERSAL_RANGE_POSITION = False
@@ -159,6 +160,7 @@ class KalshiSettings:
     live_min_entry_price_dollars: Decimal
     live_max_entry_price_dollars: Decimal
     live_max_execution_spread_dollars: Decimal
+    live_max_total_exposure_dollars: Decimal | None
     live_require_momentum_alignment: bool
     live_require_trend_momentum_confirmation: bool
     live_require_reversal_range_position: bool
@@ -414,6 +416,10 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         values.get("LIVE_MAX_EXECUTION_SPREAD_DOLLARS"),
         "LIVE_MAX_EXECUTION_SPREAD_DOLLARS",
     ) or DEFAULT_LIVE_MAX_EXECUTION_SPREAD_DOLLARS
+    live_max_total_exposure_dollars = _parse_optional_positive_decimal(
+        values.get("LIVE_MAX_TOTAL_EXPOSURE_DOLLARS"),
+        "LIVE_MAX_TOTAL_EXPOSURE_DOLLARS",
+    )
     live_require_momentum_alignment = _parse_bool(
         values.get("LIVE_REQUIRE_MOMENTUM_ALIGNMENT"),
         DEFAULT_LIVE_REQUIRE_MOMENTUM_ALIGNMENT,
@@ -626,6 +632,7 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_min_entry_price_dollars=live_min_entry_price_dollars,
         live_max_entry_price_dollars=live_max_entry_price_dollars,
         live_max_execution_spread_dollars=live_max_execution_spread_dollars,
+        live_max_total_exposure_dollars=live_max_total_exposure_dollars,
         live_require_momentum_alignment=live_require_momentum_alignment,
         live_require_trend_momentum_confirmation=(
             live_require_trend_momentum_confirmation
@@ -750,6 +757,7 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_MIN_ENTRY_PRICE_DOLLARS",
         "LIVE_MAX_ENTRY_PRICE_DOLLARS",
         "LIVE_MAX_EXECUTION_SPREAD_DOLLARS",
+        "LIVE_MAX_TOTAL_EXPOSURE_DOLLARS",
         "LIVE_REQUIRE_MOMENTUM_ALIGNMENT",
         "LIVE_REQUIRE_TREND_MOMENTUM_CONFIRMATION",
         "LIVE_REQUIRE_REVERSAL_RANGE_POSITION",
@@ -914,6 +922,18 @@ def _parse_positive_decimal(value: str | None, default: Decimal, key: str) -> De
         raise SettingsError(f"{key} must be a valid decimal string.") from exc
     if parsed <= 0:
         raise SettingsError(f"{key} must be greater than zero.")
+    return parsed
+
+
+def _parse_optional_positive_decimal(value: str | None, key: str) -> Decimal | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        parsed = Decimal(value.strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise SettingsError(f"{key} must be a valid decimal string.") from exc
+    if parsed <= 0:
+        raise SettingsError(f"{key} must be greater than zero when provided.")
     return parsed
 
 

@@ -183,6 +183,9 @@ class LiveExecutionCoordinator:
             return ()
         entry_risk_manager = self._entry_risk_manager_for_balance(balance_dollars)
         live_risk_state = self._reconcile_live_risk_state(cycle_number=cycle_number)
+        max_total_exposure_dollars, max_total_exposure_source = (
+            _live_max_total_exposure_settings(self._settings)
+        )
 
         intents: list[LiveOrderIntent] = []
         for contract in contract_scan_snapshot.ranked_contracts:
@@ -298,6 +301,8 @@ class LiveExecutionCoordinator:
                         ),
                         "open_position_count": live_risk_state.open_position_count,
                         "live_risk_source": live_risk_state.source,
+                        "max_total_exposure_dollars": max_total_exposure_dollars,
+                        "max_total_exposure_source": max_total_exposure_source,
                         "realized_daily_pnl_dollars": (
                             LIVE_RUNNER_REALIZED_DAILY_PNL_DOLLARS
                         ),
@@ -328,6 +333,8 @@ class LiveExecutionCoordinator:
                     ),
                     "open_position_count": live_risk_state.open_position_count,
                     "live_risk_source": live_risk_state.source,
+                    "max_total_exposure_dollars": max_total_exposure_dollars,
+                    "max_total_exposure_source": max_total_exposure_source,
                     "entry_price": executable_price,
                     "executable_price": executable_price,
                 },
@@ -378,6 +385,8 @@ class LiveExecutionCoordinator:
                     "confidence": intent.confidence,
                     "risk_approval_source": intent.risk_approval_source,
                     "structure_gate_candidate_passed": True,
+                    "max_total_exposure_dollars": max_total_exposure_dollars,
+                    "max_total_exposure_source": max_total_exposure_source,
                     **_signal_diagnostics_payload(contract),
                 },
             )
@@ -428,6 +437,9 @@ class LiveExecutionCoordinator:
         return balance_dollars
 
     def _entry_risk_manager_for_balance(self, balance_dollars: Decimal) -> RiskManager:
+        max_total_exposure_dollars, _source = _live_max_total_exposure_settings(
+            self._settings
+        )
         return RiskManager(
             live_validation_enabled=True,
             live_trading_enabled=getattr(self._settings, "live_trading_enabled", False),
@@ -462,11 +474,7 @@ class LiveExecutionCoordinator:
                 "live_max_open_positions",
                 1,
             ),
-            max_total_exposure_dollars=getattr(
-                self._settings,
-                "risk_max_total_exposure_dollars",
-                Decimal("10"),
-            ),
+            max_total_exposure_dollars=max_total_exposure_dollars,
             daily_loss_limit_dollars=getattr(
                 self._settings,
                 "risk_daily_loss_limit_dollars",
@@ -975,6 +983,18 @@ def _replay_engine_from_settings(settings: KalshiSettings) -> ReplayEngine | Non
     return ReplayEngine(
         replay_directory=replay_directory,
         enabled=getattr(settings, "replay_write_enabled", False),
+    )
+
+
+def _live_max_total_exposure_settings(
+    settings: KalshiSettings,
+) -> tuple[Decimal, str]:
+    live_override = getattr(settings, "live_max_total_exposure_dollars", None)
+    if live_override is not None:
+        return Decimal(str(live_override)), "live_override"
+    return (
+        getattr(settings, "risk_max_total_exposure_dollars", Decimal("10")),
+        "base_risk",
     )
 
 

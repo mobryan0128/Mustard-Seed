@@ -47,6 +47,9 @@ def main() -> int:
     failures.extend(_validate_two_live_positions_block_cap_two())
     failures.extend(_validate_stale_filled_ledger_cleared_by_empty_positions())
     failures.extend(_validate_terminal_ledger_fallback_does_not_block())
+    failures.extend(_validate_unset_live_exposure_override_uses_base_risk())
+    failures.extend(_validate_lower_live_exposure_override_blocks())
+    failures.extend(_validate_higher_live_exposure_override_allows())
 
     if failures:
         for failure in failures:
@@ -95,6 +98,11 @@ def _validate_settings_defaults() -> list[str]:
             "default live_min_reversal_range_position="
             f"{settings.live_min_reversal_range_position}"
         )
+    if settings.live_max_total_exposure_dollars is not None:
+        failures.append(
+            "default live_max_total_exposure_dollars="
+            f"{settings.live_max_total_exposure_dollars}"
+        )
     return failures
 
 
@@ -111,7 +119,8 @@ def _validate_settings_overrides() -> list[str]:
             + "LIVE_REQUIRE_MOMENTUM_ALIGNMENT=true\n"
             + "LIVE_REQUIRE_TREND_MOMENTUM_CONFIRMATION=true\n"
             + "LIVE_REQUIRE_REVERSAL_RANGE_POSITION=true\n"
-            + "LIVE_MIN_REVERSAL_RANGE_POSITION=0.60\n",
+            + "LIVE_MIN_REVERSAL_RANGE_POSITION=0.60\n"
+            + "LIVE_MAX_TOTAL_EXPOSURE_DOLLARS=12.34\n",
             encoding="utf-8",
         )
         settings = load_settings(env_path)
@@ -147,6 +156,11 @@ def _validate_settings_overrides() -> list[str]:
         failures.append(
             "override live_min_reversal_range_position="
             f"{settings.live_min_reversal_range_position}"
+        )
+    if settings.live_max_total_exposure_dollars != Decimal("12.34"):
+        failures.append(
+            "override live_max_total_exposure_dollars="
+            f"{settings.live_max_total_exposure_dollars}"
         )
     return failures
 
@@ -263,6 +277,108 @@ def _validate_terminal_ledger_fallback_does_not_block() -> list[str]:
         return _assert_event_present(temp_path, "live_position_reconciled")
 
 
+def _validate_unset_live_exposure_override_uses_base_risk() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            live_max_open_positions=2,
+            risk_max_total_exposure_dollars=Decimal("2.00"),
+            positions=(_position("KXBTC15M-OPEN", Decimal("1.00")),),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(_contract()),
+            cycle_number=6,
+        )
+        failures: list[str] = []
+        if intents:
+            failures.append("base exposure cap created an intent")
+        failures.extend(
+            _assert_skip_payload(
+                temp_path,
+                {
+                    "reason": "risk_max_total_exposure",
+                    "current_exposure_dollars": "1.00",
+                    "max_total_exposure_dollars": "2.00",
+                    "max_total_exposure_source": "base_risk",
+                },
+            )
+        )
+        return failures
+
+
+def _validate_lower_live_exposure_override_blocks() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            live_max_open_positions=2,
+            risk_max_total_exposure_dollars=Decimal("10.00"),
+            live_max_total_exposure_dollars=Decimal("2.00"),
+            positions=(_position("KXBTC15M-OPEN", Decimal("1.00")),),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(_contract()),
+            cycle_number=7,
+        )
+        failures: list[str] = []
+        if intents:
+            failures.append("live exposure override created an intent")
+        failures.extend(
+            _assert_skip_payload(
+                temp_path,
+                {
+                    "reason": "risk_max_total_exposure",
+                    "current_exposure_dollars": "1.00",
+                    "max_total_exposure_dollars": "2.00",
+                    "max_total_exposure_source": "live_override",
+                },
+            )
+        )
+        return failures
+
+
+def _validate_higher_live_exposure_override_allows() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            live_max_open_positions=2,
+            risk_max_total_exposure_dollars=Decimal("2.00"),
+            live_max_total_exposure_dollars=Decimal("10.00"),
+            positions=(_position("KXBTC15M-OPEN", Decimal("1.00")),),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(_contract()),
+            cycle_number=8,
+        )
+        failures: list[str] = []
+        if len(intents) != 1:
+            failures.append(f"higher live exposure intent count={len(intents)}")
+            return failures
+        failures.extend(
+            _assert_event_payload(
+                temp_path,
+                "live_intent_created",
+                {
+                    "max_total_exposure_dollars": "10.00",
+                    "max_total_exposure_source": "live_override",
+                },
+            )
+        )
+        failures.extend(
+            _assert_event_payload(
+                temp_path,
+                "live_stake_computed",
+                {
+                    "max_total_exposure_dollars": "10.00",
+                    "max_total_exposure_source": "live_override",
+                },
+            )
+        )
+        return failures
+
+
 def _base_env() -> str:
     return "\n".join(
         (
@@ -303,12 +419,16 @@ def _coordinator(
     live_max_open_positions: int,
     positions: tuple[KalshiMarketPosition, ...] = (),
     positions_error: bool = False,
+    risk_max_total_exposure_dollars: Decimal = Decimal("10"),
+    live_max_total_exposure_dollars: Decimal | None = None,
 ) -> LiveExecutionCoordinator:
     return LiveExecutionCoordinator(
         settings=_Settings(
             log_directory=temp_path,
             log_jsonl_enabled=True,
             live_max_open_positions=live_max_open_positions,
+            risk_max_total_exposure_dollars=risk_max_total_exposure_dollars,
+            live_max_total_exposure_dollars=live_max_total_exposure_dollars,
         ),
         client=_FakeClient(positions=positions, positions_error=positions_error),
     )
@@ -399,12 +519,40 @@ def _first_event_payload(temp_path: Path, event_type: str) -> dict[str, object] 
 
 
 def _assert_skip_reason(temp_path: Path, expected_reason: str) -> list[str]:
+    return _assert_skip_payload(temp_path, {"reason": expected_reason})
+
+
+def _assert_skip_payload(
+    temp_path: Path,
+    expected: dict[str, object],
+) -> list[str]:
     payload = _first_event_payload(temp_path, "live_order_intent_skipped")
     if payload is None:
-        return [f"{expected_reason} skip log missing"]
-    if payload.get("reason") != expected_reason:
-        return [f"{expected_reason} reason={payload.get('reason')}"]
-    return []
+        return [f"{expected.get('reason')} skip log missing"]
+    return _assert_payload_fields(payload, expected, str(expected.get("reason")))
+
+
+def _assert_event_payload(
+    temp_path: Path,
+    event_type: str,
+    expected: dict[str, object],
+) -> list[str]:
+    payload = _first_event_payload(temp_path, event_type)
+    if payload is None:
+        return [f"{event_type} log missing"]
+    return _assert_payload_fields(payload, expected, event_type)
+
+
+def _assert_payload_fields(
+    payload: dict[str, object],
+    expected: dict[str, object],
+    label: str,
+) -> list[str]:
+    failures: list[str] = []
+    for key, value in expected.items():
+        if payload.get(key) != value:
+            failures.append(f"{label} {key}={payload.get(key)} expected={value}")
+    return failures
 
 
 def _assert_event_present(temp_path: Path, event_type: str) -> list[str]:
@@ -425,6 +573,7 @@ class _Settings:
     risk_min_stake_dollars: Decimal = Decimal("0.10")
     risk_max_stake_dollars: Decimal = Decimal("3")
     risk_max_total_exposure_dollars: Decimal = Decimal("10")
+    live_max_total_exposure_dollars: Decimal | None = None
     risk_daily_loss_limit_dollars: Decimal = Decimal("5")
     risk_kill_switch_active: bool = False
     live_max_order_count: int = 1

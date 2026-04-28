@@ -886,6 +886,7 @@ def _settings(
         live_min_entry_price_dollars=Decimal("0"),
         live_max_entry_price_dollars=Decimal("0.800"),
         live_max_execution_spread_dollars=Decimal("0.100"),
+        live_max_total_exposure_dollars=None,
         live_require_momentum_alignment=False,
         live_require_trend_momentum_confirmation=False,
         live_require_reversal_range_position=False,

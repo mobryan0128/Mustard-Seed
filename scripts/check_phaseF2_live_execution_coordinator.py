@@ -217,6 +217,14 @@ def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
                 "direct structure_gate_candidate_passed="
                 f"{payload.get('structure_gate_candidate_passed')}"
             )
+        else:
+            expected_cap = {
+                "max_total_exposure_dollars": "10",
+                "max_total_exposure_source": "base_risk",
+            }
+            for key, value in expected_cap.items():
+                if payload.get(key) != value:
+                    failures.append(f"direct log {key}={payload.get(key)}")
         stake_payload = _first_event_payload(
             _jsonl_records(temp_path / "runtime.jsonl"),
             event_type="live_stake_computed",
@@ -225,6 +233,11 @@ def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
             failures.append("direct live_stake_computed log missing")
         elif stake_payload.get("balance_dollars") != "250":
             failures.append(f"direct balance={stake_payload.get('balance_dollars')}")
+        elif stake_payload.get("max_total_exposure_source") != "base_risk":
+            failures.append(
+                "direct stake max exposure source="
+                f"{stake_payload.get('max_total_exposure_source')}"
+            )
         price_payload = _first_event_payload(
             _jsonl_records(temp_path / "runtime.jsonl"),
             event_type="executable_price_selected",
