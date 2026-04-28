@@ -20,6 +20,7 @@ BASIS_POINTS_MULTIPLIER = Decimal("10000")
 IMPULSE_SHORT_WINDOW = timedelta(seconds=20)
 IMPULSE_AVERAGE_WINDOW = timedelta(seconds=120)
 IMPULSE_MULTIPLIER = Decimal("2")
+POOR_UTC_HOURS = frozenset({9, 10, 11, 12, 23})
 
 
 class BiasEngineError(ValueError):
@@ -60,6 +61,12 @@ class BiasState:
     impulse_direction: str | None = None
     impulse_return_bps: Decimal | None = None
     impulse_detected: bool = False
+    classification_reason: str | None = None
+    confidence_reason: str | None = None
+    trend_confirmation_met: bool | None = None
+    utc_hour: int | None = None
+    poor_utc_hour: bool = False
+    confidence_before_time_adjustment: int | None = None
 
 
 @dataclass(frozen=True)
@@ -177,6 +184,13 @@ class BiasEngine:
                 risk_flags=risk_flags,
                 impulse_diagnostics=impulse_diagnostics,
             )
+            confidence_before_time_adjustment = classification.confidence
+            utc_hour = as_of.hour if as_of is not None else None
+            poor_utc_hour = utc_hour in POOR_UTC_HOURS if utc_hour is not None else False
+            classification = _apply_time_of_day_confidence_adjustment(
+                classification=classification,
+                poor_utc_hour=poor_utc_hour,
+            )
 
             products[product_id] = BiasState(
                 product_id=product_id,
@@ -192,6 +206,12 @@ class BiasEngine:
                 impulse_direction=impulse_diagnostics.direction,
                 impulse_return_bps=impulse_diagnostics.return_bps,
                 impulse_detected=impulse_diagnostics.detected,
+                classification_reason=classification.classification_reason,
+                confidence_reason=classification.confidence_reason,
+                trend_confirmation_met=classification.trend_confirmation_met,
+                utc_hour=utc_hour,
+                poor_utc_hour=poor_utc_hour,
+                confidence_before_time_adjustment=confidence_before_time_adjustment,
             )
 
         self._latest_snapshot = BiasSnapshot(products=products)
@@ -251,6 +271,30 @@ def _apply_impulse_bias_override(
             direction=impulse_diagnostics.direction,
             structure="trend",
             confidence=40,
+            classification_reason="impulse_override_from_chop",
+            confidence_reason="impulse_override_fixed_confidence",
+            trend_confirmation_met=False,
+        )
+    return classification
+
+
+def _apply_time_of_day_confidence_adjustment(
+    *,
+    classification: BiasClassification,
+    poor_utc_hour: bool,
+) -> BiasClassification:
+    if (
+        poor_utc_hour
+        and classification.structure == "trend"
+        and classification.confidence > 30
+    ):
+        return BiasClassification(
+            direction=classification.direction,
+            structure=classification.structure,
+            confidence=30,
+            classification_reason=classification.classification_reason,
+            confidence_reason=f"poor_utc_hour_cap:{classification.confidence_reason}",
+            trend_confirmation_met=classification.trend_confirmation_met,
         )
     return classification
 

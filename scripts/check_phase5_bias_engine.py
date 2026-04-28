@@ -69,7 +69,8 @@ def main() -> int:
 
 
 def run_offline_fixtures(settings) -> list[str]:
-    now = datetime.now(timezone.utc)
+    current_now = datetime.now(timezone.utc)
+    now = _non_poor_time(current_now)
     failures: list[str] = []
 
     failures.extend(
@@ -148,7 +149,7 @@ def run_offline_fixtures(settings) -> list[str]:
             settings,
             case_name="stale_data",
             observations=_series(
-                now - timedelta(seconds=settings.bias_stale_data_seconds + 60),
+                current_now - timedelta(seconds=settings.bias_stale_data_seconds + 60),
                 count=25,
                 step_seconds=5,
                 prices=_linear_prices("100", "124"),
@@ -184,6 +185,14 @@ def run_offline_fixtures(settings) -> list[str]:
     failures.extend(_run_stale_impulse_no_override_case(settings, now))
     failures.extend(_run_insufficient_history_impulse_no_override_case(settings, now))
     failures.extend(_run_exhaustion_impulse_no_override_case(settings, now))
+    failures.extend(_run_weak_matching_sign_chop_case(settings, now))
+    failures.extend(_run_unconfirmed_recent_exhaustion_case(settings, now))
+    failures.extend(_run_confirmed_trend_confidence_case(settings, now, "moderate", "100.20", 40))
+    failures.extend(_run_confirmed_trend_confidence_case(settings, now, "strong", "100.35", 60))
+    failures.extend(_run_confirmed_trend_confidence_case(settings, now, "very_strong", "100.60", 80))
+    failures.extend(_run_reversal_unchanged_case(settings, now))
+    failures.extend(_run_poor_utc_hour_caps_trend_confidence_case(settings, now))
+    failures.extend(_run_non_poor_utc_hour_keeps_trend_confidence_case(settings, now))
     return failures
 
 
@@ -237,6 +246,16 @@ def _run_case(
         failures.append(f"{case_name}: time_sync_failed flag was not set")
     if state.confidence == 0 and state.direction != "neutral":
         failures.append(f"{case_name}: zero confidence must force neutral direction")
+    if state.classification_reason is None:
+        failures.append(f"{case_name}: classification_reason missing")
+    if state.confidence_reason is None:
+        failures.append(f"{case_name}: confidence_reason missing")
+    if state.trend_confirmation_met is None:
+        failures.append(f"{case_name}: trend_confirmation_met missing")
+    if state.utc_hour is None:
+        failures.append(f"{case_name}: utc_hour missing")
+    if state.confidence_before_time_adjustment is None:
+        failures.append(f"{case_name}: confidence_before_time_adjustment missing")
     return failures
 
 
@@ -445,6 +464,208 @@ def _run_exhaustion_impulse_no_override_case(settings, now: datetime) -> list[st
     return failures
 
 
+def _run_weak_matching_sign_chop_case(settings, now: datetime) -> list[str]:
+    engine = BiasEngine.from_settings(settings)
+    product_id = settings.bias_products[0]
+    prices = (
+        (Decimal("100"),) * 12
+        + (Decimal("99.90"),)
+        + _linear_prices("99.90", "100.10", count=12, include_start=False)
+    )
+    snapshot = _ingest_series(
+        engine=engine,
+        product_id=product_id,
+        observations=_series(now, count=25, step_seconds=5, prices=prices),
+    )
+    state = snapshot.products[product_id]
+    failures: list[str] = []
+    if state.direction != "neutral" or state.structure != "chop":
+        failures.append(
+            "weak matching sign: classification="
+            f"{state.direction}/{state.structure} expected neutral/chop"
+        )
+    if state.trend_confirmation_met is not False:
+        failures.append(
+            "weak matching sign: trend_confirmation_met="
+            f"{state.trend_confirmation_met} expected False"
+        )
+    if state.classification_reason != "recent_directional_lookback_unconfirmed":
+        failures.append(
+            "weak matching sign: reason="
+            f"{state.classification_reason}"
+        )
+    return failures
+
+
+def _run_unconfirmed_recent_exhaustion_case(settings, now: datetime) -> list[str]:
+    engine = BiasEngine.from_settings(settings)
+    product_id = settings.bias_products[0]
+    prices = (
+        _linear_prices("100", "100.20", count=13)
+        + _linear_prices("100.20", "100.30", count=12, include_start=False)
+    )
+    snapshot = _ingest_series(
+        engine=engine,
+        product_id=product_id,
+        observations=_series(now, count=25, step_seconds=5, prices=prices),
+    )
+    state = snapshot.products[product_id]
+    failures: list[str] = []
+    if state.direction != "neutral" or state.structure != "exhaustion":
+        failures.append(
+            "unconfirmed recent: classification="
+            f"{state.direction}/{state.structure} expected neutral/exhaustion"
+        )
+    if state.confidence != 30:
+        failures.append(f"unconfirmed recent: confidence={state.confidence} expected=30")
+    if state.classification_reason != "lookback_directional_recent_unconfirmed":
+        failures.append(
+            "unconfirmed recent: reason="
+            f"{state.classification_reason}"
+        )
+    return failures
+
+
+def _run_confirmed_trend_confidence_case(
+    settings,
+    now: datetime,
+    label: str,
+    end_price: str,
+    expected_confidence: int,
+) -> list[str]:
+    engine = BiasEngine.from_settings(settings)
+    product_id = settings.bias_products[0]
+    snapshot = _ingest_series(
+        engine=engine,
+        product_id=product_id,
+        observations=_series(
+            now,
+            count=25,
+            step_seconds=5,
+            prices=_trend_confirmation_prices(end_price),
+        ),
+    )
+    state = snapshot.products[product_id]
+    failures: list[str] = []
+    if state.direction != "up" or state.structure != "trend":
+        failures.append(
+            f"{label} trend: classification="
+            f"{state.direction}/{state.structure} expected up/trend"
+        )
+    if state.confidence != expected_confidence:
+        failures.append(
+            f"{label} trend: confidence={state.confidence} "
+            f"expected={expected_confidence}"
+        )
+    if state.trend_confirmation_met is not True:
+        failures.append(
+            f"{label} trend: trend_confirmation_met="
+            f"{state.trend_confirmation_met} expected True"
+        )
+    return failures
+
+
+def _run_reversal_unchanged_case(settings, now: datetime) -> list[str]:
+    engine = BiasEngine.from_settings(settings)
+    product_id = settings.bias_products[0]
+    snapshot = _ingest_series(
+        engine=engine,
+        product_id=product_id,
+        observations=_series(
+            now,
+            count=25,
+            step_seconds=5,
+            prices=(
+                _linear_prices("100", "80", count=13)
+                + _linear_prices("80", "90", count=12, include_start=False)
+            ),
+        ),
+    )
+    state = snapshot.products[product_id]
+    failures: list[str] = []
+    if state.direction != "up" or state.structure != "reversal":
+        failures.append(
+            "reversal unchanged: classification="
+            f"{state.direction}/{state.structure} expected up/reversal"
+        )
+    if state.confidence != 80:
+        failures.append(f"reversal unchanged: confidence={state.confidence} expected=80")
+    if state.confidence_reason != "reversal_both_returns_at_3x_chop":
+        failures.append(
+            "reversal unchanged: confidence_reason="
+            f"{state.confidence_reason}"
+        )
+    return failures
+
+
+def _run_poor_utc_hour_caps_trend_confidence_case(
+    settings,
+    now: datetime,  # noqa: ARG001
+) -> list[str]:
+    engine = BiasEngine.from_settings(settings)
+    product_id = settings.bias_products[0]
+    poor_hour = _next_utc_hour_time(datetime.now(timezone.utc), 9)
+    snapshot = _ingest_series(
+        engine=engine,
+        product_id=product_id,
+        observations=_series(
+            poor_hour,
+            count=25,
+            step_seconds=5,
+            prices=_trend_confirmation_prices("100.60"),
+        ),
+    )
+    state = snapshot.products[product_id]
+    failures: list[str] = []
+    if not state.poor_utc_hour or state.utc_hour != 9:
+        failures.append(f"poor hour: utc={state.utc_hour} poor={state.poor_utc_hour}")
+    if state.confidence_before_time_adjustment != 80:
+        failures.append(
+            "poor hour: before="
+            f"{state.confidence_before_time_adjustment} expected=80"
+        )
+    if state.confidence != 30:
+        failures.append(f"poor hour: confidence={state.confidence} expected=30")
+    if state.direction != "up" or state.structure != "trend":
+        failures.append(
+            "poor hour: classification="
+            f"{state.direction}/{state.structure} expected up/trend"
+        )
+    return failures
+
+
+def _run_non_poor_utc_hour_keeps_trend_confidence_case(
+    settings,
+    now: datetime,  # noqa: ARG001
+) -> list[str]:
+    engine = BiasEngine.from_settings(settings)
+    product_id = settings.bias_products[0]
+    non_poor_hour = _next_utc_hour_time(datetime.now(timezone.utc), 15)
+    snapshot = _ingest_series(
+        engine=engine,
+        product_id=product_id,
+        observations=_series(
+            non_poor_hour,
+            count=25,
+            step_seconds=5,
+            prices=_trend_confirmation_prices("100.60"),
+        ),
+    )
+    state = snapshot.products[product_id]
+    failures: list[str] = []
+    if state.poor_utc_hour or state.utc_hour != 15:
+        failures.append(
+            f"non-poor hour: utc={state.utc_hour} poor={state.poor_utc_hour}"
+        )
+    if state.confidence_before_time_adjustment != 80 or state.confidence != 80:
+        failures.append(
+            "non-poor hour: confidence="
+            f"{state.confidence}/{state.confidence_before_time_adjustment} "
+            "expected 80/80"
+        )
+    return failures
+
+
 async def run_live_smoke(settings, message_limit: int | None) -> int:
     try:
         from kalshi_bot.clients.crypto_feed_client import CryptoFeedClient, CryptoFeedClientError
@@ -515,6 +736,32 @@ def _ingest_series(
 def _neutral_chop_impulse_prices(*, direction: str) -> tuple[Decimal, ...]:
     impulse_anchor = Decimal("98") if direction == "up" else Decimal("102")
     return (Decimal("100"),) * 20 + (impulse_anchor,) + (Decimal("100"),) * 4
+
+
+def _trend_confirmation_prices(end_price: str) -> tuple[Decimal, ...]:
+    return (Decimal("100"),) * 13 + _linear_prices(
+        "100",
+        end_price,
+        count=12,
+        include_start=False,
+    )
+
+
+def _non_poor_time(value: datetime) -> datetime:
+    if value.hour not in {9, 10, 11, 12, 23}:
+        return value
+    for offset in range(1, 24):
+        candidate = value + timedelta(hours=offset)
+        if candidate.hour not in {9, 10, 11, 12, 23}:
+            return candidate
+    return value
+
+
+def _next_utc_hour_time(value: datetime, hour: int) -> datetime:
+    candidate = value.replace(hour=hour, minute=0, second=0, microsecond=0)
+    if candidate <= value:
+        candidate += timedelta(days=1)
+    return candidate
 
 
 def _linear_prices(

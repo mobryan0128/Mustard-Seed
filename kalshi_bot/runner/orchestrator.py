@@ -65,6 +65,12 @@ class BiasDiagnostic:
     impulse_direction: str | None
     impulse_return_bps: Decimal | None
     impulse_detected: bool
+    classification_reason: str | None
+    confidence_reason: str | None
+    trend_confirmation_met: bool | None
+    utc_hour: int | None
+    poor_utc_hour: bool
+    confidence_before_time_adjustment: int | None
 
 
 @dataclass(frozen=True)
@@ -955,6 +961,24 @@ def _bias_diagnostics(
                 impulse_detected=(
                     state.impulse_detected if state is not None else False
                 ),
+                classification_reason=(
+                    state.classification_reason if state is not None else None
+                ),
+                confidence_reason=(
+                    state.confidence_reason if state is not None else None
+                ),
+                trend_confirmation_met=(
+                    state.trend_confirmation_met if state is not None else None
+                ),
+                utc_hour=state.utc_hour if state is not None else None,
+                poor_utc_hour=(
+                    state.poor_utc_hour if state is not None else False
+                ),
+                confidence_before_time_adjustment=(
+                    state.confidence_before_time_adjustment
+                    if state is not None
+                    else None
+                ),
             )
         )
     return tuple(diagnostics)
@@ -1015,6 +1039,14 @@ def _bias_diagnostic_payloads(
             "impulse_direction": item.impulse_direction,
             "impulse_return_bps": item.impulse_return_bps,
             "impulse_detected": item.impulse_detected,
+            "classification_reason": item.classification_reason,
+            "confidence_reason": item.confidence_reason,
+            "trend_confirmation_met": item.trend_confirmation_met,
+            "utc_hour": item.utc_hour,
+            "poor_utc_hour": item.poor_utc_hour,
+            "confidence_before_time_adjustment": (
+                item.confidence_before_time_adjustment
+            ),
         }
         for item in diagnostics
     )
