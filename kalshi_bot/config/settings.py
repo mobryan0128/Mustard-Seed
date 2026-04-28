@@ -63,6 +63,10 @@ DEFAULT_LIVE_MAX_OPEN_POSITIONS = 1
 DEFAULT_LIVE_MIN_ENTRY_PRICE_DOLLARS = Decimal("0")
 DEFAULT_LIVE_MAX_ENTRY_PRICE_DOLLARS = Decimal("0.800")
 DEFAULT_LIVE_MAX_EXECUTION_SPREAD_DOLLARS = Decimal("0.100")
+DEFAULT_LIVE_REQUIRE_MOMENTUM_ALIGNMENT = False
+DEFAULT_LIVE_REQUIRE_TREND_MOMENTUM_CONFIRMATION = False
+DEFAULT_LIVE_REQUIRE_REVERSAL_RANGE_POSITION = False
+DEFAULT_LIVE_MIN_REVERSAL_RANGE_POSITION = Decimal("0.50")
 DEFAULT_RUNNER_ENABLED = True
 DEFAULT_RUNNER_LOOP_INTERVAL_SECONDS = 5.0
 DEFAULT_RUNNER_STATUS_LOG_EVERY_N_CYCLES = 1
@@ -155,6 +159,10 @@ class KalshiSettings:
     live_min_entry_price_dollars: Decimal
     live_max_entry_price_dollars: Decimal
     live_max_execution_spread_dollars: Decimal
+    live_require_momentum_alignment: bool
+    live_require_trend_momentum_confirmation: bool
+    live_require_reversal_range_position: bool
+    live_min_reversal_range_position: Decimal
     runner_enabled: bool
     runner_loop_interval_seconds: float
     runner_status_log_every_n_cycles: int
@@ -406,6 +414,26 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         values.get("LIVE_MAX_EXECUTION_SPREAD_DOLLARS"),
         "LIVE_MAX_EXECUTION_SPREAD_DOLLARS",
     ) or DEFAULT_LIVE_MAX_EXECUTION_SPREAD_DOLLARS
+    live_require_momentum_alignment = _parse_bool(
+        values.get("LIVE_REQUIRE_MOMENTUM_ALIGNMENT"),
+        DEFAULT_LIVE_REQUIRE_MOMENTUM_ALIGNMENT,
+        "LIVE_REQUIRE_MOMENTUM_ALIGNMENT",
+    )
+    live_require_trend_momentum_confirmation = _parse_bool(
+        values.get("LIVE_REQUIRE_TREND_MOMENTUM_CONFIRMATION"),
+        DEFAULT_LIVE_REQUIRE_TREND_MOMENTUM_CONFIRMATION,
+        "LIVE_REQUIRE_TREND_MOMENTUM_CONFIRMATION",
+    )
+    live_require_reversal_range_position = _parse_bool(
+        values.get("LIVE_REQUIRE_REVERSAL_RANGE_POSITION"),
+        DEFAULT_LIVE_REQUIRE_REVERSAL_RANGE_POSITION,
+        "LIVE_REQUIRE_REVERSAL_RANGE_POSITION",
+    )
+    live_min_reversal_range_position = _parse_unit_interval_decimal(
+        values.get("LIVE_MIN_REVERSAL_RANGE_POSITION"),
+        DEFAULT_LIVE_MIN_REVERSAL_RANGE_POSITION,
+        "LIVE_MIN_REVERSAL_RANGE_POSITION",
+    )
     runner_enabled = _parse_bool(
         values.get("RUNNER_ENABLED"),
         DEFAULT_RUNNER_ENABLED,
@@ -598,6 +626,12 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_min_entry_price_dollars=live_min_entry_price_dollars,
         live_max_entry_price_dollars=live_max_entry_price_dollars,
         live_max_execution_spread_dollars=live_max_execution_spread_dollars,
+        live_require_momentum_alignment=live_require_momentum_alignment,
+        live_require_trend_momentum_confirmation=(
+            live_require_trend_momentum_confirmation
+        ),
+        live_require_reversal_range_position=live_require_reversal_range_position,
+        live_min_reversal_range_position=live_min_reversal_range_position,
         runner_enabled=runner_enabled,
         runner_loop_interval_seconds=runner_loop_interval_seconds,
         runner_status_log_every_n_cycles=runner_status_log_every_n_cycles,
@@ -716,6 +750,10 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_MIN_ENTRY_PRICE_DOLLARS",
         "LIVE_MAX_ENTRY_PRICE_DOLLARS",
         "LIVE_MAX_EXECUTION_SPREAD_DOLLARS",
+        "LIVE_REQUIRE_MOMENTUM_ALIGNMENT",
+        "LIVE_REQUIRE_TREND_MOMENTUM_CONFIRMATION",
+        "LIVE_REQUIRE_REVERSAL_RANGE_POSITION",
+        "LIVE_MIN_REVERSAL_RANGE_POSITION",
         "RUNNER_ENABLED",
         "RUNNER_LOOP_INTERVAL_SECONDS",
         "RUNNER_STATUS_LOG_EVERY_N_CYCLES",
@@ -844,6 +882,24 @@ def _parse_non_negative_price_dollars(
         raise SettingsError(f"{key} must be a valid decimal string.") from exc
     if parsed < Decimal("0") or parsed > Decimal("0.99"):
         raise SettingsError(f"{key} must be between 0 and 0.99 inclusive.")
+    if parsed.as_tuple().exponent < -4:
+        raise SettingsError(f"{key} must have at most four decimal places.")
+    return parsed
+
+
+def _parse_unit_interval_decimal(
+    value: str | None,
+    default: Decimal,
+    key: str,
+) -> Decimal:
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = Decimal(value.strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise SettingsError(f"{key} must be a valid decimal string.") from exc
+    if parsed < Decimal("0") or parsed > Decimal("1"):
+        raise SettingsError(f"{key} must be between 0 and 1 inclusive.")
     if parsed.as_tuple().exponent < -4:
         raise SettingsError(f"{key} must have at most four decimal places.")
     return parsed

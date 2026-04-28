@@ -84,6 +84,17 @@ def _validate_settings_defaults() -> list[str]:
             "default live_max_execution_spread_dollars="
             f"{settings.live_max_execution_spread_dollars}"
         )
+    if settings.live_require_momentum_alignment:
+        failures.append("default live_require_momentum_alignment=True")
+    if settings.live_require_trend_momentum_confirmation:
+        failures.append("default live_require_trend_momentum_confirmation=True")
+    if settings.live_require_reversal_range_position:
+        failures.append("default live_require_reversal_range_position=True")
+    if settings.live_min_reversal_range_position != Decimal("0.50"):
+        failures.append(
+            "default live_min_reversal_range_position="
+            f"{settings.live_min_reversal_range_position}"
+        )
     return failures
 
 
@@ -96,7 +107,11 @@ def _validate_settings_overrides() -> list[str]:
             + "LIVE_MAX_OPEN_POSITIONS=2\n"
             + "LIVE_MIN_ENTRY_PRICE_DOLLARS=0.25\n"
             + "LIVE_MAX_ENTRY_PRICE_DOLLARS=0.850\n"
-            + "LIVE_MAX_EXECUTION_SPREAD_DOLLARS=0.150\n",
+            + "LIVE_MAX_EXECUTION_SPREAD_DOLLARS=0.150\n"
+            + "LIVE_REQUIRE_MOMENTUM_ALIGNMENT=true\n"
+            + "LIVE_REQUIRE_TREND_MOMENTUM_CONFIRMATION=true\n"
+            + "LIVE_REQUIRE_REVERSAL_RANGE_POSITION=true\n"
+            + "LIVE_MIN_REVERSAL_RANGE_POSITION=0.60\n",
             encoding="utf-8",
         )
         settings = load_settings(env_path)
@@ -121,6 +136,17 @@ def _validate_settings_overrides() -> list[str]:
         failures.append(
             "override live_max_execution_spread_dollars="
             f"{settings.live_max_execution_spread_dollars}"
+        )
+    if not settings.live_require_momentum_alignment:
+        failures.append("override live_require_momentum_alignment=False")
+    if not settings.live_require_trend_momentum_confirmation:
+        failures.append("override live_require_trend_momentum_confirmation=False")
+    if not settings.live_require_reversal_range_position:
+        failures.append("override live_require_reversal_range_position=False")
+    if settings.live_min_reversal_range_position != Decimal("0.60"):
+        failures.append(
+            "override live_min_reversal_range_position="
+            f"{settings.live_min_reversal_range_position}"
         )
     return failures
 

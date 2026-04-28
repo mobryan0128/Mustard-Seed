@@ -267,6 +267,18 @@ class LiveExecutionCoordinator:
                     "max_execution_spread_dollars": max_execution_spread_dollars,
                 },
             )
+            signal_skip_reason, signal_details = _evaluate_signal_gates(
+                contract,
+                settings=self._settings,
+            )
+            if signal_skip_reason is not None:
+                self._log_contract_intent_skipped(
+                    reason=signal_skip_reason,
+                    contract=contract,
+                    cycle_number=cycle_number,
+                    details=signal_details,
+                )
+                continue
 
             risk_decision = entry_risk_manager.evaluate_entry_risk(
                 product_id=contract.product_id,
@@ -365,6 +377,8 @@ class LiveExecutionCoordinator:
                     "direction": intent.direction,
                     "confidence": intent.confidence,
                     "risk_approval_source": intent.risk_approval_source,
+                    "structure_gate_candidate_passed": True,
+                    **_signal_diagnostics_payload(contract),
                 },
             )
         return tuple(intents)
@@ -664,6 +678,7 @@ class LiveExecutionCoordinator:
             "structure": contract.structure,
             "confidence": contract.confidence,
             "entry_price": contract.midpoint,
+            **_signal_diagnostics_payload(contract),
         }
         if details:
             payload.update(details)
@@ -1013,6 +1028,85 @@ def _executable_price_details(
         "min_entry_price": min_entry_price,
         "max_entry_price": max_entry_price,
         "max_execution_spread_dollars": max_execution_spread_dollars,
+    }
+
+
+def _evaluate_signal_gates(
+    contract: ScannedContract,
+    *,
+    settings: KalshiSettings,
+) -> tuple[str | None, dict[str, object]]:
+    details = {
+        **_signal_diagnostics_payload(contract),
+        "structure_gate_candidate_passed": False,
+    }
+    if getattr(settings, "live_require_momentum_alignment", False):
+        aligned = _contract_recent_momentum_aligned(contract)
+        details["momentum_aligned_with_direction"] = aligned
+        if aligned is None:
+            return "signal_gate_data_unavailable", details
+        if not aligned:
+            return "signal_momentum_not_aligned", details
+
+    if (
+        getattr(settings, "live_require_trend_momentum_confirmation", False)
+        and contract.structure == "trend"
+    ):
+        confirmed = getattr(contract, "trend_momentum_confirmed", None)
+        if confirmed is None:
+            return "signal_gate_data_unavailable", details
+        if not confirmed:
+            return "trend_momentum_unconfirmed", details
+
+    if (
+        getattr(settings, "live_require_reversal_range_position", False)
+        and contract.structure in {"reversal", "exhaustion"}
+    ):
+        range_position = getattr(contract, "range_position_15m", None)
+        min_range_position = getattr(
+            settings,
+            "live_min_reversal_range_position",
+            Decimal("0.50"),
+        )
+        details["min_reversal_range_position"] = min_range_position
+        if range_position is None:
+            return "signal_gate_data_unavailable", details
+        if Decimal(str(range_position)) < min_range_position:
+            return "reversal_range_position_below_minimum", details
+
+    return None, {**_signal_diagnostics_payload(contract)}
+
+
+def _contract_recent_momentum_aligned(contract: ScannedContract) -> bool | None:
+    recent_return_bps = getattr(contract, "recent_return_bps", None)
+    if recent_return_bps is None:
+        return None
+    recent_return = Decimal(str(recent_return_bps))
+    if contract.direction == "up":
+        return recent_return > 0
+    if contract.direction == "down":
+        return recent_return < 0
+    return None
+
+
+def _signal_diagnostics_payload(contract: ScannedContract) -> dict[str, object]:
+    return {
+        "lookback_return_bps": getattr(contract, "lookback_return_bps", None),
+        "recent_return_bps": getattr(contract, "recent_return_bps", None),
+        "momentum_aligned_with_direction": getattr(
+            contract,
+            "momentum_aligned_with_direction",
+            None,
+        ),
+        "trend_momentum_confirmed": getattr(
+            contract,
+            "trend_momentum_confirmed",
+            None,
+        ),
+        "range_position_15m": getattr(contract, "range_position_15m", None),
+        "classification_reason": getattr(contract, "classification_reason", None),
+        "confidence_reason": getattr(contract, "confidence_reason", None),
+        "utc_hour": getattr(contract, "utc_hour", None),
     }
 
 

@@ -20,6 +20,8 @@ BASIS_POINTS_MULTIPLIER = Decimal("10000")
 IMPULSE_SHORT_WINDOW = timedelta(seconds=20)
 IMPULSE_AVERAGE_WINDOW = timedelta(seconds=120)
 IMPULSE_MULTIPLIER = Decimal("2")
+RANGE_POSITION_WINDOW = timedelta(minutes=15)
+TREND_MOMENTUM_CONFIRMATION_MULTIPLIER = Decimal("1.5")
 POOR_UTC_HOURS = frozenset({9, 10, 11, 12, 23})
 
 
@@ -64,6 +66,9 @@ class BiasState:
     classification_reason: str | None = None
     confidence_reason: str | None = None
     trend_confirmation_met: bool | None = None
+    momentum_aligned_with_direction: bool | None = None
+    trend_momentum_confirmed: bool | None = None
+    range_position_15m: Decimal | None = None
     utc_hour: int | None = None
     poor_utc_hour: bool = False
     confidence_before_time_adjustment: int | None = None
@@ -154,6 +159,7 @@ class BiasEngine:
             recent_anchor = _recent_anchor(history, self._recent_window)
             recent_return_bps = _compute_return_bps(history, recent_anchor)
             impulse_diagnostics = _impulse_diagnostics(history)
+            range_position_15m = _range_position(history, RANGE_POSITION_WINDOW)
 
             risk_flags = BiasRiskFlags(
                 insufficient_history=(
@@ -191,6 +197,15 @@ class BiasEngine:
                 classification=classification,
                 poor_utc_hour=poor_utc_hour,
             )
+            momentum_aligned_with_direction = _momentum_aligned_with_direction(
+                direction=classification.direction,
+                recent_return_bps=recent_return_bps,
+            )
+            trend_momentum_confirmed = _trend_momentum_confirmed(
+                direction=classification.direction,
+                recent_return_bps=recent_return_bps,
+                chop_threshold_bps=self._chop_threshold_bps,
+            )
 
             products[product_id] = BiasState(
                 product_id=product_id,
@@ -209,6 +224,9 @@ class BiasEngine:
                 classification_reason=classification.classification_reason,
                 confidence_reason=classification.confidence_reason,
                 trend_confirmation_met=classification.trend_confirmation_met,
+                momentum_aligned_with_direction=momentum_aligned_with_direction,
+                trend_momentum_confirmed=trend_momentum_confirmed,
+                range_position_15m=range_position_15m,
                 utc_hour=utc_hour,
                 poor_utc_hour=poor_utc_hour,
                 confidence_before_time_adjustment=confidence_before_time_adjustment,
@@ -390,6 +408,59 @@ def _average_absolute_movement_bps(
     if not movements:
         return None
     return (sum(movements) / Decimal(len(movements))).quantize(Decimal("0.001"))
+
+
+def _range_position(
+    history: Deque[PriceObservation],
+    window: timedelta,
+) -> Decimal | None:
+    if len(history) < 2:
+        return None
+    latest = history[-1]
+    cutoff = latest.observed_at - window
+    window_observations = tuple(
+        observation for observation in history if observation.observed_at >= cutoff
+    )
+    if len(window_observations) < 2:
+        return None
+    prices = tuple(observation.price for observation in window_observations)
+    low_price = min(prices)
+    high_price = max(prices)
+    if high_price <= low_price:
+        return None
+    return ((latest.price - low_price) / (high_price - low_price)).quantize(
+        Decimal("0.001")
+    )
+
+
+def _momentum_aligned_with_direction(
+    *,
+    direction: str,
+    recent_return_bps: Decimal | None,
+) -> bool | None:
+    if direction not in {"up", "down"} or recent_return_bps is None:
+        return None
+    if direction == "up":
+        return recent_return_bps > 0
+    return recent_return_bps < 0
+
+
+def _trend_momentum_confirmed(
+    *,
+    direction: str,
+    recent_return_bps: Decimal | None,
+    chop_threshold_bps: Decimal,
+) -> bool | None:
+    aligned = _momentum_aligned_with_direction(
+        direction=direction,
+        recent_return_bps=recent_return_bps,
+    )
+    if aligned is None:
+        return None
+    confirmation_threshold = (
+        chop_threshold_bps * TREND_MOMENTUM_CONFIRMATION_MULTIPLIER
+    )
+    return aligned and abs(recent_return_bps) >= confirmation_threshold
 
 
 def _anchor_for_observation(

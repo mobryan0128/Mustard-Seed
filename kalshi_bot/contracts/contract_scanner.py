@@ -36,6 +36,14 @@ class ScannedContract:
     bias_as_of: str | None
     market_as_of: str | None
     score: ContractScore
+    lookback_return_bps: Decimal | None = None
+    recent_return_bps: Decimal | None = None
+    momentum_aligned_with_direction: bool | None = None
+    trend_momentum_confirmed: bool | None = None
+    range_position_15m: Decimal | None = None
+    classification_reason: str | None = None
+    confidence_reason: str | None = None
+    utc_hour: int | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +139,34 @@ class ContractScanner:
                         bias_as_of=bias_state.as_of,
                         market_as_of=_market_as_of(ticker_state),
                         score=score,
+                        lookback_return_bps=bias_state.lookback_return_bps,
+                        recent_return_bps=bias_state.recent_return_bps,
+                        momentum_aligned_with_direction=getattr(
+                            bias_state,
+                            "momentum_aligned_with_direction",
+                            None,
+                        ),
+                        trend_momentum_confirmed=getattr(
+                            bias_state,
+                            "trend_momentum_confirmed",
+                            None,
+                        ),
+                        range_position_15m=getattr(
+                            bias_state,
+                            "range_position_15m",
+                            None,
+                        ),
+                        classification_reason=getattr(
+                            bias_state,
+                            "classification_reason",
+                            None,
+                        ),
+                        confidence_reason=getattr(
+                            bias_state,
+                            "confidence_reason",
+                            None,
+                        ),
+                        utc_hour=getattr(bias_state, "utc_hour", None),
                     )
                 )
 

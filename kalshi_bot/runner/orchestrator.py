@@ -62,12 +62,17 @@ class BiasDiagnostic:
     confidence: int | None
     structure: str | None
     risk_flags: tuple[tuple[str, bool], ...]
+    lookback_return_bps: Decimal | None
+    recent_return_bps: Decimal | None
     impulse_direction: str | None
     impulse_return_bps: Decimal | None
     impulse_detected: bool
     classification_reason: str | None
     confidence_reason: str | None
     trend_confirmation_met: bool | None
+    momentum_aligned_with_direction: bool | None
+    trend_momentum_confirmed: bool | None
+    range_position_15m: Decimal | None
     utc_hour: int | None
     poor_utc_hour: bool
     confidence_before_time_adjustment: int | None
@@ -952,6 +957,12 @@ def _bias_diagnostics(
                 confidence=state.confidence if state is not None else None,
                 structure=state.structure if state is not None else None,
                 risk_flags=_risk_flags(state.risk_flags) if state is not None else (),
+                lookback_return_bps=(
+                    state.lookback_return_bps if state is not None else None
+                ),
+                recent_return_bps=(
+                    state.recent_return_bps if state is not None else None
+                ),
                 impulse_direction=(
                     state.impulse_direction if state is not None else None
                 ),
@@ -969,6 +980,17 @@ def _bias_diagnostics(
                 ),
                 trend_confirmation_met=(
                     state.trend_confirmation_met if state is not None else None
+                ),
+                momentum_aligned_with_direction=(
+                    state.momentum_aligned_with_direction
+                    if state is not None
+                    else None
+                ),
+                trend_momentum_confirmed=(
+                    state.trend_momentum_confirmed if state is not None else None
+                ),
+                range_position_15m=(
+                    state.range_position_15m if state is not None else None
                 ),
                 utc_hour=state.utc_hour if state is not None else None,
                 poor_utc_hour=(
@@ -1036,12 +1058,19 @@ def _bias_diagnostic_payloads(
             "confidence": item.confidence,
             "structure": item.structure,
             "risk_flags": dict(item.risk_flags),
+            "lookback_return_bps": item.lookback_return_bps,
+            "recent_return_bps": item.recent_return_bps,
             "impulse_direction": item.impulse_direction,
             "impulse_return_bps": item.impulse_return_bps,
             "impulse_detected": item.impulse_detected,
             "classification_reason": item.classification_reason,
             "confidence_reason": item.confidence_reason,
             "trend_confirmation_met": item.trend_confirmation_met,
+            "momentum_aligned_with_direction": (
+                item.momentum_aligned_with_direction
+            ),
+            "trend_momentum_confirmed": item.trend_momentum_confirmed,
+            "range_position_15m": item.range_position_15m,
             "utc_hour": item.utc_hour,
             "poor_utc_hour": item.poor_utc_hour,
             "confidence_before_time_adjustment": (

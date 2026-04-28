@@ -55,6 +55,14 @@ def main() -> int:
     failures.extend(_validate_direct_contract_scan_count_below_one_skip())
     failures.extend(_validate_direct_contract_scan_balance_fetch_failure_skips())
     failures.extend(_validate_direct_contract_scan_missing_client_skips())
+    failures.extend(_validate_default_signal_gates_disabled())
+    failures.extend(_validate_momentum_gate_skips_opposite_momentum())
+    failures.extend(_validate_momentum_gate_allows_aligned_momentum())
+    failures.extend(_validate_trend_gate_skips_unconfirmed_momentum())
+    failures.extend(_validate_trend_gate_allows_confirmed_momentum())
+    failures.extend(_validate_reversal_range_gate_skips_below_minimum())
+    failures.extend(_validate_reversal_range_gate_allows_at_minimum())
+    failures.extend(_validate_signal_gate_missing_data_skips_when_enabled())
 
     if failures:
         for failure in failures:
@@ -204,6 +212,11 @@ def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
             failures.append("direct live_intent_created log missing")
         elif payload.get("ticker") != "KXBTC15M-DIRECT":
             failures.append(f"direct log ticker={payload.get('ticker')}")
+        elif payload.get("structure_gate_candidate_passed") is not True:
+            failures.append(
+                "direct structure_gate_candidate_passed="
+                f"{payload.get('structure_gate_candidate_passed')}"
+            )
         stake_payload = _first_event_payload(
             _jsonl_records(temp_path / "runtime.jsonl"),
             event_type="live_stake_computed",
@@ -641,6 +654,207 @@ def _validate_direct_contract_scan_missing_client_skips() -> list[str]:
         return []
 
 
+def _validate_default_signal_gates_disabled() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        coordinator = _coordinator(Path(temp_dir), balance_payload={"balance": 25000})
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    recent_return_bps=Decimal("-12"),
+                    momentum_aligned_with_direction=False,
+                    trend_momentum_confirmed=False,
+                )
+            ),
+            cycle_number=58,
+        )
+        if len(intents) != 1:
+            return [f"default signal gate intent count={len(intents)} expected=1"]
+    return []
+
+
+def _validate_momentum_gate_skips_opposite_momentum() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            balance_payload={"balance": 25000},
+            live_require_momentum_alignment=True,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    recent_return_bps=Decimal("-12"),
+                    momentum_aligned_with_direction=False,
+                )
+            ),
+            cycle_number=59,
+        )
+        if intents:
+            return [f"opposite momentum intents={intents} expected empty"]
+        return _assert_skip_payload(
+            temp_path,
+            {
+                "reason": "signal_momentum_not_aligned",
+                "recent_return_bps": "-12",
+                "momentum_aligned_with_direction": False,
+                "structure_gate_candidate_passed": False,
+            },
+        )
+
+
+def _validate_momentum_gate_allows_aligned_momentum() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        coordinator = _coordinator(
+            Path(temp_dir),
+            balance_payload={"balance": 25000},
+            live_require_momentum_alignment=True,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    recent_return_bps=Decimal("12"),
+                    momentum_aligned_with_direction=True,
+                )
+            ),
+            cycle_number=60,
+        )
+        if len(intents) != 1:
+            return [f"aligned momentum intent count={len(intents)} expected=1"]
+    return []
+
+
+def _validate_trend_gate_skips_unconfirmed_momentum() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            balance_payload={"balance": 25000},
+            live_require_trend_momentum_confirmation=True,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    structure="trend",
+                    trend_momentum_confirmed=False,
+                )
+            ),
+            cycle_number=61,
+        )
+        if intents:
+            return [f"unconfirmed trend intents={intents} expected empty"]
+        return _assert_skip_payload(
+            temp_path,
+            {
+                "reason": "trend_momentum_unconfirmed",
+                "trend_momentum_confirmed": False,
+                "structure_gate_candidate_passed": False,
+            },
+        )
+
+
+def _validate_trend_gate_allows_confirmed_momentum() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        coordinator = _coordinator(
+            Path(temp_dir),
+            balance_payload={"balance": 25000},
+            live_require_trend_momentum_confirmation=True,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    structure="trend",
+                    trend_momentum_confirmed=True,
+                )
+            ),
+            cycle_number=64,
+        )
+        if len(intents) != 1:
+            return [f"confirmed trend intent count={len(intents)} expected=1"]
+    return []
+
+
+def _validate_reversal_range_gate_skips_below_minimum() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            balance_payload={"balance": 25000},
+            live_require_reversal_range_position=True,
+            live_min_reversal_range_position=Decimal("0.50"),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    structure="reversal",
+                    range_position_15m=Decimal("0.49"),
+                )
+            ),
+            cycle_number=62,
+        )
+        if intents:
+            return [f"low reversal range intents={intents} expected empty"]
+        return _assert_skip_payload(
+            temp_path,
+            {
+                "reason": "reversal_range_position_below_minimum",
+                "range_position_15m": "0.49",
+                "min_reversal_range_position": "0.50",
+                "structure_gate_candidate_passed": False,
+            },
+        )
+
+
+def _validate_reversal_range_gate_allows_at_minimum() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        coordinator = _coordinator(
+            Path(temp_dir),
+            balance_payload={"balance": 25000},
+            live_require_reversal_range_position=True,
+            live_min_reversal_range_position=Decimal("0.50"),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    structure="reversal",
+                    range_position_15m=Decimal("0.50"),
+                )
+            ),
+            cycle_number=65,
+        )
+        if len(intents) != 1:
+            return [f"at-min reversal range intent count={len(intents)} expected=1"]
+    return []
+
+
+def _validate_signal_gate_missing_data_skips_when_enabled() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            balance_payload={"balance": 25000},
+            live_require_momentum_alignment=True,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    recent_return_bps=None,
+                    momentum_aligned_with_direction=None,
+                )
+            ),
+            cycle_number=63,
+        )
+        if intents:
+            return [f"missing signal data intents={intents} expected empty"]
+        return _assert_skip_payload(
+            temp_path,
+            {
+                "reason": "signal_gate_data_unavailable",
+                "recent_return_bps": None,
+                "structure_gate_candidate_passed": False,
+            },
+        )
+
+
 def _coordinator(
     temp_path: Path,
     *,
@@ -650,6 +864,10 @@ def _coordinator(
     live_min_entry_price_dollars: Decimal = Decimal("0"),
     live_max_entry_price_dollars: Decimal = Decimal("0.800"),
     live_max_execution_spread_dollars: Decimal = Decimal("0.100"),
+    live_require_momentum_alignment: bool = False,
+    live_require_trend_momentum_confirmation: bool = False,
+    live_require_reversal_range_position: bool = False,
+    live_min_reversal_range_position: Decimal = Decimal("0.50"),
 ) -> LiveExecutionCoordinator:
     client = (
         _FakeBalanceClient(
@@ -666,6 +884,12 @@ def _coordinator(
             live_min_entry_price_dollars=live_min_entry_price_dollars,
             live_max_entry_price_dollars=live_max_entry_price_dollars,
             live_max_execution_spread_dollars=live_max_execution_spread_dollars,
+            live_require_momentum_alignment=live_require_momentum_alignment,
+            live_require_trend_momentum_confirmation=(
+                live_require_trend_momentum_confirmation
+            ),
+            live_require_reversal_range_position=live_require_reversal_range_position,
+            live_min_reversal_range_position=live_min_reversal_range_position,
         ),
         client=client,
     )
@@ -683,12 +907,18 @@ def _contract(
     product_id: str = "BTC-USD",
     market_ticker: str = "KXBTC15M-TEST",
     direction: str = "up",
+    structure: str = "trend",
     confidence: int = 70,
     midpoint: Decimal = Decimal("0.10"),
     best_bid: Decimal | None = None,
     best_ask: Decimal | None = None,
     omit_best_bid: bool = False,
     omit_best_ask: bool = False,
+    lookback_return_bps: Decimal | None = Decimal("40"),
+    recent_return_bps: Decimal | None = Decimal("20"),
+    momentum_aligned_with_direction: bool | None = True,
+    trend_momentum_confirmed: bool | None = True,
+    range_position_15m: Decimal | None = Decimal("0.75"),
 ) -> ScannedContract:
     resolved_best_bid = (
         None
@@ -709,7 +939,7 @@ def _contract(
         product_id=product_id,
         market_ticker=market_ticker,
         direction=direction,
-        structure="trend",
+        structure=structure,
         confidence=confidence,
         best_bid=resolved_best_bid,
         best_ask=resolved_best_ask,
@@ -722,6 +952,14 @@ def _contract(
             top_of_book_liquidity=Decimal("100"),
             dollar_volume=Decimal("1000"),
         ),
+        lookback_return_bps=lookback_return_bps,
+        recent_return_bps=recent_return_bps,
+        momentum_aligned_with_direction=momentum_aligned_with_direction,
+        trend_momentum_confirmed=trend_momentum_confirmed,
+        range_position_15m=range_position_15m,
+        classification_reason="test_classification",
+        confidence_reason="test_confidence",
+        utc_hour=12,
     )
 
 
@@ -822,6 +1060,10 @@ class _Settings:
     live_min_entry_price_dollars: Decimal = Decimal("0")
     live_max_entry_price_dollars: Decimal = Decimal("0.800")
     live_max_execution_spread_dollars: Decimal = Decimal("0.100")
+    live_require_momentum_alignment: bool = False
+    live_require_trend_momentum_confirmation: bool = False
+    live_require_reversal_range_position: bool = False
+    live_min_reversal_range_position: Decimal = Decimal("0.50")
 
 
 class _FakeBalanceClient:

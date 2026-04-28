@@ -74,6 +74,7 @@ def _run_fixtures(scanner: ContractScanner) -> list[str]:
     failures.extend(_validate_zero_confidence_skip(scanner))
     failures.extend(_validate_missing_quote_skip(scanner))
     failures.extend(_validate_ranking_tiebreak(scanner))
+    failures.extend(_validate_bias_diagnostics_copied_to_ranked_contract(scanner))
     failures.extend(_validate_low_confidence_mature_impulse_skip(scanner))
     failures.extend(_validate_low_confidence_small_impulse_ranks(scanner))
     failures.extend(_validate_low_confidence_down_impulse_ranks(scanner))
@@ -183,6 +184,35 @@ def _validate_ranking_tiebreak(scanner: ContractScanner) -> list[str]:
     if ranked_tickers[:2] != ("KXBTC-1", "KXBTC-2"):
         return [f"lexical tiebreak mismatch: {ranked_tickers}"]
     return []
+
+
+def _validate_bias_diagnostics_copied_to_ranked_contract(scanner: ContractScanner) -> list[str]:
+    snapshot = scanner.scan(
+        bias_snapshot=_base_bias_snapshot(),
+        market_snapshot=_base_market_snapshot(),
+    )
+    btc_contract = next(
+        contract
+        for contract in snapshot.ranked_contracts
+        if contract.product_id == "BTC-USD"
+    )
+    failures: list[str] = []
+    expected = {
+        "lookback_return_bps": Decimal("125"),
+        "recent_return_bps": Decimal("30"),
+        "momentum_aligned_with_direction": True,
+        "trend_momentum_confirmed": True,
+        "range_position_15m": Decimal("0.75"),
+        "classification_reason": "confirmed_matching_direction_returns",
+        "confidence_reason": "trend_both_returns_at_3x_chop",
+        "utc_hour": 12,
+    }
+    for key, value in expected.items():
+        if getattr(btc_contract, key) != value:
+            failures.append(
+                f"diagnostic {key}={getattr(btc_contract, key)} expected={value}"
+            )
+    return failures
 
 
 def _validate_low_confidence_mature_impulse_skip(scanner: ContractScanner) -> list[str]:
@@ -461,6 +491,12 @@ def _base_bias_snapshot() -> BiasSnapshot:
                 latest_price=Decimal("70000"),
                 lookback_return_bps=Decimal("125"),
                 recent_return_bps=Decimal("30"),
+                momentum_aligned_with_direction=True,
+                trend_momentum_confirmed=True,
+                range_position_15m=Decimal("0.75"),
+                classification_reason="confirmed_matching_direction_returns",
+                confidence_reason="trend_both_returns_at_3x_chop",
+                utc_hour=12,
                 observation_count=50,
                 as_of="2026-04-23T12:00:00+00:00",
             ),
@@ -477,6 +513,12 @@ def _base_bias_snapshot() -> BiasSnapshot:
                 latest_price=Decimal("3200"),
                 lookback_return_bps=Decimal("-90"),
                 recent_return_bps=Decimal("-20"),
+                momentum_aligned_with_direction=True,
+                trend_momentum_confirmed=True,
+                range_position_15m=Decimal("0.25"),
+                classification_reason="opposing_direction_returns",
+                confidence_reason="reversal_both_returns_at_2x_chop",
+                utc_hour=12,
                 observation_count=45,
                 as_of="2026-04-23T12:00:05+00:00",
             ),

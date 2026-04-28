@@ -120,6 +120,11 @@ def _validate_single_cycle() -> list[str]:
         btc_bias.direction != "up"
         or btc_bias.confidence != 70
         or btc_bias.structure != "trend"
+        or btc_bias.lookback_return_bps != Decimal("100")
+        or btc_bias.recent_return_bps != Decimal("20")
+        or btc_bias.momentum_aligned_with_direction is not True
+        or btc_bias.trend_momentum_confirmed is not True
+        or btc_bias.range_position_15m != Decimal("0.75")
         or dict(btc_bias.risk_flags).get("stale_data")
     ):
         failures.append(f"single-cycle BTC-USD bias diagnostic={btc_bias}")
@@ -881,6 +886,10 @@ def _settings(
         live_min_entry_price_dollars=Decimal("0"),
         live_max_entry_price_dollars=Decimal("0.800"),
         live_max_execution_spread_dollars=Decimal("0.100"),
+        live_require_momentum_alignment=False,
+        live_require_trend_momentum_confirmation=False,
+        live_require_reversal_range_position=False,
+        live_min_reversal_range_position=Decimal("0.50"),
         runner_enabled=True,
         runner_loop_interval_seconds=0.001,
         runner_status_log_every_n_cycles=1,
@@ -963,6 +972,9 @@ class _FakeBiasEngine:
                     latest_price=Decimal("70000"),
                     lookback_return_bps=Decimal("100"),
                     recent_return_bps=Decimal("20"),
+                    momentum_aligned_with_direction=True,
+                    trend_momentum_confirmed=True,
+                    range_position_15m=Decimal("0.75"),
                     observation_count=25,
                     as_of="2026-04-23T12:00:00+00:00",
                 ),
@@ -979,6 +991,9 @@ class _FakeBiasEngine:
                     latest_price=Decimal("2000"),
                     lookback_return_bps=Decimal("100"),
                     recent_return_bps=Decimal("20"),
+                    momentum_aligned_with_direction=True,
+                    trend_momentum_confirmed=True,
+                    range_position_15m=Decimal("0.75"),
                     observation_count=25,
                     as_of="2026-04-23T12:00:00+00:00",
                 ),

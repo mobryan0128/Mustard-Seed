@@ -180,6 +180,8 @@ def run_offline_fixtures(settings) -> list[str]:
     failures.extend(_run_pruning_case(settings, now))
     failures.extend(_run_impulse_detection_case(settings, now))
     failures.extend(_run_slow_move_no_impulse_case(settings, now))
+    failures.extend(_run_range_position_case(settings, now))
+    failures.extend(_run_flat_range_position_unavailable_case(settings, now))
     failures.extend(_run_impulse_override_case(settings, now, direction="up"))
     failures.extend(_run_impulse_override_case(settings, now, direction="down"))
     failures.extend(_run_stale_impulse_no_override_case(settings, now))
@@ -256,6 +258,11 @@ def _run_case(
         failures.append(f"{case_name}: utc_hour missing")
     if state.confidence_before_time_adjustment is None:
         failures.append(f"{case_name}: confidence_before_time_adjustment missing")
+    if state.direction in {"up", "down"}:
+        if state.momentum_aligned_with_direction is None:
+            failures.append(f"{case_name}: momentum alignment diagnostic missing")
+        if state.trend_momentum_confirmed is None:
+            failures.append(f"{case_name}: trend momentum diagnostic missing")
     return failures
 
 
@@ -355,6 +362,71 @@ def _run_slow_move_no_impulse_case(settings, now: datetime) -> list[str]:
     if state.impulse_return_bps is None:
         failures.append("slow impulse: expected diagnostic return_bps")
     return failures
+
+
+def _run_range_position_case(settings, now: datetime) -> list[str]:
+    engine = BiasEngine.from_settings(settings)
+    product_id = settings.bias_products[0]
+    observations = _series(
+        now,
+        count=4,
+        step_seconds=300,
+        prices=(
+            Decimal("100"),
+            Decimal("110"),
+            Decimal("102"),
+            Decimal("105"),
+        ),
+    )
+    snapshot = None
+    for observed_at, price in observations:
+        snapshot = engine.ingest(
+            FixtureFeedSnapshot(
+                products={
+                    product_id: FixturePriceState(
+                        product_id=product_id,
+                        price=price,
+                        source_timestamp=observed_at.isoformat(),
+                    )
+                }
+            )
+        )
+
+    assert snapshot is not None
+    state = snapshot.products[product_id]
+    failures: list[str] = []
+    if state.range_position_15m != Decimal("0.500"):
+        failures.append(f"range position={state.range_position_15m} expected=0.500")
+    return failures
+
+
+def _run_flat_range_position_unavailable_case(settings, now: datetime) -> list[str]:
+    engine = BiasEngine.from_settings(settings)
+    product_id = settings.bias_products[0]
+    snapshot = None
+    for observed_at, price in _series(
+        now,
+        count=4,
+        step_seconds=300,
+        prices=(Decimal("100"), Decimal("100"), Decimal("100"), Decimal("100")),
+    ):
+        snapshot = engine.ingest(
+            FixtureFeedSnapshot(
+                products={
+                    product_id: FixturePriceState(
+                        product_id=product_id,
+                        price=price,
+                        source_timestamp=observed_at.isoformat(),
+                    )
+                }
+            )
+        )
+
+    assert snapshot is not None
+    state = snapshot.products[product_id]
+    if state.range_position_15m is not None:
+        return [f"flat range position={state.range_position_15m} expected=None"]
+    return []
 
 
 def _run_impulse_override_case(settings, now: datetime, *, direction: str) -> list[str]:
