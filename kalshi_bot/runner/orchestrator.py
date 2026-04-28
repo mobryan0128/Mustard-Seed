@@ -311,6 +311,18 @@ class KalshiBotRunner:
         )
         bias_snapshot = self._bias_engine.ingest(self._crypto_feed_client.snapshot())
         market_snapshot = self._market_state_cache.snapshot()
+        if (
+            self._live_execution_coordinator is not None
+            and self._settings.live_runner_execution_enabled
+            and hasattr(
+                self._live_execution_coordinator,
+                "process_profit_trailing_exits",
+            )
+        ):
+            self._live_execution_coordinator.process_profit_trailing_exits(
+                market_snapshot,
+                cycle_number=cycle_number,
+            )
         contract_scan_snapshot = self._scan_contracts(
             bias_snapshot=bias_snapshot,
             market_snapshot=market_snapshot,

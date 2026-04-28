@@ -68,6 +68,10 @@ DEFAULT_LIVE_REQUIRE_MOMENTUM_ALIGNMENT = False
 DEFAULT_LIVE_REQUIRE_TREND_MOMENTUM_CONFIRMATION = False
 DEFAULT_LIVE_REQUIRE_REVERSAL_RANGE_POSITION = False
 DEFAULT_LIVE_MIN_REVERSAL_RANGE_POSITION = Decimal("0.50")
+DEFAULT_LIVE_PROFIT_TRAILING_EXIT_ENABLED = False
+DEFAULT_LIVE_PROFIT_TRAILING_ACTIVATION_PRICE = Decimal("0.90")
+DEFAULT_LIVE_PROFIT_TRAILING_DROP_DOLLARS = Decimal("0.01")
+DEFAULT_LIVE_PROFIT_EXIT_MIN_BID = Decimal("0.90")
 DEFAULT_RUNNER_ENABLED = True
 DEFAULT_RUNNER_LOOP_INTERVAL_SECONDS = 5.0
 DEFAULT_RUNNER_STATUS_LOG_EVERY_N_CYCLES = 1
@@ -165,6 +169,10 @@ class KalshiSettings:
     live_require_trend_momentum_confirmation: bool
     live_require_reversal_range_position: bool
     live_min_reversal_range_position: Decimal
+    live_profit_trailing_exit_enabled: bool
+    live_profit_trailing_activation_price: Decimal
+    live_profit_trailing_drop_dollars: Decimal
+    live_profit_exit_min_bid: Decimal
     runner_enabled: bool
     runner_loop_interval_seconds: float
     runner_status_log_every_n_cycles: int
@@ -440,6 +448,23 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         DEFAULT_LIVE_MIN_REVERSAL_RANGE_POSITION,
         "LIVE_MIN_REVERSAL_RANGE_POSITION",
     )
+    live_profit_trailing_exit_enabled = _parse_bool(
+        values.get("LIVE_PROFIT_TRAILING_EXIT_ENABLED"),
+        DEFAULT_LIVE_PROFIT_TRAILING_EXIT_ENABLED,
+        "LIVE_PROFIT_TRAILING_EXIT_ENABLED",
+    )
+    live_profit_trailing_activation_price = _parse_price_dollars(
+        values.get("LIVE_PROFIT_TRAILING_ACTIVATION_PRICE"),
+        "LIVE_PROFIT_TRAILING_ACTIVATION_PRICE",
+    ) or DEFAULT_LIVE_PROFIT_TRAILING_ACTIVATION_PRICE
+    live_profit_trailing_drop_dollars = _parse_price_dollars(
+        values.get("LIVE_PROFIT_TRAILING_DROP_DOLLARS"),
+        "LIVE_PROFIT_TRAILING_DROP_DOLLARS",
+    ) or DEFAULT_LIVE_PROFIT_TRAILING_DROP_DOLLARS
+    live_profit_exit_min_bid = _parse_price_dollars(
+        values.get("LIVE_PROFIT_EXIT_MIN_BID"),
+        "LIVE_PROFIT_EXIT_MIN_BID",
+    ) or DEFAULT_LIVE_PROFIT_EXIT_MIN_BID
     runner_enabled = _parse_bool(
         values.get("RUNNER_ENABLED"),
         DEFAULT_RUNNER_ENABLED,
@@ -639,6 +664,12 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         ),
         live_require_reversal_range_position=live_require_reversal_range_position,
         live_min_reversal_range_position=live_min_reversal_range_position,
+        live_profit_trailing_exit_enabled=live_profit_trailing_exit_enabled,
+        live_profit_trailing_activation_price=(
+            live_profit_trailing_activation_price
+        ),
+        live_profit_trailing_drop_dollars=live_profit_trailing_drop_dollars,
+        live_profit_exit_min_bid=live_profit_exit_min_bid,
         runner_enabled=runner_enabled,
         runner_loop_interval_seconds=runner_loop_interval_seconds,
         runner_status_log_every_n_cycles=runner_status_log_every_n_cycles,
@@ -762,6 +793,10 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_REQUIRE_TREND_MOMENTUM_CONFIRMATION",
         "LIVE_REQUIRE_REVERSAL_RANGE_POSITION",
         "LIVE_MIN_REVERSAL_RANGE_POSITION",
+        "LIVE_PROFIT_TRAILING_EXIT_ENABLED",
+        "LIVE_PROFIT_TRAILING_ACTIVATION_PRICE",
+        "LIVE_PROFIT_TRAILING_DROP_DOLLARS",
+        "LIVE_PROFIT_EXIT_MIN_BID",
         "RUNNER_ENABLED",
         "RUNNER_LOOP_INTERVAL_SECONDS",
         "RUNNER_STATUS_LOG_EVERY_N_CYCLES",
