@@ -98,6 +98,24 @@ def _validate_settings_defaults() -> list[str]:
             "default live_min_reversal_range_position="
             f"{settings.live_min_reversal_range_position}"
         )
+    if settings.live_block_impulse_override_from_chop:
+        failures.append("default live_block_impulse_override_from_chop=True")
+    if settings.live_impulse_override_require_momentum_alignment:
+        failures.append(
+            "default live_impulse_override_require_momentum_alignment=True"
+        )
+    if settings.live_impulse_override_require_range_position:
+        failures.append("default live_impulse_override_require_range_position=True")
+    if settings.live_impulse_override_min_recent_return_bps is not None:
+        failures.append(
+            "default live_impulse_override_min_recent_return_bps="
+            f"{settings.live_impulse_override_min_recent_return_bps}"
+        )
+    if settings.live_trend_momentum_min_recent_return_bps is not None:
+        failures.append(
+            "default live_trend_momentum_min_recent_return_bps="
+            f"{settings.live_trend_momentum_min_recent_return_bps}"
+        )
     if settings.live_max_total_exposure_dollars is not None:
         failures.append(
             "default live_max_total_exposure_dollars="
@@ -120,6 +138,11 @@ def _validate_settings_overrides() -> list[str]:
             + "LIVE_REQUIRE_TREND_MOMENTUM_CONFIRMATION=true\n"
             + "LIVE_REQUIRE_REVERSAL_RANGE_POSITION=true\n"
             + "LIVE_MIN_REVERSAL_RANGE_POSITION=0.60\n"
+            + "LIVE_BLOCK_IMPULSE_OVERRIDE_FROM_CHOP=true\n"
+            + "LIVE_IMPULSE_OVERRIDE_REQUIRE_MOMENTUM_ALIGNMENT=true\n"
+            + "LIVE_IMPULSE_OVERRIDE_REQUIRE_RANGE_POSITION=true\n"
+            + "LIVE_IMPULSE_OVERRIDE_MIN_RECENT_RETURN_BPS=4.5\n"
+            + "LIVE_TREND_MOMENTUM_MIN_RECENT_RETURN_BPS=12.5\n"
             + "LIVE_MAX_TOTAL_EXPOSURE_DOLLARS=12.34\n",
             encoding="utf-8",
         )
@@ -156,6 +179,24 @@ def _validate_settings_overrides() -> list[str]:
         failures.append(
             "override live_min_reversal_range_position="
             f"{settings.live_min_reversal_range_position}"
+        )
+    if not settings.live_block_impulse_override_from_chop:
+        failures.append("override live_block_impulse_override_from_chop=False")
+    if not settings.live_impulse_override_require_momentum_alignment:
+        failures.append(
+            "override live_impulse_override_require_momentum_alignment=False"
+        )
+    if not settings.live_impulse_override_require_range_position:
+        failures.append("override live_impulse_override_require_range_position=False")
+    if settings.live_impulse_override_min_recent_return_bps != Decimal("4.5"):
+        failures.append(
+            "override live_impulse_override_min_recent_return_bps="
+            f"{settings.live_impulse_override_min_recent_return_bps}"
+        )
+    if settings.live_trend_momentum_min_recent_return_bps != Decimal("12.5"):
+        failures.append(
+            "override live_trend_momentum_min_recent_return_bps="
+            f"{settings.live_trend_momentum_min_recent_return_bps}"
         )
     if settings.live_max_total_exposure_dollars != Decimal("12.34"):
         failures.append(

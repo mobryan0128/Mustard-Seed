@@ -14,6 +14,7 @@ from kalshi_bot.clients.kalshi_client import (
     KalshiOrderSummary,
 )
 from kalshi_bot.config.settings import (
+    DEFAULT_BIAS_CHOP_THRESHOLD_BPS,
     DEFAULT_LIVE_MAX_ENTRY_PRICE_DOLLARS,
     DEFAULT_LIVE_MAX_EXECUTION_SPREAD_DOLLARS,
     KalshiSettings,
@@ -25,6 +26,7 @@ from kalshi_bot.execution.execution_engine import (
     build_live_order_intent,
     build_live_order_intent_from_contract,
 )
+from kalshi_bot.forecast.bias_engine import TREND_MOMENTUM_CONFIRMATION_MULTIPLIER
 from kalshi_bot.market.market_state_cache import MarketStateSnapshot, TickerState
 from kalshi_bot.observability.logger import StructuredLogger
 from kalshi_bot.observability.replay_engine import ReplayEngine
@@ -35,6 +37,8 @@ RISK_APPROVAL_SOURCES = frozenset(
     {"simulation_entry_risk_gate", "live_entry_risk_gate"}
 )
 LIVE_RUNNER_REALIZED_DAILY_PNL_DOLLARS = Decimal("0")
+IMPULSE_OVERRIDE_CLASSIFICATION_REASON = "impulse_override_from_chop"
+IMPULSE_OVERRIDE_RANGE_MIDPOINT = Decimal("0.50")
 
 
 @dataclass(frozen=True)
@@ -400,7 +404,10 @@ class LiveExecutionCoordinator:
                     "structure_gate_candidate_passed": True,
                     "max_total_exposure_dollars": max_total_exposure_dollars,
                     "max_total_exposure_source": max_total_exposure_source,
-                    **_signal_diagnostics_payload(contract),
+                    **_signal_diagnostics_payload(
+                        contract,
+                        settings=self._settings,
+                    ),
                 },
             )
         return tuple(intents)
@@ -1073,7 +1080,10 @@ class LiveExecutionCoordinator:
             "structure": contract.structure,
             "confidence": contract.confidence,
             "entry_price": contract.midpoint,
-            **_signal_diagnostics_payload(contract),
+            **_signal_diagnostics_payload(
+                contract,
+                settings=self._settings,
+            ),
         }
         if details:
             payload.update(details)
@@ -1529,9 +1539,17 @@ def _evaluate_signal_gates(
     settings: KalshiSettings,
 ) -> tuple[str | None, dict[str, object]]:
     details = {
-        **_signal_diagnostics_payload(contract),
+        **_signal_diagnostics_payload(contract, settings=settings),
         "structure_gate_candidate_passed": False,
     }
+    impulse_skip_reason = _apply_impulse_override_signal_gate(
+        contract,
+        settings=settings,
+        details=details,
+    )
+    if impulse_skip_reason is not None:
+        return impulse_skip_reason, details
+
     if getattr(settings, "live_require_momentum_alignment", False):
         aligned = _contract_recent_momentum_aligned(contract)
         details["momentum_aligned_with_direction"] = aligned
@@ -1544,7 +1562,7 @@ def _evaluate_signal_gates(
         getattr(settings, "live_require_trend_momentum_confirmation", False)
         and contract.structure == "trend"
     ):
-        confirmed = getattr(contract, "trend_momentum_confirmed", None)
+        confirmed = _contract_trend_momentum_confirmed(contract, settings=settings)
         if confirmed is None:
             return "signal_gate_data_unavailable", details
         if not confirmed:
@@ -1566,7 +1584,122 @@ def _evaluate_signal_gates(
         if Decimal(str(range_position)) < min_range_position:
             return "reversal_range_position_below_minimum", details
 
-    return None, {**_signal_diagnostics_payload(contract)}
+    return None, details
+
+
+def _apply_impulse_override_signal_gate(
+    contract: ScannedContract,
+    *,
+    settings: KalshiSettings,
+    details: dict[str, object],
+) -> str | None:
+    if (
+        getattr(contract, "classification_reason", None)
+        != IMPULSE_OVERRIDE_CLASSIFICATION_REASON
+    ):
+        return None
+
+    if getattr(settings, "live_block_impulse_override_from_chop", False):
+        details["impulse_override_allowed"] = False
+        details["impulse_override_block_reason"] = (
+            "blocked_by_live_block_impulse_override_from_chop"
+        )
+        return "impulse_override_from_chop_blocked"
+
+    if getattr(settings, "live_impulse_override_require_momentum_alignment", False):
+        aligned = _contract_recent_momentum_aligned(contract)
+        details["momentum_aligned_with_direction"] = aligned
+        if aligned is None:
+            details["impulse_override_allowed"] = False
+            details["impulse_override_block_reason"] = "missing_recent_return"
+            return "signal_gate_data_unavailable"
+        if not aligned:
+            details["impulse_override_allowed"] = False
+            details["impulse_override_block_reason"] = "momentum_not_aligned"
+            return "impulse_override_momentum_not_aligned"
+
+    min_recent_return_bps = getattr(
+        settings,
+        "live_impulse_override_min_recent_return_bps",
+        None,
+    )
+    if min_recent_return_bps is not None:
+        recent_return_bps = getattr(contract, "recent_return_bps", None)
+        details["recent_return_required_bps"] = min_recent_return_bps
+        if recent_return_bps is None:
+            details["impulse_override_allowed"] = False
+            details["impulse_override_block_reason"] = "missing_recent_return"
+            return "signal_gate_data_unavailable"
+        if abs(Decimal(str(recent_return_bps))) < min_recent_return_bps:
+            details["impulse_override_allowed"] = False
+            details["impulse_override_block_reason"] = "recent_return_below_minimum"
+            return "impulse_override_recent_return_below_minimum"
+
+    if getattr(settings, "live_impulse_override_require_range_position", False):
+        range_position = getattr(contract, "range_position_15m", None)
+        if range_position is None:
+            details["impulse_override_allowed"] = False
+            details["impulse_override_block_reason"] = "missing_range_position"
+            return "signal_gate_data_unavailable"
+        range_position_decimal = Decimal(str(range_position))
+        if (
+            contract.direction == "up"
+            and range_position_decimal < IMPULSE_OVERRIDE_RANGE_MIDPOINT
+        ):
+            details["impulse_override_allowed"] = False
+            details["impulse_override_block_reason"] = (
+                "range_position_below_midpoint_for_up"
+            )
+            return "impulse_override_range_position_against_direction"
+        if (
+            contract.direction == "down"
+            and range_position_decimal > IMPULSE_OVERRIDE_RANGE_MIDPOINT
+        ):
+            details["impulse_override_allowed"] = False
+            details["impulse_override_block_reason"] = (
+                "range_position_above_midpoint_for_down"
+            )
+            return "impulse_override_range_position_against_direction"
+        if contract.direction not in {"up", "down"}:
+            details["impulse_override_allowed"] = False
+            details["impulse_override_block_reason"] = "direction_not_actionable"
+            return "signal_gate_data_unavailable"
+
+    details["impulse_override_allowed"] = True
+    details["impulse_override_block_reason"] = None
+    return None
+
+
+def _contract_trend_momentum_confirmed(
+    contract: ScannedContract,
+    *,
+    settings: KalshiSettings,
+) -> bool | None:
+    override_threshold = getattr(
+        settings,
+        "live_trend_momentum_min_recent_return_bps",
+        None,
+    )
+    if override_threshold is None:
+        return getattr(contract, "trend_momentum_confirmed", None)
+    return _recent_return_meets_directional_threshold(
+        contract,
+        threshold=override_threshold,
+    )
+
+
+def _recent_return_meets_directional_threshold(
+    contract: ScannedContract,
+    *,
+    threshold: Decimal,
+) -> bool | None:
+    aligned = _contract_recent_momentum_aligned(contract)
+    if aligned is None:
+        return None
+    recent_return_bps = getattr(contract, "recent_return_bps", None)
+    if recent_return_bps is None:
+        return None
+    return aligned and abs(Decimal(str(recent_return_bps))) >= threshold
 
 
 def _contract_recent_momentum_aligned(contract: ScannedContract) -> bool | None:
@@ -1581,7 +1714,44 @@ def _contract_recent_momentum_aligned(contract: ScannedContract) -> bool | None:
     return None
 
 
-def _signal_diagnostics_payload(contract: ScannedContract) -> dict[str, object]:
+def _signal_diagnostics_payload(
+    contract: ScannedContract,
+    *,
+    settings: KalshiSettings | None = None,
+) -> dict[str, object]:
+    trend_momentum_threshold = _trend_momentum_threshold(settings)
+    confirmed = (
+        _contract_trend_momentum_confirmed(contract, settings=settings)
+        if settings is not None
+        else getattr(contract, "trend_momentum_confirmed", None)
+    )
+    trend_confirmed_reason = _trend_momentum_confirmed_reason(
+        contract,
+        threshold=trend_momentum_threshold,
+        confirmed=confirmed,
+    )
+    impulse_recent_return_required_bps = (
+        getattr(settings, "live_impulse_override_min_recent_return_bps", None)
+        if settings is not None
+        else None
+    )
+    recent_return_required_bps = (
+        impulse_recent_return_required_bps
+        if (
+            getattr(contract, "classification_reason", None)
+            == IMPULSE_OVERRIDE_CLASSIFICATION_REASON
+            and impulse_recent_return_required_bps is not None
+        )
+        else trend_momentum_threshold if contract.structure == "trend" else None
+    )
+    impulse_override_allowed = None
+    impulse_override_block_reason = None
+    if (
+        getattr(contract, "classification_reason", None)
+        == IMPULSE_OVERRIDE_CLASSIFICATION_REASON
+    ):
+        impulse_override_allowed = True
+
     return {
         "lookback_return_bps": getattr(contract, "lookback_return_bps", None),
         "recent_return_bps": getattr(contract, "recent_return_bps", None),
@@ -1599,7 +1769,61 @@ def _signal_diagnostics_payload(contract: ScannedContract) -> dict[str, object]:
         "classification_reason": getattr(contract, "classification_reason", None),
         "confidence_reason": getattr(contract, "confidence_reason", None),
         "utc_hour": getattr(contract, "utc_hour", None),
+        "impulse_override_allowed": impulse_override_allowed,
+        "impulse_override_block_reason": impulse_override_block_reason,
+        "trend_momentum_threshold": trend_momentum_threshold,
+        "recent_return_required_bps": recent_return_required_bps,
+        "trend_momentum_confirmed_reason": trend_confirmed_reason,
     }
+
+
+def _trend_momentum_threshold(settings: KalshiSettings | None) -> Decimal:
+    if settings is not None:
+        override_threshold = getattr(
+            settings,
+            "live_trend_momentum_min_recent_return_bps",
+            None,
+        )
+        if override_threshold is not None:
+            return override_threshold
+        chop_threshold_bps = getattr(
+            settings,
+            "bias_chop_threshold_bps",
+            DEFAULT_BIAS_CHOP_THRESHOLD_BPS,
+        )
+    else:
+        chop_threshold_bps = DEFAULT_BIAS_CHOP_THRESHOLD_BPS
+    return (
+        Decimal(str(chop_threshold_bps))
+        * TREND_MOMENTUM_CONFIRMATION_MULTIPLIER
+    )
+
+
+def _trend_momentum_confirmed_reason(
+    contract: ScannedContract,
+    *,
+    threshold: Decimal,
+    confirmed: bool | None,
+) -> str | None:
+    if contract.structure != "trend":
+        return None
+    if contract.direction not in {"up", "down"}:
+        return "direction_not_actionable"
+    recent_return_bps = getattr(contract, "recent_return_bps", None)
+    if recent_return_bps is None:
+        return "missing_recent_return"
+    aligned = _contract_recent_momentum_aligned(contract)
+    if aligned is None:
+        return "direction_not_actionable"
+    if not aligned:
+        return "momentum_not_aligned"
+    if abs(Decimal(str(recent_return_bps))) < threshold:
+        return "recent_return_below_threshold"
+    if confirmed is None:
+        return "missing_trend_momentum_confirmed"
+    if confirmed is False:
+        return "provided_confirmation_false"
+    return "confirmed"
 
 
 def _balance_dollars_from_payload(payload: dict[str, object]) -> Decimal:

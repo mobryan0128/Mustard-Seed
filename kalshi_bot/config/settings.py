@@ -68,6 +68,9 @@ DEFAULT_LIVE_REQUIRE_MOMENTUM_ALIGNMENT = False
 DEFAULT_LIVE_REQUIRE_TREND_MOMENTUM_CONFIRMATION = False
 DEFAULT_LIVE_REQUIRE_REVERSAL_RANGE_POSITION = False
 DEFAULT_LIVE_MIN_REVERSAL_RANGE_POSITION = Decimal("0.50")
+DEFAULT_LIVE_BLOCK_IMPULSE_OVERRIDE_FROM_CHOP = False
+DEFAULT_LIVE_IMPULSE_OVERRIDE_REQUIRE_MOMENTUM_ALIGNMENT = False
+DEFAULT_LIVE_IMPULSE_OVERRIDE_REQUIRE_RANGE_POSITION = False
 DEFAULT_LIVE_PROFIT_TRAILING_EXIT_ENABLED = False
 DEFAULT_LIVE_PROFIT_TRAILING_ACTIVATION_PRICE = Decimal("0.90")
 DEFAULT_LIVE_PROFIT_TRAILING_DROP_DOLLARS = Decimal("0.01")
@@ -169,6 +172,11 @@ class KalshiSettings:
     live_require_trend_momentum_confirmation: bool
     live_require_reversal_range_position: bool
     live_min_reversal_range_position: Decimal
+    live_block_impulse_override_from_chop: bool
+    live_impulse_override_require_momentum_alignment: bool
+    live_impulse_override_require_range_position: bool
+    live_impulse_override_min_recent_return_bps: Decimal | None
+    live_trend_momentum_min_recent_return_bps: Decimal | None
     live_profit_trailing_exit_enabled: bool
     live_profit_trailing_activation_price: Decimal
     live_profit_trailing_drop_dollars: Decimal
@@ -448,6 +456,29 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         DEFAULT_LIVE_MIN_REVERSAL_RANGE_POSITION,
         "LIVE_MIN_REVERSAL_RANGE_POSITION",
     )
+    live_block_impulse_override_from_chop = _parse_bool(
+        values.get("LIVE_BLOCK_IMPULSE_OVERRIDE_FROM_CHOP"),
+        DEFAULT_LIVE_BLOCK_IMPULSE_OVERRIDE_FROM_CHOP,
+        "LIVE_BLOCK_IMPULSE_OVERRIDE_FROM_CHOP",
+    )
+    live_impulse_override_require_momentum_alignment = _parse_bool(
+        values.get("LIVE_IMPULSE_OVERRIDE_REQUIRE_MOMENTUM_ALIGNMENT"),
+        DEFAULT_LIVE_IMPULSE_OVERRIDE_REQUIRE_MOMENTUM_ALIGNMENT,
+        "LIVE_IMPULSE_OVERRIDE_REQUIRE_MOMENTUM_ALIGNMENT",
+    )
+    live_impulse_override_require_range_position = _parse_bool(
+        values.get("LIVE_IMPULSE_OVERRIDE_REQUIRE_RANGE_POSITION"),
+        DEFAULT_LIVE_IMPULSE_OVERRIDE_REQUIRE_RANGE_POSITION,
+        "LIVE_IMPULSE_OVERRIDE_REQUIRE_RANGE_POSITION",
+    )
+    live_impulse_override_min_recent_return_bps = _parse_optional_positive_decimal(
+        values.get("LIVE_IMPULSE_OVERRIDE_MIN_RECENT_RETURN_BPS"),
+        "LIVE_IMPULSE_OVERRIDE_MIN_RECENT_RETURN_BPS",
+    )
+    live_trend_momentum_min_recent_return_bps = _parse_optional_positive_decimal(
+        values.get("LIVE_TREND_MOMENTUM_MIN_RECENT_RETURN_BPS"),
+        "LIVE_TREND_MOMENTUM_MIN_RECENT_RETURN_BPS",
+    )
     live_profit_trailing_exit_enabled = _parse_bool(
         values.get("LIVE_PROFIT_TRAILING_EXIT_ENABLED"),
         DEFAULT_LIVE_PROFIT_TRAILING_EXIT_ENABLED,
@@ -664,6 +695,19 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         ),
         live_require_reversal_range_position=live_require_reversal_range_position,
         live_min_reversal_range_position=live_min_reversal_range_position,
+        live_block_impulse_override_from_chop=live_block_impulse_override_from_chop,
+        live_impulse_override_require_momentum_alignment=(
+            live_impulse_override_require_momentum_alignment
+        ),
+        live_impulse_override_require_range_position=(
+            live_impulse_override_require_range_position
+        ),
+        live_impulse_override_min_recent_return_bps=(
+            live_impulse_override_min_recent_return_bps
+        ),
+        live_trend_momentum_min_recent_return_bps=(
+            live_trend_momentum_min_recent_return_bps
+        ),
         live_profit_trailing_exit_enabled=live_profit_trailing_exit_enabled,
         live_profit_trailing_activation_price=(
             live_profit_trailing_activation_price
@@ -793,6 +837,11 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_REQUIRE_TREND_MOMENTUM_CONFIRMATION",
         "LIVE_REQUIRE_REVERSAL_RANGE_POSITION",
         "LIVE_MIN_REVERSAL_RANGE_POSITION",
+        "LIVE_BLOCK_IMPULSE_OVERRIDE_FROM_CHOP",
+        "LIVE_IMPULSE_OVERRIDE_REQUIRE_MOMENTUM_ALIGNMENT",
+        "LIVE_IMPULSE_OVERRIDE_REQUIRE_RANGE_POSITION",
+        "LIVE_IMPULSE_OVERRIDE_MIN_RECENT_RETURN_BPS",
+        "LIVE_TREND_MOMENTUM_MIN_RECENT_RETURN_BPS",
         "LIVE_PROFIT_TRAILING_EXIT_ENABLED",
         "LIVE_PROFIT_TRAILING_ACTIVATION_PRICE",
         "LIVE_PROFIT_TRAILING_DROP_DOLLARS",

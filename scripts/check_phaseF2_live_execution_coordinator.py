@@ -63,6 +63,12 @@ def main() -> int:
     failures.extend(_validate_reversal_range_gate_skips_below_minimum())
     failures.extend(_validate_reversal_range_gate_allows_at_minimum())
     failures.extend(_validate_signal_gate_missing_data_skips_when_enabled())
+    failures.extend(_validate_impulse_override_default_allows_intent())
+    failures.extend(_validate_impulse_override_block_skips())
+    failures.extend(_validate_impulse_override_momentum_missing_data_skips())
+    failures.extend(_validate_impulse_override_range_missing_data_skips())
+    failures.extend(_validate_impulse_override_min_recent_return_skips())
+    failures.extend(_validate_trend_gate_uses_override_threshold())
 
     if failures:
         for failure in failures:
@@ -868,6 +874,184 @@ def _validate_signal_gate_missing_data_skips_when_enabled() -> list[str]:
         )
 
 
+def _validate_impulse_override_default_allows_intent() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        coordinator = _coordinator(Path(temp_dir), balance_payload={"balance": 25000})
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    classification_reason="impulse_override_from_chop",
+                )
+            ),
+            cycle_number=66,
+        )
+        if len(intents) != 1:
+            return [f"default impulse override intent count={len(intents)} expected=1"]
+    return []
+
+
+def _validate_impulse_override_block_skips() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            balance_payload={"balance": 25000},
+            live_block_impulse_override_from_chop=True,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    classification_reason="impulse_override_from_chop",
+                )
+            ),
+            cycle_number=67,
+        )
+        if intents:
+            return [f"blocked impulse override intents={intents} expected empty"]
+        return _assert_skip_payload(
+            temp_path,
+            {
+                "reason": "impulse_override_from_chop_blocked",
+                "classification_reason": "impulse_override_from_chop",
+                "impulse_override_allowed": False,
+                "impulse_override_block_reason": (
+                    "blocked_by_live_block_impulse_override_from_chop"
+                ),
+                "trend_momentum_threshold": "15.0",
+                "recent_return_required_bps": "15.0",
+                "trend_momentum_confirmed_reason": "confirmed",
+            },
+        )
+
+
+def _validate_impulse_override_momentum_missing_data_skips() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            balance_payload={"balance": 25000},
+            live_impulse_override_require_momentum_alignment=True,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    classification_reason="impulse_override_from_chop",
+                    recent_return_bps=None,
+                    momentum_aligned_with_direction=None,
+                )
+            ),
+            cycle_number=68,
+        )
+        if intents:
+            return [f"missing impulse momentum intents={intents} expected empty"]
+        return _assert_skip_payload(
+            temp_path,
+            {
+                "reason": "signal_gate_data_unavailable",
+                "classification_reason": "impulse_override_from_chop",
+                "recent_return_bps": None,
+                "impulse_override_allowed": False,
+                "impulse_override_block_reason": "missing_recent_return",
+                "trend_momentum_confirmed_reason": "missing_recent_return",
+            },
+        )
+
+
+def _validate_impulse_override_range_missing_data_skips() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            balance_payload={"balance": 25000},
+            live_impulse_override_require_range_position=True,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    classification_reason="impulse_override_from_chop",
+                    range_position_15m=None,
+                )
+            ),
+            cycle_number=69,
+        )
+        if intents:
+            return [f"missing impulse range intents={intents} expected empty"]
+        return _assert_skip_payload(
+            temp_path,
+            {
+                "reason": "signal_gate_data_unavailable",
+                "classification_reason": "impulse_override_from_chop",
+                "range_position_15m": None,
+                "impulse_override_allowed": False,
+                "impulse_override_block_reason": "missing_range_position",
+            },
+        )
+
+
+def _validate_impulse_override_min_recent_return_skips() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            balance_payload={"balance": 25000},
+            live_impulse_override_min_recent_return_bps=Decimal("8"),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    classification_reason="impulse_override_from_chop",
+                    recent_return_bps=Decimal("7.999"),
+                )
+            ),
+            cycle_number=70,
+        )
+        if intents:
+            return [f"weak impulse recent return intents={intents} expected empty"]
+        return _assert_skip_payload(
+            temp_path,
+            {
+                "reason": "impulse_override_recent_return_below_minimum",
+                "classification_reason": "impulse_override_from_chop",
+                "recent_return_required_bps": "8",
+                "impulse_override_allowed": False,
+                "impulse_override_block_reason": "recent_return_below_minimum",
+            },
+        )
+
+
+def _validate_trend_gate_uses_override_threshold() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            balance_payload={"balance": 25000},
+            live_require_trend_momentum_confirmation=True,
+            live_trend_momentum_min_recent_return_bps=Decimal("25"),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    structure="trend",
+                    recent_return_bps=Decimal("20"),
+                    momentum_aligned_with_direction=True,
+                    trend_momentum_confirmed=True,
+                )
+            ),
+            cycle_number=71,
+        )
+        if intents:
+            return [f"override trend threshold intents={intents} expected empty"]
+        return _assert_skip_payload(
+            temp_path,
+            {
+                "reason": "trend_momentum_unconfirmed",
+                "trend_momentum_threshold": "25",
+                "recent_return_required_bps": "25",
+                "trend_momentum_confirmed_reason": "recent_return_below_threshold",
+            },
+        )
+
+
 def _coordinator(
     temp_path: Path,
     *,
@@ -881,6 +1065,11 @@ def _coordinator(
     live_require_trend_momentum_confirmation: bool = False,
     live_require_reversal_range_position: bool = False,
     live_min_reversal_range_position: Decimal = Decimal("0.50"),
+    live_block_impulse_override_from_chop: bool = False,
+    live_impulse_override_require_momentum_alignment: bool = False,
+    live_impulse_override_require_range_position: bool = False,
+    live_impulse_override_min_recent_return_bps: Decimal | None = None,
+    live_trend_momentum_min_recent_return_bps: Decimal | None = None,
 ) -> LiveExecutionCoordinator:
     client = (
         _FakeBalanceClient(
@@ -903,6 +1092,21 @@ def _coordinator(
             ),
             live_require_reversal_range_position=live_require_reversal_range_position,
             live_min_reversal_range_position=live_min_reversal_range_position,
+            live_block_impulse_override_from_chop=(
+                live_block_impulse_override_from_chop
+            ),
+            live_impulse_override_require_momentum_alignment=(
+                live_impulse_override_require_momentum_alignment
+            ),
+            live_impulse_override_require_range_position=(
+                live_impulse_override_require_range_position
+            ),
+            live_impulse_override_min_recent_return_bps=(
+                live_impulse_override_min_recent_return_bps
+            ),
+            live_trend_momentum_min_recent_return_bps=(
+                live_trend_momentum_min_recent_return_bps
+            ),
         ),
         client=client,
     )
@@ -932,6 +1136,7 @@ def _contract(
     momentum_aligned_with_direction: bool | None = True,
     trend_momentum_confirmed: bool | None = True,
     range_position_15m: Decimal | None = Decimal("0.75"),
+    classification_reason: str = "test_classification",
 ) -> ScannedContract:
     resolved_best_bid = (
         None
@@ -970,7 +1175,7 @@ def _contract(
         momentum_aligned_with_direction=momentum_aligned_with_direction,
         trend_momentum_confirmed=trend_momentum_confirmed,
         range_position_15m=range_position_15m,
-        classification_reason="test_classification",
+        classification_reason=classification_reason,
         confidence_reason="test_confidence",
         utc_hour=12,
     )
@@ -1077,6 +1282,11 @@ class _Settings:
     live_require_trend_momentum_confirmation: bool = False
     live_require_reversal_range_position: bool = False
     live_min_reversal_range_position: Decimal = Decimal("0.50")
+    live_block_impulse_override_from_chop: bool = False
+    live_impulse_override_require_momentum_alignment: bool = False
+    live_impulse_override_require_range_position: bool = False
+    live_impulse_override_min_recent_return_bps: Decimal | None = None
+    live_trend_momentum_min_recent_return_bps: Decimal | None = None
 
 
 class _FakeBalanceClient:
