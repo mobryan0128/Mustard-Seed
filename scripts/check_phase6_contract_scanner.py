@@ -206,6 +206,7 @@ def _validate_bias_diagnostics_copied_to_ranked_contract(scanner: ContractScanne
         "classification_reason": "confirmed_matching_direction_returns",
         "confidence_reason": "trend_both_returns_at_3x_chop",
         "utc_hour": 12,
+        "opportunity_source": "directional",
     }
     for key, value in expected.items():
         if getattr(btc_contract, key) != value:

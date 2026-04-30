@@ -881,6 +881,7 @@ def _settings(
         live_trading_enabled=live_flags_present,
         live_kill_switch_active=False,
         live_runner_execution_enabled=live_runner_execution_enabled,
+        live_opportunity_mode="directional",
         live_max_order_count=1,
         live_max_open_positions=1,
         live_min_entry_price_dollars=Decimal("0"),

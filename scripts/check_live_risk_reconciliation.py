@@ -19,7 +19,7 @@ from kalshi_bot.clients.kalshi_client import (  # noqa: E402
     KalshiOrderRequest,
     KalshiPositionPage,
 )
-from kalshi_bot.config.settings import load_settings  # noqa: E402
+from kalshi_bot.config.settings import SettingsError, load_settings  # noqa: E402
 from kalshi_bot.contracts.contract_scorer import ContractScore  # noqa: E402
 from kalshi_bot.contracts.contract_scanner import (  # noqa: E402
     ContractScanSnapshot,
@@ -41,6 +41,7 @@ def main() -> int:
     failures: list[str] = []
     failures.extend(_validate_settings_defaults())
     failures.extend(_validate_settings_overrides())
+    failures.extend(_validate_invalid_live_opportunity_mode_fails())
     failures.extend(_validate_live_order_count_cap_override())
     failures.extend(_validate_one_live_position_blocks_default_cap())
     failures.extend(_validate_one_live_position_allowed_with_cap_two())
@@ -86,6 +87,10 @@ def _validate_settings_defaults() -> list[str]:
         failures.append(
             "default live_max_execution_spread_dollars="
             f"{settings.live_max_execution_spread_dollars}"
+        )
+    if settings.live_opportunity_mode != "directional":
+        failures.append(
+            f"default live_opportunity_mode={settings.live_opportunity_mode}"
         )
     if settings.live_require_momentum_alignment:
         failures.append("default live_require_momentum_alignment=True")
@@ -134,6 +139,7 @@ def _validate_settings_overrides() -> list[str]:
             + "LIVE_MIN_ENTRY_PRICE_DOLLARS=0.25\n"
             + "LIVE_MAX_ENTRY_PRICE_DOLLARS=0.850\n"
             + "LIVE_MAX_EXECUTION_SPREAD_DOLLARS=0.150\n"
+            + "LIVE_OPPORTUNITY_MODE=hybrid\n"
             + "LIVE_REQUIRE_MOMENTUM_ALIGNMENT=true\n"
             + "LIVE_REQUIRE_TREND_MOMENTUM_CONFIRMATION=true\n"
             + "LIVE_REQUIRE_REVERSAL_RANGE_POSITION=true\n"
@@ -168,6 +174,10 @@ def _validate_settings_overrides() -> list[str]:
         failures.append(
             "override live_max_execution_spread_dollars="
             f"{settings.live_max_execution_spread_dollars}"
+        )
+    if settings.live_opportunity_mode != "hybrid":
+        failures.append(
+            f"override live_opportunity_mode={settings.live_opportunity_mode}"
         )
     if not settings.live_require_momentum_alignment:
         failures.append("override live_require_momentum_alignment=False")
@@ -204,6 +214,20 @@ def _validate_settings_overrides() -> list[str]:
             f"{settings.live_max_total_exposure_dollars}"
         )
     return failures
+
+
+def _validate_invalid_live_opportunity_mode_fails() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        env_path = Path(temp_dir) / ".env"
+        env_path.write_text(
+            _base_env() + "\nLIVE_OPPORTUNITY_MODE=chart-only\n",
+            encoding="utf-8",
+        )
+        try:
+            load_settings(env_path)
+        except SettingsError:
+            return []
+    return ["invalid LIVE_OPPORTUNITY_MODE did not fail"]
 
 
 def _validate_live_order_count_cap_override() -> list[str]:

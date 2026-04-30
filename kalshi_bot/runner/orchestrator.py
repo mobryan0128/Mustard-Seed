@@ -30,10 +30,12 @@ from kalshi_bot.market.crypto_market_discovery import (
     CryptoMarketDiscovery,
     CryptoMarketDiscoveryError,
     CryptoMarketDiscoverySnapshot,
+    DiscoveredCryptoMarket,
 )
 from kalshi_bot.market.market_state_cache import MarketStateCache, MarketStateSnapshot
 from kalshi_bot.observability.logger import StructuredLogger
 from kalshi_bot.observability.replay_engine import ReplayEngine
+from kalshi_bot.opportunity.mispricing_scanner import scan_mispricing_opportunities
 from kalshi_bot.risk.risk_manager import RiskManager
 
 
@@ -176,6 +178,9 @@ class KalshiBotRunner:
             if settings.auto_market_discovery_enabled
             else dict(settings.contract_scanner_product_markets)
         )
+        self._active_discovered_markets = _manual_discovered_markets(
+            self._active_product_markets
+        )
         self._market_tickers = _flatten_product_markets(self._active_product_markets)
 
     @classmethod
@@ -309,7 +314,8 @@ class KalshiBotRunner:
             cycle_number=cycle_number,
             kalshi_result=kalshi_result,
         )
-        bias_snapshot = self._bias_engine.ingest(self._crypto_feed_client.snapshot())
+        crypto_snapshot = self._crypto_feed_client.snapshot()
+        bias_snapshot = self._bias_engine.ingest(crypto_snapshot)
         market_snapshot = self._market_state_cache.snapshot()
         if (
             self._live_execution_coordinator is not None
@@ -325,7 +331,12 @@ class KalshiBotRunner:
             )
         contract_scan_snapshot = self._scan_contracts(
             bias_snapshot=bias_snapshot,
+            crypto_snapshot=crypto_snapshot,
             market_snapshot=market_snapshot,
+        )
+        self._log_mispricing_opportunities(
+            cycle_number=cycle_number,
+            contract_scan_snapshot=contract_scan_snapshot,
         )
         simulation_snapshot = _empty_simulation_snapshot()
         if self._simulation_engine is not None:
@@ -517,6 +528,7 @@ class KalshiBotRunner:
             )
 
         self._active_product_markets = next_product_markets
+        self._active_discovered_markets = snapshot.discovered_markets
         self._market_tickers = next_tickers
         self._contract_scanner = (
             ContractScanner(product_markets=next_product_markets)
@@ -558,6 +570,7 @@ class KalshiBotRunner:
                     "open_time": market.open_time,
                     "close_time": market.close_time,
                     "expiration_time": market.expiration_time,
+                    "contract_target_price": market.contract_target_price,
                 }
                 for market in snapshot.discovered_markets
             ),
@@ -573,13 +586,67 @@ class KalshiBotRunner:
         self,
         *,
         bias_snapshot: BiasSnapshot,
+        crypto_snapshot: Any,
         market_snapshot: MarketStateSnapshot,
     ) -> ContractScanSnapshot:
-        if self._contract_scanner is None:
-            return ContractScanSnapshot(ranked_contracts=(), skipped_contracts=())
-        return self._contract_scanner.scan(
-            bias_snapshot=bias_snapshot,
+        opportunity_mode = getattr(
+            self._settings,
+            "live_opportunity_mode",
+            "directional",
+        )
+        directional_snapshot = ContractScanSnapshot(
+            ranked_contracts=(),
+            skipped_contracts=(),
+        )
+        if (
+            opportunity_mode in {"directional", "hybrid"}
+            and self._contract_scanner is not None
+        ):
+            directional_snapshot = self._contract_scanner.scan(
+                bias_snapshot=bias_snapshot,
+                market_snapshot=market_snapshot,
+            )
+        if opportunity_mode == "directional":
+            return directional_snapshot
+
+        mispricing_snapshot = scan_mispricing_opportunities(
+            discovered_markets=self._active_discovered_markets,
+            crypto_snapshot=crypto_snapshot,
             market_snapshot=market_snapshot,
+            min_entry_price=getattr(
+                self._settings,
+                "live_min_entry_price_dollars",
+                Decimal("0"),
+            ),
+            max_entry_price=getattr(
+                self._settings,
+                "live_max_entry_price_dollars",
+                Decimal("0.800"),
+            ),
+            max_execution_spread_dollars=getattr(
+                self._settings,
+                "live_max_execution_spread_dollars",
+                Decimal("0.100"),
+            ),
+        )
+        if opportunity_mode == "mispricing":
+            return mispricing_snapshot
+
+        ranked_contracts = tuple(
+            sorted(
+                (
+                    *mispricing_snapshot.ranked_contracts,
+                    *directional_snapshot.ranked_contracts,
+                ),
+                key=_hybrid_rank_key,
+            )
+        )
+        return ContractScanSnapshot(
+            ranked_contracts=ranked_contracts,
+            skipped_contracts=(
+                *mispricing_snapshot.skipped_contracts,
+                *directional_snapshot.skipped_contracts,
+            ),
         )
 
     def _status(
@@ -862,9 +929,93 @@ class KalshiBotRunner:
             payload=payload,
         )
 
+    def _log_mispricing_opportunities(
+        self,
+        *,
+        cycle_number: int,
+        contract_scan_snapshot: ContractScanSnapshot,
+    ) -> None:
+        for contract in contract_scan_snapshot.ranked_contracts:
+            if getattr(contract, "opportunity_source", None) != "mispricing":
+                continue
+            self._log_cycle_event(
+                "mispricing_opportunity_selected",
+                {
+                    "cycle_number": cycle_number,
+                    **_opportunity_payload(contract),
+                },
+            )
+        for contract in contract_scan_snapshot.skipped_contracts:
+            if getattr(contract, "opportunity_source", None) != "mispricing":
+                continue
+            self._log_cycle_event(
+                "mispricing_opportunity_skipped",
+                {
+                    "cycle_number": cycle_number,
+                    **_opportunity_payload(contract),
+                },
+            )
+
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _manual_discovered_markets(
+    product_markets: dict[str, tuple[str, ...]],
+) -> tuple[DiscoveredCryptoMarket, ...]:
+    return tuple(
+        DiscoveredCryptoMarket(
+            product_id=product_id,
+            series_ticker="",
+            market_ticker=market_ticker,
+            close_time=None,
+            open_time=None,
+            expiration_time=None,
+        )
+        for product_id, market_tickers in product_markets.items()
+        for market_ticker in market_tickers
+    )
+
+
+def _hybrid_rank_key(contract) -> tuple[object, ...]:  # noqa: ANN001
+    if getattr(contract, "opportunity_source", None) == "mispricing":
+        edge_bps = getattr(contract, "edge_bps", None) or Decimal("0")
+        executable_price = getattr(contract, "executable_price", None) or Decimal("1")
+        spread_width = contract.best_ask - contract.best_bid
+        return (
+            0,
+            -edge_bps,
+            executable_price,
+            spread_width,
+            -contract.score.top_of_book_liquidity,
+            -contract.score.dollar_volume,
+            contract.market_ticker,
+        )
+    return (1, *contract.score.ranking_key(), contract.market_ticker)
+
+
+def _opportunity_payload(item) -> dict[str, object]:  # noqa: ANN001
+    return {
+        "product_id": getattr(item, "product_id", None),
+        "market_ticker": getattr(item, "market_ticker", None),
+        "opportunity_source": getattr(item, "opportunity_source", None),
+        "external_price": getattr(item, "external_price", None),
+        "external_price_timestamp": getattr(item, "external_price_timestamp", None),
+        "contract_target_price": getattr(item, "contract_target_price", None),
+        "distance_to_target": getattr(item, "distance_to_target", None),
+        "implied_side": getattr(item, "implied_side", None),
+        "kalshi_yes_bid": getattr(item, "kalshi_yes_bid", None),
+        "kalshi_yes_ask": getattr(item, "kalshi_yes_ask", None),
+        "kalshi_no_bid": getattr(item, "kalshi_no_bid", None),
+        "kalshi_no_ask": getattr(item, "kalshi_no_ask", None),
+        "executable_price": getattr(item, "executable_price", None),
+        "edge_bps": getattr(item, "edge_bps", None),
+        "lag_detected": getattr(item, "lag_detected", None),
+        "reason_selected": getattr(item, "reason_selected", None),
+        "reason_skipped": getattr(item, "reason_skipped", None),
+        "reason": getattr(item, "reason", None),
+    }
 
 
 def _empty_simulation_snapshot() -> SimulationSnapshot:

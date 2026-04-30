@@ -63,6 +63,7 @@ def main() -> int:
     failures.extend(_validate_reversal_range_gate_skips_below_minimum())
     failures.extend(_validate_reversal_range_gate_allows_at_minimum())
     failures.extend(_validate_signal_gate_missing_data_skips_when_enabled())
+    failures.extend(_validate_mispricing_bypasses_directional_signal_gates())
     failures.extend(_validate_impulse_override_default_allows_intent())
     failures.extend(_validate_impulse_override_block_skips())
     failures.extend(_validate_impulse_override_momentum_missing_data_skips())
@@ -874,6 +875,77 @@ def _validate_signal_gate_missing_data_skips_when_enabled() -> list[str]:
         )
 
 
+def _validate_mispricing_bypasses_directional_signal_gates() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            balance_payload={"balance": 25000},
+            live_require_momentum_alignment=True,
+            live_require_trend_momentum_confirmation=True,
+            live_require_reversal_range_position=True,
+            live_block_impulse_override_from_chop=True,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    structure="mispricing",
+                    classification_reason="impulse_override_from_chop",
+                    midpoint=Decimal("0.45"),
+                    best_bid=Decimal("0.40"),
+                    best_ask=Decimal("0.50"),
+                    recent_return_bps=None,
+                    momentum_aligned_with_direction=None,
+                    trend_momentum_confirmed=False,
+                    opportunity_source="mispricing",
+                    external_price=Decimal("101"),
+                    external_price_timestamp="2026-04-23T12:00:01+00:00",
+                    contract_target_price=Decimal("100"),
+                    distance_to_target=Decimal("1"),
+                    implied_side="yes",
+                    kalshi_yes_bid=Decimal("0.40"),
+                    kalshi_yes_ask=Decimal("0.50"),
+                    kalshi_no_bid=Decimal("0.50"),
+                    kalshi_no_ask=Decimal("0.60"),
+                    executable_price=Decimal("0.50"),
+                    edge_bps=Decimal("100"),
+                    lag_detected=True,
+                    reason_selected="mispricing_edge_available",
+                )
+            ),
+            cycle_number=72,
+        )
+        failures: list[str] = []
+        if len(intents) != 1:
+            failures.append(
+                f"mispricing bypass intent count={len(intents)} expected=1"
+            )
+            return failures
+        failures.extend(
+            _assert_event_payload(
+                temp_path,
+                "live_intent_created",
+                {
+                    "opportunity_source": "mispricing",
+                    "edge_bps": "100",
+                    "reason_selected": "mispricing_edge_available",
+                },
+            )
+        )
+        failures.extend(
+            _assert_event_payload(
+                temp_path,
+                "executable_price_selected",
+                {
+                    "opportunity_source": "mispricing",
+                    "edge_bps": "100",
+                    "executable_price": "0.50",
+                },
+            )
+        )
+        return failures
+
+
 def _validate_impulse_override_default_allows_intent() -> list[str]:
     with TemporaryDirectory() as temp_dir:
         coordinator = _coordinator(Path(temp_dir), balance_payload={"balance": 25000})
@@ -1137,6 +1209,21 @@ def _contract(
     trend_momentum_confirmed: bool | None = True,
     range_position_15m: Decimal | None = Decimal("0.75"),
     classification_reason: str = "test_classification",
+    opportunity_source: str | None = None,
+    external_price: Decimal | None = None,
+    external_price_timestamp: str | None = None,
+    contract_target_price: Decimal | None = None,
+    distance_to_target: Decimal | None = None,
+    implied_side: str | None = None,
+    kalshi_yes_bid: Decimal | None = None,
+    kalshi_yes_ask: Decimal | None = None,
+    kalshi_no_bid: Decimal | None = None,
+    kalshi_no_ask: Decimal | None = None,
+    executable_price: Decimal | None = None,
+    edge_bps: Decimal | None = None,
+    lag_detected: bool | None = None,
+    reason_selected: str | None = None,
+    reason_skipped: str | None = None,
 ) -> ScannedContract:
     resolved_best_bid = (
         None
@@ -1178,6 +1265,21 @@ def _contract(
         classification_reason=classification_reason,
         confidence_reason="test_confidence",
         utc_hour=12,
+        opportunity_source=opportunity_source,
+        external_price=external_price,
+        external_price_timestamp=external_price_timestamp,
+        contract_target_price=contract_target_price,
+        distance_to_target=distance_to_target,
+        implied_side=implied_side,
+        kalshi_yes_bid=kalshi_yes_bid,
+        kalshi_yes_ask=kalshi_yes_ask,
+        kalshi_no_bid=kalshi_no_bid,
+        kalshi_no_ask=kalshi_no_ask,
+        executable_price=executable_price,
+        edge_bps=edge_bps,
+        lag_detected=lag_detected,
+        reason_selected=reason_selected,
+        reason_skipped=reason_skipped,
     )
 
 
@@ -1267,6 +1369,26 @@ def _assert_skip_payload(
         if payload.get(key) != value:
             failures.append(
                 f"{expected.get('reason')} {key}={payload.get(key)} expected={value}"
+            )
+    return failures
+
+
+def _assert_event_payload(
+    temp_path: Path,
+    event_type: str,
+    expected: dict[str, object],
+) -> list[str]:
+    payload = _first_event_payload(
+        _jsonl_records(temp_path / "runtime.jsonl"),
+        event_type=event_type,
+    )
+    if payload is None:
+        return [f"{event_type} log missing"]
+    failures: list[str] = []
+    for key, value in expected.items():
+        if payload.get(key) != value:
+            failures.append(
+                f"{event_type} {key}={payload.get(key)} expected={value}"
             )
     return failures
 

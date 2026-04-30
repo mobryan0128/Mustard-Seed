@@ -44,6 +44,21 @@ class ScannedContract:
     classification_reason: str | None = None
     confidence_reason: str | None = None
     utc_hour: int | None = None
+    opportunity_source: str | None = None
+    external_price: Decimal | None = None
+    external_price_timestamp: str | None = None
+    contract_target_price: Decimal | None = None
+    distance_to_target: Decimal | None = None
+    implied_side: str | None = None
+    kalshi_yes_bid: Decimal | None = None
+    kalshi_yes_ask: Decimal | None = None
+    kalshi_no_bid: Decimal | None = None
+    kalshi_no_ask: Decimal | None = None
+    executable_price: Decimal | None = None
+    edge_bps: Decimal | None = None
+    lag_detected: bool | None = None
+    reason_selected: str | None = None
+    reason_skipped: str | None = None
 
 
 @dataclass(frozen=True)
@@ -53,6 +68,21 @@ class SkippedContract:
     product_id: str
     market_ticker: str
     reason: str
+    opportunity_source: str | None = None
+    external_price: Decimal | None = None
+    external_price_timestamp: str | None = None
+    contract_target_price: Decimal | None = None
+    distance_to_target: Decimal | None = None
+    implied_side: str | None = None
+    kalshi_yes_bid: Decimal | None = None
+    kalshi_yes_ask: Decimal | None = None
+    kalshi_no_bid: Decimal | None = None
+    kalshi_no_ask: Decimal | None = None
+    executable_price: Decimal | None = None
+    edge_bps: Decimal | None = None
+    lag_detected: bool | None = None
+    reason_selected: str | None = None
+    reason_skipped: str | None = None
 
 
 @dataclass(frozen=True)
@@ -167,6 +197,7 @@ class ContractScanner:
                             None,
                         ),
                         utc_hour=getattr(bias_state, "utc_hour", None),
+                        opportunity_source="directional",
                     )
                 )
 

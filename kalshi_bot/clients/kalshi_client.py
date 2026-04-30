@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -17,6 +18,26 @@ BALANCE_PATH = "/portfolio/balance"
 MARKETS_PATH = "/markets"
 ORDERS_PATH = "/portfolio/orders"
 POSITIONS_PATH = "/portfolio/positions"
+TARGET_PRICE_KEYS = (
+    "contract_target_price",
+    "target_price",
+    "strike_price",
+    "strike",
+    "floor_strike",
+    "cap_strike",
+)
+TARGET_TEXT_KEYS = (
+    "title",
+    "subtitle",
+    "yes_sub_title",
+    "no_sub_title",
+    "rules_primary",
+    "rules_secondary",
+)
+TARGET_PRICE_PATTERN = re.compile(
+    r"(?:\$|USD\s*)([0-9][0-9,]*(?:\.[0-9]+)?)|([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]+)?)",
+    re.IGNORECASE,
+)
 
 
 class KalshiClientError(RuntimeError):
@@ -104,6 +125,11 @@ class KalshiMarketSummary:
     latest_expiration_time: str | None
     yes_bid_dollars: Decimal | None
     yes_ask_dollars: Decimal | None
+    title: str | None = None
+    subtitle: str | None = None
+    yes_sub_title: str | None = None
+    no_sub_title: str | None = None
+    contract_target_price: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -383,7 +409,50 @@ def _normalize_market_payload(payload: object) -> KalshiMarketSummary:
         latest_expiration_time=_optional_text(payload.get("latest_expiration_time")),
         yes_bid_dollars=_optional_decimal(payload.get("yes_bid_dollars")),
         yes_ask_dollars=_optional_decimal(payload.get("yes_ask_dollars")),
+        title=_optional_text(payload.get("title")),
+        subtitle=_optional_text(payload.get("subtitle")),
+        yes_sub_title=_optional_text(payload.get("yes_sub_title")),
+        no_sub_title=_optional_text(payload.get("no_sub_title")),
+        contract_target_price=_target_price_from_market_payload(payload),
     )
+
+
+def _target_price_from_market_payload(payload: dict[str, object]) -> Decimal | None:
+    for key in TARGET_PRICE_KEYS:
+        parsed = _optional_target_decimal(payload.get(key))
+        if parsed is not None:
+            return parsed
+
+    for key in TARGET_TEXT_KEYS:
+        text = _optional_text(payload.get(key))
+        if text is None:
+            continue
+        parsed = _target_price_from_text(text)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _target_price_from_text(value: str) -> Decimal | None:
+    match = TARGET_PRICE_PATTERN.search(value)
+    if match is None:
+        return None
+    return _optional_target_decimal(match.group(1) or match.group(2))
+
+
+def _optional_target_decimal(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().replace("$", "").replace(",", "")
+    if not normalized:
+        return None
+    try:
+        parsed = Decimal(normalized)
+    except (InvalidOperation, ValueError):
+        return None
+    if parsed <= 0:
+        return None
+    return parsed
 
 
 def _market_payload_count(markets_payload: object) -> int | None:

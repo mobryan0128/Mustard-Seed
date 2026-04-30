@@ -278,6 +278,7 @@ class LiveExecutionCoordinator:
                     "market_ticker": contract.market_ticker,
                     "direction": contract.direction,
                     "side": "yes" if contract.direction == "up" else "no",
+                    **_opportunity_diagnostics_payload(contract),
                     "executable_price": executable_price,
                     "best_bid": contract.best_bid,
                     "best_ask": contract.best_ask,
@@ -352,6 +353,7 @@ class LiveExecutionCoordinator:
                     "live_risk_source": live_risk_state.source,
                     "max_total_exposure_dollars": max_total_exposure_dollars,
                     "max_total_exposure_source": max_total_exposure_source,
+                    **_opportunity_diagnostics_payload(contract),
                     "entry_price": executable_price,
                     "executable_price": executable_price,
                 },
@@ -1542,6 +1544,9 @@ def _evaluate_signal_gates(
         **_signal_diagnostics_payload(contract, settings=settings),
         "structure_gate_candidate_passed": False,
     }
+    if getattr(contract, "opportunity_source", None) == "mispricing":
+        return None, details
+
     impulse_skip_reason = _apply_impulse_override_signal_gate(
         contract,
         settings=settings,
@@ -1774,6 +1779,36 @@ def _signal_diagnostics_payload(
         "trend_momentum_threshold": trend_momentum_threshold,
         "recent_return_required_bps": recent_return_required_bps,
         "trend_momentum_confirmed_reason": trend_confirmed_reason,
+        **_opportunity_diagnostics_payload(contract),
+    }
+
+
+def _opportunity_diagnostics_payload(contract: ScannedContract) -> dict[str, object]:
+    opportunity_source = getattr(contract, "opportunity_source", None)
+    if opportunity_source != "mispricing":
+        if opportunity_source is None:
+            return {}
+        return {"opportunity_source": opportunity_source}
+    return {
+        "opportunity_source": opportunity_source,
+        "external_price": getattr(contract, "external_price", None),
+        "external_price_timestamp": getattr(
+            contract,
+            "external_price_timestamp",
+            None,
+        ),
+        "contract_target_price": getattr(contract, "contract_target_price", None),
+        "distance_to_target": getattr(contract, "distance_to_target", None),
+        "implied_side": getattr(contract, "implied_side", None),
+        "kalshi_yes_bid": getattr(contract, "kalshi_yes_bid", None),
+        "kalshi_yes_ask": getattr(contract, "kalshi_yes_ask", None),
+        "kalshi_no_bid": getattr(contract, "kalshi_no_bid", None),
+        "kalshi_no_ask": getattr(contract, "kalshi_no_ask", None),
+        "executable_price": getattr(contract, "executable_price", None),
+        "edge_bps": getattr(contract, "edge_bps", None),
+        "lag_detected": getattr(contract, "lag_detected", None),
+        "reason_selected": getattr(contract, "reason_selected", None),
+        "reason_skipped": getattr(contract, "reason_skipped", None),
     }
 
 

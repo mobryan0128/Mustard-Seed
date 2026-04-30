@@ -58,6 +58,7 @@ DEFAULT_LIVE_VALIDATION_CLIENT_ORDER_ID_PREFIX = "live-smoke"
 DEFAULT_LIVE_TRADING_ENABLED = False
 DEFAULT_LIVE_KILL_SWITCH_ACTIVE = False
 DEFAULT_LIVE_RUNNER_EXECUTION_ENABLED = False
+DEFAULT_LIVE_OPPORTUNITY_MODE = "directional"
 DEFAULT_LIVE_MAX_ORDER_COUNT = 1
 DEFAULT_LIVE_MAX_OPEN_POSITIONS = 1
 DEFAULT_LIVE_MIN_ENTRY_PRICE_DOLLARS = Decimal("0")
@@ -162,6 +163,7 @@ class KalshiSettings:
     live_trading_enabled: bool
     live_kill_switch_active: bool
     live_runner_execution_enabled: bool
+    live_opportunity_mode: str
     live_max_order_count: int
     live_max_open_positions: int
     live_min_entry_price_dollars: Decimal
@@ -408,6 +410,9 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         values.get("LIVE_RUNNER_EXECUTION_ENABLED"),
         DEFAULT_LIVE_RUNNER_EXECUTION_ENABLED,
         "LIVE_RUNNER_EXECUTION_ENABLED",
+    )
+    live_opportunity_mode = _parse_live_opportunity_mode(
+        values.get("LIVE_OPPORTUNITY_MODE"),
     )
     live_max_order_count = _parse_positive_int(
         values.get("LIVE_MAX_ORDER_COUNT"),
@@ -683,6 +688,7 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_trading_enabled=live_trading_enabled,
         live_kill_switch_active=live_kill_switch_active,
         live_runner_execution_enabled=live_runner_execution_enabled,
+        live_opportunity_mode=live_opportunity_mode,
         live_max_order_count=live_max_order_count,
         live_max_open_positions=live_max_open_positions,
         live_min_entry_price_dollars=live_min_entry_price_dollars,
@@ -827,6 +833,7 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_TRADING_ENABLED",
         "LIVE_KILL_SWITCH_ACTIVE",
         "LIVE_RUNNER_EXECUTION_ENABLED",
+        "LIVE_OPPORTUNITY_MODE",
         "LIVE_MAX_ORDER_COUNT",
         "LIVE_MAX_OPEN_POSITIONS",
         "LIVE_MIN_ENTRY_PRICE_DOLLARS",
@@ -939,6 +946,17 @@ def _parse_bool(value: str | None, default: bool, key: str) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     raise SettingsError(f"{key} must be a boolean-like value.")
+
+
+def _parse_live_opportunity_mode(value: str | None) -> str:
+    if value is None or not value.strip():
+        return DEFAULT_LIVE_OPPORTUNITY_MODE
+    normalized = value.strip().lower()
+    if normalized not in {"directional", "mispricing", "hybrid"}:
+        raise SettingsError(
+            "LIVE_OPPORTUNITY_MODE must be directional, mispricing, or hybrid."
+        )
+    return normalized
 
 
 def _parse_path(value: str | None, default: Path) -> Path:
