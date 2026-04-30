@@ -49,6 +49,7 @@ class ScannedContract:
     external_price_timestamp: str | None = None
     contract_target_price: Decimal | None = None
     target_source_field: str | None = None
+    timestamp_source: str | None = None
     distance_to_target: Decimal | None = None
     implied_side: str | None = None
     kalshi_yes_bid: Decimal | None = None
@@ -79,6 +80,7 @@ class SkippedContract:
     contract_target_price: Decimal | None = None
     target_source_field: str | None = None
     market_as_of: str | None = None
+    timestamp_source: str | None = None
     distance_to_target: Decimal | None = None
     implied_side: str | None = None
     kalshi_yes_bid: Decimal | None = None

@@ -653,6 +653,11 @@ class KalshiBotRunner:
                 "live_mispricing_max_kalshi_quote_age_ms",
                 None,
             ),
+            allow_missing_kalshi_timestamp=getattr(
+                self._settings,
+                "live_mispricing_allow_missing_kalshi_timestamp",
+                False,
+            ),
             cycle_started_at=cycle_started_at,
         )
         if opportunity_mode == "mispricing":
@@ -1031,6 +1036,7 @@ def _opportunity_payload(item) -> dict[str, object]:  # noqa: ANN001
         "contract_target_price": getattr(item, "contract_target_price", None),
         "target_source_field": getattr(item, "target_source_field", None),
         "market_as_of": getattr(item, "market_as_of", None),
+        "timestamp_source": getattr(item, "timestamp_source", None),
         "distance_to_target": getattr(item, "distance_to_target", None),
         "implied_side": getattr(item, "implied_side", None),
         "kalshi_yes_bid": getattr(item, "kalshi_yes_bid", None),

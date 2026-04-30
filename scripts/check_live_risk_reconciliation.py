@@ -136,6 +136,8 @@ def _validate_settings_defaults() -> list[str]:
             "default live_mispricing_max_kalshi_quote_age_ms="
             f"{settings.live_mispricing_max_kalshi_quote_age_ms}"
         )
+    if settings.live_mispricing_allow_missing_kalshi_timestamp:
+        failures.append("default live_mispricing_allow_missing_kalshi_timestamp=True")
     if settings.live_max_total_exposure_dollars is not None:
         failures.append(
             "default live_max_total_exposure_dollars="
@@ -167,6 +169,7 @@ def _validate_settings_overrides() -> list[str]:
             + "LIVE_MISPRICING_MIN_EDGE_BPS=5.5\n"
             + "LIVE_MISPRICING_MAX_EXTERNAL_PRICE_AGE_MS=1500\n"
             + "LIVE_MISPRICING_MAX_KALSHI_QUOTE_AGE_MS=2000\n"
+            + "LIVE_MISPRICING_ALLOW_MISSING_KALSHI_TIMESTAMP=true\n"
             + "LIVE_MAX_TOTAL_EXPOSURE_DOLLARS=12.34\n",
             encoding="utf-8",
         )
@@ -241,6 +244,8 @@ def _validate_settings_overrides() -> list[str]:
             "override live_mispricing_max_kalshi_quote_age_ms="
             f"{settings.live_mispricing_max_kalshi_quote_age_ms}"
         )
+    if not settings.live_mispricing_allow_missing_kalshi_timestamp:
+        failures.append("override live_mispricing_allow_missing_kalshi_timestamp=False")
     if settings.live_max_total_exposure_dollars != Decimal("12.34"):
         failures.append(
             "override live_max_total_exposure_dollars="

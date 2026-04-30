@@ -900,6 +900,7 @@ def _settings(
         live_mispricing_min_edge_bps=None,
         live_mispricing_max_external_price_age_ms=None,
         live_mispricing_max_kalshi_quote_age_ms=None,
+        live_mispricing_allow_missing_kalshi_timestamp=False,
         live_profit_trailing_exit_enabled=False,
         live_profit_trailing_activation_price=Decimal("0.90"),
         live_profit_trailing_drop_dollars=Decimal("0.01"),

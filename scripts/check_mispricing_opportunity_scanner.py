@@ -44,6 +44,7 @@ def main() -> int:
     failures.extend(_validate_min_edge_gate_skips_when_configured())
     failures.extend(_validate_external_freshness_gate_skips_stale_price())
     failures.extend(_validate_kalshi_freshness_gate_skips_missing_quote_time())
+    failures.extend(_validate_kalshi_timestamp_fallback_requires_opt_in())
     failures.extend(_validate_kalshi_epoch_timestamp_age_ms())
     failures.extend(_validate_heartbeat_does_not_refresh_price_timestamp())
 
@@ -82,6 +83,7 @@ def _validate_candidate_without_bias_state() -> list[str]:
         "target_source_field": "subtitle",
         "external_price_age_ms": 1000,
         "kalshi_quote_age_ms": 0,
+        "timestamp_source": "exchange_time",
         "cycle_started_at": "2026-04-23T12:00:02+00:00",
     }
     for key, value in expected.items():
@@ -221,7 +223,53 @@ def _validate_kalshi_freshness_gate_skips_missing_quote_time() -> list[str]:
         },
         max_kalshi_quote_age_ms=500,
     )
-    return _assert_skip(snapshot, "missing_kalshi_timestamp")
+    failures = _assert_skip(snapshot, "missing_kalshi_timestamp")
+    if not snapshot.skipped_contracts:
+        return failures
+    skipped = snapshot.skipped_contracts[0]
+    if skipped.timestamp_source != "missing":
+        failures.append(f"timestamp_source={skipped.timestamp_source}")
+    if skipped.kalshi_yes_bid != Decimal("0.40"):
+        failures.append(f"skip yes_bid={skipped.kalshi_yes_bid}")
+    if skipped.kalshi_yes_ask != Decimal("0.45"):
+        failures.append(f"skip yes_ask={skipped.kalshi_yes_ask}")
+    return failures
+
+
+def _validate_kalshi_timestamp_fallback_requires_opt_in() -> list[str]:
+    blocked = _scan(
+        markets=(_market("KXBTC15M-FALLBACKBLOCK", target=Decimal("100")),),
+        external_price=Decimal("101"),
+        tickers={
+            "KXBTC15M-FALLBACKBLOCK": _ticker(
+                "KXBTC15M-FALLBACKBLOCK",
+                exchange_time=None,
+            ),
+        },
+        max_kalshi_quote_age_ms=500,
+    )
+    failures = _assert_skip(blocked, "missing_kalshi_timestamp")
+    allowed = _scan(
+        markets=(_market("KXBTC15M-FALLBACKALLOW", target=Decimal("100")),),
+        external_price=Decimal("101"),
+        tickers={
+            "KXBTC15M-FALLBACKALLOW": _ticker(
+                "KXBTC15M-FALLBACKALLOW",
+                exchange_time=None,
+            ),
+        },
+        max_kalshi_quote_age_ms=500,
+        allow_missing_kalshi_timestamp=True,
+    )
+    if len(allowed.ranked_contracts) != 1:
+        failures.append(f"fallback ranked={len(allowed.ranked_contracts)}")
+        return failures
+    contract = allowed.ranked_contracts[0]
+    if contract.timestamp_source != "missing":
+        failures.append(f"fallback timestamp_source={contract.timestamp_source}")
+    if contract.kalshi_quote_age_ms is not None:
+        failures.append(f"fallback age={contract.kalshi_quote_age_ms}")
+    return failures
 
 
 def _validate_kalshi_epoch_timestamp_age_ms() -> list[str]:
@@ -242,6 +290,8 @@ def _validate_kalshi_epoch_timestamp_age_ms() -> list[str]:
     contract = snapshot.ranked_contracts[0]
     if contract.kalshi_quote_age_ms != 1000:
         return [f"epoch quote age={contract.kalshi_quote_age_ms} expected=1000"]
+    if contract.timestamp_source != "exchange_ts":
+        return [f"epoch timestamp_source={contract.timestamp_source}"]
     return []
 
 
@@ -287,6 +337,7 @@ def _scan(
     min_edge_bps: Decimal | None = None,
     max_external_price_age_ms: int | None = None,
     max_kalshi_quote_age_ms: int | None = None,
+    allow_missing_kalshi_timestamp: bool = False,
 ):
     products = {}
     if external_price is not None:
@@ -315,6 +366,7 @@ def _scan(
         min_edge_bps=min_edge_bps,
         max_external_price_age_ms=max_external_price_age_ms,
         max_kalshi_quote_age_ms=max_kalshi_quote_age_ms,
+        allow_missing_kalshi_timestamp=allow_missing_kalshi_timestamp,
         cycle_started_at="2026-04-23T12:00:02+00:00",
     )
 

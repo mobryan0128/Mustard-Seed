@@ -1799,6 +1799,7 @@ def _opportunity_diagnostics_payload(contract: ScannedContract) -> dict[str, obj
         "contract_target_price": getattr(contract, "contract_target_price", None),
         "target_source_field": getattr(contract, "target_source_field", None),
         "market_as_of": market_as_of,
+        "timestamp_source": getattr(contract, "timestamp_source", None),
         "distance_to_target": getattr(contract, "distance_to_target", None),
         "implied_side": getattr(contract, "implied_side", None),
         "kalshi_yes_bid": getattr(contract, "kalshi_yes_bid", None),

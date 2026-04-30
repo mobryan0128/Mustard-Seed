@@ -35,6 +35,7 @@ def scan_mispricing_opportunities(
     min_edge_bps: Decimal | None = None,
     max_external_price_age_ms: int | None = None,
     max_kalshi_quote_age_ms: int | None = None,
+    allow_missing_kalshi_timestamp: bool = False,
     cycle_started_at: str | None = None,
 ) -> ContractScanSnapshot:
     """Return mispricing candidates without applying directional-bias skips."""
@@ -57,6 +58,7 @@ def scan_mispricing_opportunities(
             min_edge_bps=min_edge_bps,
             max_external_price_age_ms=max_external_price_age_ms,
             max_kalshi_quote_age_ms=max_kalshi_quote_age_ms,
+            allow_missing_kalshi_timestamp=allow_missing_kalshi_timestamp,
             scan_time=scan_time,
             cycle_started_at=scan_started_at,
         )
@@ -90,6 +92,7 @@ def _evaluate_market(
     min_edge_bps: Decimal | None,
     max_external_price_age_ms: int | None,
     max_kalshi_quote_age_ms: int | None,
+    allow_missing_kalshi_timestamp: bool,
     scan_time: datetime,
     cycle_started_at: str,
 ) -> tuple[ScannedContract | None, SkippedContract | None]:
@@ -99,7 +102,11 @@ def _evaluate_market(
         or getattr(product_state, "source_timestamp", None)
     )
     target_price = market.contract_target_price
-    market_as_of = _market_as_of(ticker_state) if ticker_state is not None else None
+    market_as_of, timestamp_source = (
+        _market_timestamp(ticker_state)
+        if ticker_state is not None
+        else (None, "missing")
+    )
     external_price_age_ms = _age_ms(external_price_timestamp, scan_time)
     kalshi_quote_age_ms = _age_ms(market_as_of, scan_time)
     base_payload = {
@@ -109,6 +116,7 @@ def _evaluate_market(
         "contract_target_price": target_price,
         "target_source_field": market.target_source_field,
         "market_as_of": market_as_of,
+        "timestamp_source": timestamp_source,
         "external_price_age_ms": external_price_age_ms,
         "kalshi_quote_age_ms": kalshi_quote_age_ms,
         "cycle_started_at": cycle_started_at,
@@ -121,6 +129,8 @@ def _evaluate_market(
         return None, _skipped(market, "missing_external_price", base_payload)
     if ticker_state is None:
         return None, _skipped(market, "missing_market_state", base_payload)
+    quote_payload = _quote_payload(ticker_state)
+    base_payload.update(quote_payload)
     if target_price <= Decimal("0"):
         return None, _skipped(market, "invalid_contract_target_price", base_payload)
     if (
@@ -136,13 +146,15 @@ def _evaluate_market(
             base_payload,
         )
     if max_kalshi_quote_age_ms is not None and kalshi_quote_age_ms is None:
-        return None, _skipped(
-            market,
-            "missing_kalshi_timestamp",
-            base_payload,
-        )
+        if not allow_missing_kalshi_timestamp:
+            return None, _skipped(
+                market,
+                "missing_kalshi_timestamp",
+                base_payload,
+            )
     if (
         max_kalshi_quote_age_ms is not None
+        and kalshi_quote_age_ms is not None
         and kalshi_quote_age_ms > max_kalshi_quote_age_ms
     ):
         return None, _skipped(
@@ -172,8 +184,6 @@ def _evaluate_market(
             base_payload,
         )
 
-    quote_payload = _quote_payload(ticker_state)
-    base_payload.update(quote_payload)
     executable_price, side_liquidity, skip_reason = _executable_mispricing_price(
         ticker_state,
         implied_side=implied_side,
@@ -236,6 +246,7 @@ def _evaluate_market(
             external_price_timestamp=external_price_timestamp,
             contract_target_price=target_price,
             target_source_field=market.target_source_field,
+            timestamp_source=timestamp_source,
             distance_to_target=distance_to_target,
             implied_side=implied_side,
             kalshi_yes_bid=ticker_state.yes_bid_dollars,
@@ -342,6 +353,7 @@ def _skipped(
         contract_target_price=payload.get("contract_target_price"),
         target_source_field=payload.get("target_source_field"),
         market_as_of=payload.get("market_as_of"),
+        timestamp_source=payload.get("timestamp_source"),
         distance_to_target=payload.get("distance_to_target"),
         implied_side=payload.get("implied_side"),
         kalshi_yes_bid=payload.get("kalshi_yes_bid"),
@@ -359,12 +371,12 @@ def _skipped(
     )
 
 
-def _market_as_of(ticker_state: TickerState) -> str | None:
+def _market_timestamp(ticker_state: TickerState) -> tuple[str | None, str]:
     if ticker_state.exchange_time:
-        return ticker_state.exchange_time
+        return ticker_state.exchange_time, "exchange_time"
     if ticker_state.exchange_ts is not None:
-        return str(ticker_state.exchange_ts)
-    return None
+        return str(ticker_state.exchange_ts), "exchange_ts"
+    return None, "missing"
 
 
 def _age_ms(source_timestamp: str | int | None, now: datetime) -> int | None:
