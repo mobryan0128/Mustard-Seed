@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -68,6 +69,8 @@ def main() -> int:
     failures.extend(_validate_live_runner_blocked_submission_logged())
     failures.extend(_validate_live_runner_starts_without_simulation())
     failures.extend(_validate_live_runner_risk_does_not_require_live_validation())
+    failures.extend(_validate_fast_scan_requires_min_edge())
+    failures.extend(_validate_fast_scan_throttles_duplicate_submission())
 
     if failures:
         for failure in failures:
@@ -729,6 +732,97 @@ def _validate_live_runner_risk_does_not_require_live_validation() -> list[str]:
     return []
 
 
+def _validate_fast_scan_requires_min_edge() -> list[str]:
+    clock = _FakeClock()
+    live_coordinator = _FakeLiveExecutionCoordinator(
+        intents=(),
+        fast_intents=(_approved_intent("fast-edge-required"),),
+    )
+    runner, state = _build_runner(
+        live_runner_execution_enabled=True,
+        simulation_enabled=False,
+        live_execution_coordinator=live_coordinator,
+        live_opportunity_mode="mispricing",
+        live_mispricing_fast_scan_enabled=True,
+        live_mispricing_min_edge_bps=None,
+        runner_loop_interval_seconds=2.0,
+        live_mispricing_fast_scan_interval_seconds=1.0,
+        sleep_fn=clock.sleep,
+        monotonic_fn=clock.monotonic,
+    )
+    runner.run_cycles(1)
+    failures: list[str] = []
+    if live_coordinator.fast_contract_process_calls != 0:
+        failures.append(
+            "fast min-edge process calls="
+            f"{live_coordinator.fast_contract_process_calls}"
+        )
+    if state.kalshi_run_calls != 1 or state.crypto_run_calls != 1:
+        failures.append(
+            "fast min-edge run calls "
+            f"kalshi={state.kalshi_run_calls} crypto={state.crypto_run_calls}"
+        )
+    if state.log_written_ref is None:
+        return failures + ["fast min-edge missing log path"]
+    payload = _first_event_payload(
+        _jsonl_records(state.log_written_ref),
+        key="event_type",
+        value="mispricing_fast_scan_skipped",
+    )
+    if payload is None:
+        failures.append("fast min-edge skip log missing")
+    elif payload.get("reason") != "fast_scan_min_edge_required":
+        failures.append(f"fast min-edge reason={payload.get('reason')}")
+    return failures
+
+
+def _validate_fast_scan_throttles_duplicate_submission() -> list[str]:
+    clock = _FakeClock()
+    live_coordinator = _FakeLiveExecutionCoordinator(
+        intents=(),
+        fast_intents=(_approved_intent("fast-throttle"),),
+    )
+    runner, state = _build_runner(
+        live_runner_execution_enabled=True,
+        simulation_enabled=False,
+        live_execution_coordinator=live_coordinator,
+        live_opportunity_mode="mispricing",
+        live_mispricing_fast_scan_enabled=True,
+        live_mispricing_min_edge_bps=Decimal("5"),
+        runner_loop_interval_seconds=3.0,
+        live_mispricing_fast_scan_interval_seconds=1.0,
+        live_mispricing_fast_scan_cooldown_seconds=10.0,
+        live_mispricing_fast_scan_max_per_market_per_window=1,
+        sleep_fn=clock.sleep,
+        monotonic_fn=clock.monotonic,
+    )
+    runner.run_cycles(1)
+    failures: list[str] = []
+    if live_coordinator.fast_contract_process_calls < 2:
+        failures.append(
+            "fast throttle process calls="
+            f"{live_coordinator.fast_contract_process_calls}"
+        )
+    if len(live_coordinator.submit_calls) != 1:
+        failures.append(f"fast throttle submissions={len(live_coordinator.submit_calls)}")
+    if state.discovery_calls != 1:
+        failures.append(f"fast throttle discovery calls={state.discovery_calls}")
+    if state.log_written_ref is None:
+        return failures + ["fast throttle missing log path"]
+    records = _jsonl_records(state.log_written_ref)
+    payloads = _event_payloads(
+        records,
+        key="event_type",
+        value="mispricing_fast_scan_skipped",
+    )
+    if not any(
+        payload.get("reason") == "duplicate_fast_scan_submission_throttled"
+        for payload in payloads
+    ):
+        failures.append("fast throttle duplicate skip log missing")
+    return failures
+
+
 def _build_runner(
     *,
     stop_after_first_cycle: bool = False,
@@ -744,6 +838,15 @@ def _build_runner(
     simulation_enabled: bool = True,
     live_execution_coordinator=None,  # noqa: ANN001
     market_discovery_refresh_cycles: int = 2,
+    live_opportunity_mode: str = "directional",
+    live_mispricing_min_edge_bps: Decimal | None = None,
+    live_mispricing_fast_scan_enabled: bool = False,
+    live_mispricing_fast_scan_interval_seconds: float = 1.0,
+    live_mispricing_fast_scan_max_per_market_per_window: int = 1,
+    live_mispricing_fast_scan_cooldown_seconds: float = 10.0,
+    runner_loop_interval_seconds: float = 0.001,
+    sleep_fn=None,  # noqa: ANN001
+    monotonic_fn=None,  # noqa: ANN001
 ):
     temp_dir = TemporaryDirectory()
     tmp_path = Path(temp_dir.name)
@@ -756,9 +859,22 @@ def _build_runner(
             tmp_path,
             live_flags_present=live_flags_present,
             live_runner_execution_enabled=live_runner_execution_enabled,
+            live_opportunity_mode=live_opportunity_mode,
+            live_mispricing_min_edge_bps=live_mispricing_min_edge_bps,
+            live_mispricing_fast_scan_enabled=live_mispricing_fast_scan_enabled,
+            live_mispricing_fast_scan_interval_seconds=(
+                live_mispricing_fast_scan_interval_seconds
+            ),
+            live_mispricing_fast_scan_max_per_market_per_window=(
+                live_mispricing_fast_scan_max_per_market_per_window
+            ),
+            live_mispricing_fast_scan_cooldown_seconds=(
+                live_mispricing_fast_scan_cooldown_seconds
+            ),
             simulation_enabled=simulation_enabled,
             fail_fast_on_startup=fail_fast_on_startup,
             market_discovery_refresh_cycles=market_discovery_refresh_cycles,
+            runner_loop_interval_seconds=runner_loop_interval_seconds,
         ),
         market_state_cache=cache,
         kalshi_ws_client=_FakeKalshiClient(
@@ -787,14 +903,28 @@ def _build_runner(
                 tmp_path,
                 live_flags_present=live_flags_present,
                 live_runner_execution_enabled=live_runner_execution_enabled,
+                live_opportunity_mode=live_opportunity_mode,
+                live_mispricing_min_edge_bps=live_mispricing_min_edge_bps,
+                live_mispricing_fast_scan_enabled=live_mispricing_fast_scan_enabled,
+                live_mispricing_fast_scan_interval_seconds=(
+                    live_mispricing_fast_scan_interval_seconds
+                ),
+                live_mispricing_fast_scan_max_per_market_per_window=(
+                    live_mispricing_fast_scan_max_per_market_per_window
+                ),
+                live_mispricing_fast_scan_cooldown_seconds=(
+                    live_mispricing_fast_scan_cooldown_seconds
+                ),
                 simulation_enabled=simulation_enabled,
                 fail_fast_on_startup=fail_fast_on_startup,
                 market_discovery_refresh_cycles=market_discovery_refresh_cycles,
+                runner_loop_interval_seconds=runner_loop_interval_seconds,
             )
         ),
         logger=logger,
         replay_engine=replay_engine,
-        sleep_fn=lambda _: None,
+        sleep_fn=sleep_fn or (lambda _: None),
+        monotonic_fn=monotonic_fn or time.monotonic,
     )
     if runner._simulation_engine is not None:  # type: ignore[attr-defined]
         runner._simulation_engine._runner_ref = runner  # type: ignore[attr-defined]
@@ -809,8 +939,15 @@ def _settings(
     live_flags_present: bool,
     fail_fast_on_startup: bool,
     live_runner_execution_enabled: bool = False,
+    live_opportunity_mode: str = "directional",
+    live_mispricing_min_edge_bps: Decimal | None = None,
+    live_mispricing_fast_scan_enabled: bool = False,
+    live_mispricing_fast_scan_interval_seconds: float = 1.0,
+    live_mispricing_fast_scan_max_per_market_per_window: int = 1,
+    live_mispricing_fast_scan_cooldown_seconds: float = 10.0,
     simulation_enabled: bool = True,
     market_discovery_refresh_cycles: int = 2,
+    runner_loop_interval_seconds: float = 0.001,
 ) -> KalshiSettings:
     return KalshiSettings(
         env="demo",
@@ -881,7 +1018,7 @@ def _settings(
         live_trading_enabled=live_flags_present,
         live_kill_switch_active=False,
         live_runner_execution_enabled=live_runner_execution_enabled,
-        live_opportunity_mode="directional",
+        live_opportunity_mode=live_opportunity_mode,
         live_max_order_count=1,
         live_max_open_positions=1,
         live_min_entry_price_dollars=Decimal("0"),
@@ -897,16 +1034,26 @@ def _settings(
         live_impulse_override_require_range_position=False,
         live_impulse_override_min_recent_return_bps=None,
         live_trend_momentum_min_recent_return_bps=None,
-        live_mispricing_min_edge_bps=None,
+        live_mispricing_min_edge_bps=live_mispricing_min_edge_bps,
         live_mispricing_max_external_price_age_ms=None,
         live_mispricing_max_kalshi_quote_age_ms=None,
         live_mispricing_allow_missing_kalshi_timestamp=False,
+        live_mispricing_fast_scan_enabled=live_mispricing_fast_scan_enabled,
+        live_mispricing_fast_scan_interval_seconds=(
+            live_mispricing_fast_scan_interval_seconds
+        ),
+        live_mispricing_fast_scan_max_per_market_per_window=(
+            live_mispricing_fast_scan_max_per_market_per_window
+        ),
+        live_mispricing_fast_scan_cooldown_seconds=(
+            live_mispricing_fast_scan_cooldown_seconds
+        ),
         live_profit_trailing_exit_enabled=False,
         live_profit_trailing_activation_price=Decimal("0.90"),
         live_profit_trailing_drop_dollars=Decimal("0.01"),
         live_profit_exit_min_bid=Decimal("0.90"),
         runner_enabled=True,
-        runner_loop_interval_seconds=0.001,
+        runner_loop_interval_seconds=runner_loop_interval_seconds,
         runner_status_log_every_n_cycles=1,
         runner_fail_fast_on_startup=fail_fast_on_startup,
         runner_max_cycles=None,
@@ -1251,15 +1398,18 @@ class _FakeLiveExecutionCoordinator:
         self,
         *,
         intents: tuple[LiveOrderIntent, ...],
+        fast_intents: tuple[LiveOrderIntent, ...] = (),
         result_classification: str = "submitted",
         decision_reason: str | None = None,
     ) -> None:
         self._intents = intents
+        self._fast_intents = fast_intents
         self._result_classification = result_classification
         self._decision_reason = decision_reason
         self.process_calls = 0
         self.simulation_process_calls = 0
         self.contract_process_calls = 0
+        self.fast_contract_process_calls = 0
         self.submit_calls: list[LiveOrderIntent] = []
 
     def process_simulation_snapshot(self, simulation_snapshot):  # noqa: ANN001
@@ -1271,6 +1421,13 @@ class _FakeLiveExecutionCoordinator:
         self.process_calls += 1
         self.contract_process_calls += 1
         return self._intents
+
+    def process_fast_mispricing_scan_snapshot(self, contract_scan_snapshot, *, cycle_number=None):  # noqa: ANN001
+        self.process_calls += 1
+        self.fast_contract_process_calls += 1
+        if not contract_scan_snapshot.ranked_contracts:
+            return ()
+        return self._fast_intents
 
     def submit_live_order(self, intent: LiveOrderIntent):
         self.submit_calls.append(intent)
@@ -1328,7 +1485,28 @@ class _FakeDiscoveryKalshiClient:
 
 class _FakeCryptoSnapshot:
     def __init__(self) -> None:
-        self.products = {"BTC-USD": object(), "ETH-USD": object()}
+        self.products = {
+            "BTC-USD": _FakeCryptoProductState(Decimal("101")),
+            "ETH-USD": _FakeCryptoProductState(Decimal("2001")),
+        }
+
+
+@dataclass(frozen=True)
+class _FakeCryptoProductState:
+    price: Decimal
+    source_timestamp: str = "2026-04-23T12:00:01+00:00"
+    price_source_timestamp: str = "2026-04-23T12:00:01+00:00"
+
+
+class _FakeClock:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def monotonic(self) -> float:
+        return self.value
+
+    def sleep(self, seconds: float) -> None:
+        self.value += seconds
 
 
 class _FixtureState:
@@ -1413,6 +1591,7 @@ def _discovery_snapshot(
     product_markets: dict[str, tuple[str, ...]],
     *,
     close_time: str,
+    target: Decimal | None = Decimal("100"),
 ) -> CryptoMarketDiscoverySnapshot:
     discovered = tuple(
         DiscoveredCryptoMarket(
@@ -1422,6 +1601,8 @@ def _discovery_snapshot(
             close_time=close_time,
             open_time="2026-04-23T12:00:00+00:00",
             expiration_time=close_time,
+            contract_target_price=target,
+            target_source_field="test_fixture",
         )
         for product_id, market_tickers in product_markets.items()
         for market_ticker in market_tickers

@@ -55,6 +55,8 @@ def main() -> int:
     failures.extend(_validate_direct_contract_scan_count_below_one_skip())
     failures.extend(_validate_direct_contract_scan_balance_fetch_failure_skips())
     failures.extend(_validate_direct_contract_scan_missing_client_skips())
+    failures.extend(_validate_fast_mispricing_requires_cached_risk())
+    failures.extend(_validate_fast_mispricing_uses_cached_risk_without_fetching())
     failures.extend(_validate_default_signal_gates_disabled())
     failures.extend(_validate_momentum_gate_skips_opposite_momentum())
     failures.extend(_validate_momentum_gate_allows_aligned_momentum())
@@ -671,7 +673,68 @@ def _validate_direct_contract_scan_missing_client_skips() -> list[str]:
             return ["missing client skip log missing"]
         if payload.get("reason") != "balance_fetch_failed":
             return [f"missing client reason={payload.get('reason')}"]
-        return []
+    return []
+
+
+def _validate_fast_mispricing_requires_cached_risk() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        client = _FakeBalanceClient(
+            balance_payload={"balance": 25000},
+            balance_error=None,
+        )
+        coordinator = LiveExecutionCoordinator(
+            settings=_Settings(log_directory=temp_path, log_jsonl_enabled=True),
+            client=client,
+        )
+        intents = coordinator.process_fast_mispricing_scan_snapshot(
+            _contract_snapshot(_mispricing_contract()),
+            cycle_number=99,
+        )
+        failures: list[str] = []
+        if intents:
+            failures.append(f"fast cached-risk intents={intents} expected empty")
+        if client.balance_calls != 0:
+            failures.append(f"fast cached-risk balance_calls={client.balance_calls}")
+        failures.extend(
+            _assert_skip_payload(
+                temp_path,
+                {
+                    "reason": "fast_scan_risk_cache_missing",
+                    "missing": "balance_dollars",
+                },
+            )
+        )
+        return failures
+
+
+def _validate_fast_mispricing_uses_cached_risk_without_fetching() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        client = _FakeBalanceClient(
+            balance_payload={"balance": 25000},
+            balance_error=None,
+        )
+        coordinator = LiveExecutionCoordinator(
+            settings=_Settings(log_directory=temp_path, log_jsonl_enabled=True),
+            client=client,
+        )
+        slow_intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(_mispricing_contract()),
+            cycle_number=42,
+        )
+        fast_intents = coordinator.process_fast_mispricing_scan_snapshot(
+            _contract_snapshot(_mispricing_contract(market_ticker="KXBTC15M-FAST")),
+            cycle_number=42,
+        )
+        failures: list[str] = []
+        if len(slow_intents) != 1:
+            failures.append(f"fast setup slow intents={len(slow_intents)}")
+        if len(fast_intents) != 1:
+            failures.append(f"fast cached intents={len(fast_intents)} expected=1")
+        if client.balance_calls != 1:
+            failures.append(f"fast cached balance_calls={client.balance_calls}")
+        return failures
 
 
 def _validate_default_signal_gates_disabled() -> list[str]:
@@ -1283,6 +1346,34 @@ def _contract(
     )
 
 
+def _mispricing_contract(
+    *,
+    market_ticker: str = "KXBTC15M-MISPRICING",
+) -> ScannedContract:
+    return _contract(
+        market_ticker=market_ticker,
+        direction="up",
+        structure="mispricing",
+        midpoint=Decimal("0.45"),
+        best_bid=Decimal("0.40"),
+        best_ask=Decimal("0.50"),
+        opportunity_source="mispricing",
+        external_price=Decimal("101"),
+        external_price_timestamp="2026-04-23T12:00:01+00:00",
+        contract_target_price=Decimal("100"),
+        distance_to_target=Decimal("1.000"),
+        implied_side="yes",
+        kalshi_yes_bid=Decimal("0.40"),
+        kalshi_yes_ask=Decimal("0.50"),
+        kalshi_no_bid=Decimal("0.50"),
+        kalshi_no_ask=Decimal("0.60"),
+        executable_price=Decimal("0.50"),
+        edge_bps=Decimal("100.000"),
+        lag_detected=True,
+        reason_selected="mispricing_edge_available",
+    )
+
+
 def _snapshot(position: SimulatedPosition) -> SimulationSnapshot:
     return SimulationSnapshot(
         open_positions={position.position_id: position},
@@ -1420,8 +1511,10 @@ class _FakeBalanceClient:
     ) -> None:
         self._balance_payload = balance_payload
         self._balance_error = balance_error
+        self.balance_calls = 0
 
     def get_balance(self) -> dict[str, object]:
+        self.balance_calls += 1
         if self._balance_error is not None:
             raise KalshiClientError(self._balance_error)
         return dict(self._balance_payload)

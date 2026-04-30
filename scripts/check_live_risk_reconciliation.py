@@ -42,6 +42,7 @@ def main() -> int:
     failures.extend(_validate_settings_defaults())
     failures.extend(_validate_settings_overrides())
     failures.extend(_validate_invalid_live_opportunity_mode_fails())
+    failures.extend(_validate_invalid_fast_scan_settings_fail())
     failures.extend(_validate_live_order_count_cap_override())
     failures.extend(_validate_one_live_position_blocks_default_cap())
     failures.extend(_validate_one_live_position_allowed_with_cap_two())
@@ -138,6 +139,23 @@ def _validate_settings_defaults() -> list[str]:
         )
     if settings.live_mispricing_allow_missing_kalshi_timestamp:
         failures.append("default live_mispricing_allow_missing_kalshi_timestamp=True")
+    if settings.live_mispricing_fast_scan_enabled:
+        failures.append("default live_mispricing_fast_scan_enabled=True")
+    if settings.live_mispricing_fast_scan_interval_seconds != 1.0:
+        failures.append(
+            "default live_mispricing_fast_scan_interval_seconds="
+            f"{settings.live_mispricing_fast_scan_interval_seconds}"
+        )
+    if settings.live_mispricing_fast_scan_max_per_market_per_window != 1:
+        failures.append(
+            "default live_mispricing_fast_scan_max_per_market_per_window="
+            f"{settings.live_mispricing_fast_scan_max_per_market_per_window}"
+        )
+    if settings.live_mispricing_fast_scan_cooldown_seconds != 10.0:
+        failures.append(
+            "default live_mispricing_fast_scan_cooldown_seconds="
+            f"{settings.live_mispricing_fast_scan_cooldown_seconds}"
+        )
     if settings.live_max_total_exposure_dollars is not None:
         failures.append(
             "default live_max_total_exposure_dollars="
@@ -170,6 +188,10 @@ def _validate_settings_overrides() -> list[str]:
             + "LIVE_MISPRICING_MAX_EXTERNAL_PRICE_AGE_MS=1500\n"
             + "LIVE_MISPRICING_MAX_KALSHI_QUOTE_AGE_MS=2000\n"
             + "LIVE_MISPRICING_ALLOW_MISSING_KALSHI_TIMESTAMP=true\n"
+            + "LIVE_MISPRICING_FAST_SCAN_ENABLED=true\n"
+            + "LIVE_MISPRICING_FAST_SCAN_INTERVAL_SECONDS=0.5\n"
+            + "LIVE_MISPRICING_FAST_SCAN_MAX_PER_MARKET_PER_WINDOW=2\n"
+            + "LIVE_MISPRICING_FAST_SCAN_COOLDOWN_SECONDS=12.5\n"
             + "LIVE_MAX_TOTAL_EXPOSURE_DOLLARS=12.34\n",
             encoding="utf-8",
         )
@@ -246,6 +268,23 @@ def _validate_settings_overrides() -> list[str]:
         )
     if not settings.live_mispricing_allow_missing_kalshi_timestamp:
         failures.append("override live_mispricing_allow_missing_kalshi_timestamp=False")
+    if not settings.live_mispricing_fast_scan_enabled:
+        failures.append("override live_mispricing_fast_scan_enabled=False")
+    if settings.live_mispricing_fast_scan_interval_seconds != 0.5:
+        failures.append(
+            "override live_mispricing_fast_scan_interval_seconds="
+            f"{settings.live_mispricing_fast_scan_interval_seconds}"
+        )
+    if settings.live_mispricing_fast_scan_max_per_market_per_window != 2:
+        failures.append(
+            "override live_mispricing_fast_scan_max_per_market_per_window="
+            f"{settings.live_mispricing_fast_scan_max_per_market_per_window}"
+        )
+    if settings.live_mispricing_fast_scan_cooldown_seconds != 12.5:
+        failures.append(
+            "override live_mispricing_fast_scan_cooldown_seconds="
+            f"{settings.live_mispricing_fast_scan_cooldown_seconds}"
+        )
     if settings.live_max_total_exposure_dollars != Decimal("12.34"):
         failures.append(
             "override live_max_total_exposure_dollars="
@@ -266,6 +305,25 @@ def _validate_invalid_live_opportunity_mode_fails() -> list[str]:
         except SettingsError:
             return []
     return ["invalid LIVE_OPPORTUNITY_MODE did not fail"]
+
+
+def _validate_invalid_fast_scan_settings_fail() -> list[str]:
+    invalid_entries = (
+        "LIVE_MISPRICING_FAST_SCAN_INTERVAL_SECONDS=0",
+        "LIVE_MISPRICING_FAST_SCAN_MAX_PER_MARKET_PER_WINDOW=0",
+        "LIVE_MISPRICING_FAST_SCAN_COOLDOWN_SECONDS=0",
+    )
+    failures: list[str] = []
+    for entry in invalid_entries:
+        with TemporaryDirectory() as temp_dir:
+            env_path = Path(temp_dir) / ".env"
+            env_path.write_text(_base_env() + f"\n{entry}\n", encoding="utf-8")
+            try:
+                load_settings(env_path)
+            except SettingsError:
+                continue
+        failures.append(f"invalid {entry} did not fail")
+    return failures
 
 
 def _validate_live_order_count_cap_override() -> list[str]:

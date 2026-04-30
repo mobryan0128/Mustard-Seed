@@ -76,6 +76,10 @@ DEFAULT_LIVE_MISPRICING_MIN_EDGE_BPS: Decimal | None = None
 DEFAULT_LIVE_MISPRICING_MAX_EXTERNAL_PRICE_AGE_MS: int | None = None
 DEFAULT_LIVE_MISPRICING_MAX_KALSHI_QUOTE_AGE_MS: int | None = None
 DEFAULT_LIVE_MISPRICING_ALLOW_MISSING_KALSHI_TIMESTAMP = False
+DEFAULT_LIVE_MISPRICING_FAST_SCAN_ENABLED = False
+DEFAULT_LIVE_MISPRICING_FAST_SCAN_INTERVAL_SECONDS = 1.0
+DEFAULT_LIVE_MISPRICING_FAST_SCAN_MAX_PER_MARKET_PER_WINDOW = 1
+DEFAULT_LIVE_MISPRICING_FAST_SCAN_COOLDOWN_SECONDS = 10.0
 DEFAULT_LIVE_PROFIT_TRAILING_EXIT_ENABLED = False
 DEFAULT_LIVE_PROFIT_TRAILING_ACTIVATION_PRICE = Decimal("0.90")
 DEFAULT_LIVE_PROFIT_TRAILING_DROP_DOLLARS = Decimal("0.01")
@@ -187,6 +191,10 @@ class KalshiSettings:
     live_mispricing_max_external_price_age_ms: int | None
     live_mispricing_max_kalshi_quote_age_ms: int | None
     live_mispricing_allow_missing_kalshi_timestamp: bool
+    live_mispricing_fast_scan_enabled: bool
+    live_mispricing_fast_scan_interval_seconds: float
+    live_mispricing_fast_scan_max_per_market_per_window: int
+    live_mispricing_fast_scan_cooldown_seconds: float
     live_profit_trailing_exit_enabled: bool
     live_profit_trailing_activation_price: Decimal
     live_profit_trailing_drop_dollars: Decimal
@@ -509,6 +517,26 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         DEFAULT_LIVE_MISPRICING_ALLOW_MISSING_KALSHI_TIMESTAMP,
         "LIVE_MISPRICING_ALLOW_MISSING_KALSHI_TIMESTAMP",
     )
+    live_mispricing_fast_scan_enabled = _parse_bool(
+        values.get("LIVE_MISPRICING_FAST_SCAN_ENABLED"),
+        DEFAULT_LIVE_MISPRICING_FAST_SCAN_ENABLED,
+        "LIVE_MISPRICING_FAST_SCAN_ENABLED",
+    )
+    live_mispricing_fast_scan_interval_seconds = _parse_positive_float(
+        values.get("LIVE_MISPRICING_FAST_SCAN_INTERVAL_SECONDS"),
+        DEFAULT_LIVE_MISPRICING_FAST_SCAN_INTERVAL_SECONDS,
+        "LIVE_MISPRICING_FAST_SCAN_INTERVAL_SECONDS",
+    )
+    live_mispricing_fast_scan_max_per_market_per_window = _parse_positive_int(
+        values.get("LIVE_MISPRICING_FAST_SCAN_MAX_PER_MARKET_PER_WINDOW"),
+        DEFAULT_LIVE_MISPRICING_FAST_SCAN_MAX_PER_MARKET_PER_WINDOW,
+        "LIVE_MISPRICING_FAST_SCAN_MAX_PER_MARKET_PER_WINDOW",
+    )
+    live_mispricing_fast_scan_cooldown_seconds = _parse_positive_float(
+        values.get("LIVE_MISPRICING_FAST_SCAN_COOLDOWN_SECONDS"),
+        DEFAULT_LIVE_MISPRICING_FAST_SCAN_COOLDOWN_SECONDS,
+        "LIVE_MISPRICING_FAST_SCAN_COOLDOWN_SECONDS",
+    )
     live_profit_trailing_exit_enabled = _parse_bool(
         values.get("LIVE_PROFIT_TRAILING_EXIT_ENABLED"),
         DEFAULT_LIVE_PROFIT_TRAILING_EXIT_ENABLED,
@@ -749,6 +777,16 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_mispricing_allow_missing_kalshi_timestamp=(
             live_mispricing_allow_missing_kalshi_timestamp
         ),
+        live_mispricing_fast_scan_enabled=live_mispricing_fast_scan_enabled,
+        live_mispricing_fast_scan_interval_seconds=(
+            live_mispricing_fast_scan_interval_seconds
+        ),
+        live_mispricing_fast_scan_max_per_market_per_window=(
+            live_mispricing_fast_scan_max_per_market_per_window
+        ),
+        live_mispricing_fast_scan_cooldown_seconds=(
+            live_mispricing_fast_scan_cooldown_seconds
+        ),
         live_profit_trailing_exit_enabled=live_profit_trailing_exit_enabled,
         live_profit_trailing_activation_price=(
             live_profit_trailing_activation_price
@@ -888,6 +926,10 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_MISPRICING_MAX_EXTERNAL_PRICE_AGE_MS",
         "LIVE_MISPRICING_MAX_KALSHI_QUOTE_AGE_MS",
         "LIVE_MISPRICING_ALLOW_MISSING_KALSHI_TIMESTAMP",
+        "LIVE_MISPRICING_FAST_SCAN_ENABLED",
+        "LIVE_MISPRICING_FAST_SCAN_INTERVAL_SECONDS",
+        "LIVE_MISPRICING_FAST_SCAN_MAX_PER_MARKET_PER_WINDOW",
+        "LIVE_MISPRICING_FAST_SCAN_COOLDOWN_SECONDS",
         "LIVE_PROFIT_TRAILING_EXIT_ENABLED",
         "LIVE_PROFIT_TRAILING_ACTIVATION_PRICE",
         "LIVE_PROFIT_TRAILING_DROP_DOLLARS",

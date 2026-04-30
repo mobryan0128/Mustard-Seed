@@ -124,6 +124,8 @@ class LiveExecutionCoordinator:
         self._live_position_ledger: dict[str, LivePositionRecord] = {}
         self._client_order_id_by_order_id: dict[str, str] = {}
         self._profit_trailing_states: dict[str, ProfitTrailingExitState] = {}
+        self._latest_balance_dollars: Decimal | None = None
+        self._latest_live_risk_state: LiveRiskState | None = None
 
     @property
     def live_position_ledger(self) -> dict[str, LivePositionRecord]:
@@ -199,8 +201,98 @@ class LiveExecutionCoordinator:
         balance_dollars = self._fetch_live_balance_for_sizing(cycle_number=cycle_number)
         if balance_dollars is None:
             return ()
+        self._latest_balance_dollars = balance_dollars
         entry_risk_manager = self._entry_risk_manager_for_balance(balance_dollars)
         live_risk_state = self._reconcile_live_risk_state(cycle_number=cycle_number)
+        self._latest_live_risk_state = live_risk_state
+        return self._create_contract_scan_intents(
+            contract_scan_snapshot,
+            cycle_number=cycle_number,
+            balance_dollars=balance_dollars,
+            entry_risk_manager=entry_risk_manager,
+            live_risk_state=live_risk_state,
+        )
+
+    def process_fast_mispricing_scan_snapshot(
+        self,
+        contract_scan_snapshot: ContractScanSnapshot,
+        *,
+        cycle_number: int | None = None,
+    ) -> tuple[LiveOrderIntent, ...]:
+        """Create live intents from fast mispricing scans using cached risk inputs."""
+
+        if not contract_scan_snapshot.ranked_contracts:
+            self._log_intent_skipped(
+                reason="no_ranked_contracts",
+                product_id="",
+                market_ticker=None,
+                simulation_position_id=None,
+                details={"cycle_number": cycle_number, "fast_scan": True},
+            )
+            return ()
+
+        if self._latest_balance_dollars is None:
+            self._log_intent_skipped(
+                reason="fast_scan_risk_cache_missing",
+                product_id="",
+                market_ticker=None,
+                simulation_position_id=None,
+                details={
+                    "cycle_number": cycle_number,
+                    "missing": "balance_dollars",
+                },
+            )
+            return ()
+        if self._latest_live_risk_state is None:
+            self._log_intent_skipped(
+                reason="fast_scan_risk_cache_missing",
+                product_id="",
+                market_ticker=None,
+                simulation_position_id=None,
+                details={
+                    "cycle_number": cycle_number,
+                    "missing": "live_risk_state",
+                },
+            )
+            return ()
+
+        mispricing_contracts = tuple(
+            contract
+            for contract in contract_scan_snapshot.ranked_contracts
+            if getattr(contract, "opportunity_source", None) == "mispricing"
+        )
+        if not mispricing_contracts:
+            self._log_intent_skipped(
+                reason="fast_scan_no_mispricing_candidates",
+                product_id="",
+                market_ticker=None,
+                simulation_position_id=None,
+                details={"cycle_number": cycle_number},
+            )
+            return ()
+
+        return self._create_contract_scan_intents(
+            ContractScanSnapshot(
+                ranked_contracts=mispricing_contracts,
+                skipped_contracts=contract_scan_snapshot.skipped_contracts,
+            ),
+            cycle_number=cycle_number,
+            balance_dollars=self._latest_balance_dollars,
+            entry_risk_manager=self._entry_risk_manager_for_balance(
+                self._latest_balance_dollars
+            ),
+            live_risk_state=self._latest_live_risk_state,
+        )
+
+    def _create_contract_scan_intents(
+        self,
+        contract_scan_snapshot: ContractScanSnapshot,
+        *,
+        cycle_number: int | None,
+        balance_dollars: Decimal,
+        entry_risk_manager: RiskManager,
+        live_risk_state: LiveRiskState,
+    ) -> tuple[LiveOrderIntent, ...]:
         max_total_exposure_dollars, max_total_exposure_source = (
             _live_max_total_exposure_settings(self._settings)
         )
