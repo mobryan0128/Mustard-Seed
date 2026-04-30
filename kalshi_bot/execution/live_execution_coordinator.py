@@ -1854,7 +1854,7 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     if not stripped:
         return None
     if stripped.isdigit():
-        return datetime.fromtimestamp(int(stripped) / 1000, tz=timezone.utc)
+        return _parse_epoch_timestamp(int(stripped))
     try:
         parsed = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
     except ValueError:
@@ -1862,6 +1862,23 @@ def _parse_timestamp(value: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _parse_epoch_timestamp(value: int) -> datetime | None:
+    absolute_value = abs(value)
+    if absolute_value >= 10**17:
+        divisor = 1_000_000_000
+    elif absolute_value >= 10**14:
+        divisor = 1_000_000
+    elif absolute_value >= 10**11:
+        divisor = 1_000
+    else:
+        divisor = 1
+
+    try:
+        return datetime.fromtimestamp(value / divisor, tz=timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return None
 
 
 def _trend_momentum_threshold(settings: KalshiSettings | None) -> Decimal:

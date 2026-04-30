@@ -135,12 +135,15 @@ def _evaluate_market(
             "mispricing_external_price_stale",
             base_payload,
         )
+    if max_kalshi_quote_age_ms is not None and kalshi_quote_age_ms is None:
+        return None, _skipped(
+            market,
+            "missing_kalshi_timestamp",
+            base_payload,
+        )
     if (
         max_kalshi_quote_age_ms is not None
-        and (
-            kalshi_quote_age_ms is None
-            or kalshi_quote_age_ms > max_kalshi_quote_age_ms
-        )
+        and kalshi_quote_age_ms > max_kalshi_quote_age_ms
     ):
         return None, _skipped(
             market,
@@ -375,12 +378,12 @@ def _parse_timestamp(value: str | int | None) -> datetime | None:
     if value is None:
         return None
     if isinstance(value, int):
-        return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+        return _parse_epoch_timestamp(value)
     stripped = str(value).strip()
     if not stripped:
         return None
     if stripped.isdigit():
-        return datetime.fromtimestamp(int(stripped) / 1000, tz=timezone.utc)
+        return _parse_epoch_timestamp(int(stripped))
     try:
         parsed = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
     except ValueError:
@@ -388,3 +391,20 @@ def _parse_timestamp(value: str | int | None) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _parse_epoch_timestamp(value: int) -> datetime | None:
+    absolute_value = abs(value)
+    if absolute_value >= 10**17:
+        divisor = 1_000_000_000
+    elif absolute_value >= 10**14:
+        divisor = 1_000_000
+    elif absolute_value >= 10**11:
+        divisor = 1_000
+    else:
+        divisor = 1
+
+    try:
+        return datetime.fromtimestamp(value / divisor, tz=timezone.utc)
+    except (OSError, OverflowError, ValueError):
+        return None

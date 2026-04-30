@@ -44,6 +44,7 @@ def main() -> int:
     failures.extend(_validate_min_edge_gate_skips_when_configured())
     failures.extend(_validate_external_freshness_gate_skips_stale_price())
     failures.extend(_validate_kalshi_freshness_gate_skips_missing_quote_time())
+    failures.extend(_validate_kalshi_epoch_timestamp_age_ms())
     failures.extend(_validate_heartbeat_does_not_refresh_price_timestamp())
 
     if failures:
@@ -220,7 +221,28 @@ def _validate_kalshi_freshness_gate_skips_missing_quote_time() -> list[str]:
         },
         max_kalshi_quote_age_ms=500,
     )
-    return _assert_skip(snapshot, "mispricing_kalshi_quote_stale")
+    return _assert_skip(snapshot, "missing_kalshi_timestamp")
+
+
+def _validate_kalshi_epoch_timestamp_age_ms() -> list[str]:
+    snapshot = _scan(
+        markets=(_market("KXBTC15M-EPOCHQUOTE", target=Decimal("100")),),
+        external_price=Decimal("101"),
+        tickers={
+            "KXBTC15M-EPOCHQUOTE": _ticker(
+                "KXBTC15M-EPOCHQUOTE",
+                exchange_time=None,
+                exchange_ts=1776945601000,
+            ),
+        },
+        max_kalshi_quote_age_ms=150000,
+    )
+    if len(snapshot.ranked_contracts) != 1:
+        return [f"epoch quote ranked={len(snapshot.ranked_contracts)}"]
+    contract = snapshot.ranked_contracts[0]
+    if contract.kalshi_quote_age_ms != 1000:
+        return [f"epoch quote age={contract.kalshi_quote_age_ms} expected=1000"]
+    return []
 
 
 def _validate_heartbeat_does_not_refresh_price_timestamp() -> list[str]:
@@ -319,6 +341,7 @@ def _ticker(
     *,
     yes_bid: Decimal = Decimal("0.40"),
     yes_ask: Decimal = Decimal("0.45"),
+    exchange_ts: int | None = None,
     exchange_time: str | None = "2026-04-23T12:00:02+00:00",
 ) -> TickerState:
     return TickerState(
@@ -328,6 +351,7 @@ def _ticker(
         yes_bid_size_fp=Decimal("100"),
         yes_ask_size_fp=Decimal("100"),
         dollar_volume=Decimal("1000"),
+        exchange_ts=exchange_ts,
         exchange_time=exchange_time,
     )
 
