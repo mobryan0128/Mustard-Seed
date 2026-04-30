@@ -130,6 +130,7 @@ class KalshiMarketSummary:
     yes_sub_title: str | None = None
     no_sub_title: str | None = None
     contract_target_price: Decimal | None = None
+    target_source_field: str | None = None
 
 
 @dataclass(frozen=True)
@@ -399,6 +400,7 @@ def _normalize_position_payload(payload: object) -> KalshiMarketPosition:
 def _normalize_market_payload(payload: object) -> KalshiMarketSummary:
     if not isinstance(payload, dict):
         raise KalshiClientError("Kalshi market payload was not a JSON object.")
+    target_price, target_source_field = _target_price_from_market_payload(payload)
     return KalshiMarketSummary(
         ticker=_require_text(payload.get("ticker"), "ticker"),
         event_ticker=_optional_text(payload.get("event_ticker")),
@@ -413,15 +415,18 @@ def _normalize_market_payload(payload: object) -> KalshiMarketSummary:
         subtitle=_optional_text(payload.get("subtitle")),
         yes_sub_title=_optional_text(payload.get("yes_sub_title")),
         no_sub_title=_optional_text(payload.get("no_sub_title")),
-        contract_target_price=_target_price_from_market_payload(payload),
+        contract_target_price=target_price,
+        target_source_field=target_source_field,
     )
 
 
-def _target_price_from_market_payload(payload: dict[str, object]) -> Decimal | None:
+def _target_price_from_market_payload(
+    payload: dict[str, object],
+) -> tuple[Decimal | None, str | None]:
     for key in TARGET_PRICE_KEYS:
         parsed = _optional_target_decimal(payload.get(key))
         if parsed is not None:
-            return parsed
+            return parsed, key
 
     for key in TARGET_TEXT_KEYS:
         text = _optional_text(payload.get(key))
@@ -429,8 +434,8 @@ def _target_price_from_market_payload(payload: dict[str, object]) -> Decimal | N
             continue
         parsed = _target_price_from_text(text)
         if parsed is not None:
-            return parsed
-    return None
+            return parsed, key
+    return None, None
 
 
 def _target_price_from_text(value: str) -> Decimal | None:

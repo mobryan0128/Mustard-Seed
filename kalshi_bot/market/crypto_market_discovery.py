@@ -38,6 +38,7 @@ class DiscoveredCryptoMarket:
     subtitle: str | None = None
     yes_sub_title: str | None = None
     no_sub_title: str | None = None
+    target_source_field: str | None = None
 
 
 @dataclass(frozen=True)
@@ -162,6 +163,7 @@ class CryptoMarketDiscovery:
                         subtitle=market.subtitle,
                         yes_sub_title=market.yes_sub_title,
                         no_sub_title=market.no_sub_title,
+                        target_source_field=market.target_source_field,
                     )
                 )
             if page.cursor is None:

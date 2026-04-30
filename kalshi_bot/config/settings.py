@@ -72,6 +72,9 @@ DEFAULT_LIVE_MIN_REVERSAL_RANGE_POSITION = Decimal("0.50")
 DEFAULT_LIVE_BLOCK_IMPULSE_OVERRIDE_FROM_CHOP = False
 DEFAULT_LIVE_IMPULSE_OVERRIDE_REQUIRE_MOMENTUM_ALIGNMENT = False
 DEFAULT_LIVE_IMPULSE_OVERRIDE_REQUIRE_RANGE_POSITION = False
+DEFAULT_LIVE_MISPRICING_MIN_EDGE_BPS: Decimal | None = None
+DEFAULT_LIVE_MISPRICING_MAX_EXTERNAL_PRICE_AGE_MS: int | None = None
+DEFAULT_LIVE_MISPRICING_MAX_KALSHI_QUOTE_AGE_MS: int | None = None
 DEFAULT_LIVE_PROFIT_TRAILING_EXIT_ENABLED = False
 DEFAULT_LIVE_PROFIT_TRAILING_ACTIVATION_PRICE = Decimal("0.90")
 DEFAULT_LIVE_PROFIT_TRAILING_DROP_DOLLARS = Decimal("0.01")
@@ -179,6 +182,9 @@ class KalshiSettings:
     live_impulse_override_require_range_position: bool
     live_impulse_override_min_recent_return_bps: Decimal | None
     live_trend_momentum_min_recent_return_bps: Decimal | None
+    live_mispricing_min_edge_bps: Decimal | None
+    live_mispricing_max_external_price_age_ms: int | None
+    live_mispricing_max_kalshi_quote_age_ms: int | None
     live_profit_trailing_exit_enabled: bool
     live_profit_trailing_activation_price: Decimal
     live_profit_trailing_drop_dollars: Decimal
@@ -484,6 +490,18 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         values.get("LIVE_TREND_MOMENTUM_MIN_RECENT_RETURN_BPS"),
         "LIVE_TREND_MOMENTUM_MIN_RECENT_RETURN_BPS",
     )
+    live_mispricing_min_edge_bps = _parse_optional_positive_decimal(
+        values.get("LIVE_MISPRICING_MIN_EDGE_BPS"),
+        "LIVE_MISPRICING_MIN_EDGE_BPS",
+    )
+    live_mispricing_max_external_price_age_ms = _parse_optional_positive_int(
+        values.get("LIVE_MISPRICING_MAX_EXTERNAL_PRICE_AGE_MS"),
+        "LIVE_MISPRICING_MAX_EXTERNAL_PRICE_AGE_MS",
+    )
+    live_mispricing_max_kalshi_quote_age_ms = _parse_optional_positive_int(
+        values.get("LIVE_MISPRICING_MAX_KALSHI_QUOTE_AGE_MS"),
+        "LIVE_MISPRICING_MAX_KALSHI_QUOTE_AGE_MS",
+    )
     live_profit_trailing_exit_enabled = _parse_bool(
         values.get("LIVE_PROFIT_TRAILING_EXIT_ENABLED"),
         DEFAULT_LIVE_PROFIT_TRAILING_EXIT_ENABLED,
@@ -714,6 +732,13 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_trend_momentum_min_recent_return_bps=(
             live_trend_momentum_min_recent_return_bps
         ),
+        live_mispricing_min_edge_bps=live_mispricing_min_edge_bps,
+        live_mispricing_max_external_price_age_ms=(
+            live_mispricing_max_external_price_age_ms
+        ),
+        live_mispricing_max_kalshi_quote_age_ms=(
+            live_mispricing_max_kalshi_quote_age_ms
+        ),
         live_profit_trailing_exit_enabled=live_profit_trailing_exit_enabled,
         live_profit_trailing_activation_price=(
             live_profit_trailing_activation_price
@@ -849,6 +874,9 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_IMPULSE_OVERRIDE_REQUIRE_RANGE_POSITION",
         "LIVE_IMPULSE_OVERRIDE_MIN_RECENT_RETURN_BPS",
         "LIVE_TREND_MOMENTUM_MIN_RECENT_RETURN_BPS",
+        "LIVE_MISPRICING_MIN_EDGE_BPS",
+        "LIVE_MISPRICING_MAX_EXTERNAL_PRICE_AGE_MS",
+        "LIVE_MISPRICING_MAX_KALSHI_QUOTE_AGE_MS",
         "LIVE_PROFIT_TRAILING_EXIT_ENABLED",
         "LIVE_PROFIT_TRAILING_ACTIVATION_PRICE",
         "LIVE_PROFIT_TRAILING_DROP_DOLLARS",

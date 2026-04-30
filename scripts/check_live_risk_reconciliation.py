@@ -121,6 +121,21 @@ def _validate_settings_defaults() -> list[str]:
             "default live_trend_momentum_min_recent_return_bps="
             f"{settings.live_trend_momentum_min_recent_return_bps}"
         )
+    if settings.live_mispricing_min_edge_bps is not None:
+        failures.append(
+            "default live_mispricing_min_edge_bps="
+            f"{settings.live_mispricing_min_edge_bps}"
+        )
+    if settings.live_mispricing_max_external_price_age_ms is not None:
+        failures.append(
+            "default live_mispricing_max_external_price_age_ms="
+            f"{settings.live_mispricing_max_external_price_age_ms}"
+        )
+    if settings.live_mispricing_max_kalshi_quote_age_ms is not None:
+        failures.append(
+            "default live_mispricing_max_kalshi_quote_age_ms="
+            f"{settings.live_mispricing_max_kalshi_quote_age_ms}"
+        )
     if settings.live_max_total_exposure_dollars is not None:
         failures.append(
             "default live_max_total_exposure_dollars="
@@ -149,6 +164,9 @@ def _validate_settings_overrides() -> list[str]:
             + "LIVE_IMPULSE_OVERRIDE_REQUIRE_RANGE_POSITION=true\n"
             + "LIVE_IMPULSE_OVERRIDE_MIN_RECENT_RETURN_BPS=4.5\n"
             + "LIVE_TREND_MOMENTUM_MIN_RECENT_RETURN_BPS=12.5\n"
+            + "LIVE_MISPRICING_MIN_EDGE_BPS=5.5\n"
+            + "LIVE_MISPRICING_MAX_EXTERNAL_PRICE_AGE_MS=1500\n"
+            + "LIVE_MISPRICING_MAX_KALSHI_QUOTE_AGE_MS=2000\n"
             + "LIVE_MAX_TOTAL_EXPOSURE_DOLLARS=12.34\n",
             encoding="utf-8",
         )
@@ -207,6 +225,21 @@ def _validate_settings_overrides() -> list[str]:
         failures.append(
             "override live_trend_momentum_min_recent_return_bps="
             f"{settings.live_trend_momentum_min_recent_return_bps}"
+        )
+    if settings.live_mispricing_min_edge_bps != Decimal("5.5"):
+        failures.append(
+            "override live_mispricing_min_edge_bps="
+            f"{settings.live_mispricing_min_edge_bps}"
+        )
+    if settings.live_mispricing_max_external_price_age_ms != 1500:
+        failures.append(
+            "override live_mispricing_max_external_price_age_ms="
+            f"{settings.live_mispricing_max_external_price_age_ms}"
+        )
+    if settings.live_mispricing_max_kalshi_quote_age_ms != 2000:
+        failures.append(
+            "override live_mispricing_max_kalshi_quote_age_ms="
+            f"{settings.live_mispricing_max_kalshi_quote_age_ms}"
         )
     if settings.live_max_total_exposure_dollars != Decimal("12.34"):
         failures.append(

@@ -48,6 +48,7 @@ class ScannedContract:
     external_price: Decimal | None = None
     external_price_timestamp: str | None = None
     contract_target_price: Decimal | None = None
+    target_source_field: str | None = None
     distance_to_target: Decimal | None = None
     implied_side: str | None = None
     kalshi_yes_bid: Decimal | None = None
@@ -56,6 +57,10 @@ class ScannedContract:
     kalshi_no_ask: Decimal | None = None
     executable_price: Decimal | None = None
     edge_bps: Decimal | None = None
+    external_price_age_ms: int | None = None
+    kalshi_quote_age_ms: int | None = None
+    cycle_started_at: str | None = None
+    intent_latency_ms: int | None = None
     lag_detected: bool | None = None
     reason_selected: str | None = None
     reason_skipped: str | None = None
@@ -72,6 +77,8 @@ class SkippedContract:
     external_price: Decimal | None = None
     external_price_timestamp: str | None = None
     contract_target_price: Decimal | None = None
+    target_source_field: str | None = None
+    market_as_of: str | None = None
     distance_to_target: Decimal | None = None
     implied_side: str | None = None
     kalshi_yes_bid: Decimal | None = None
@@ -80,6 +87,10 @@ class SkippedContract:
     kalshi_no_ask: Decimal | None = None
     executable_price: Decimal | None = None
     edge_bps: Decimal | None = None
+    external_price_age_ms: int | None = None
+    kalshi_quote_age_ms: int | None = None
+    cycle_started_at: str | None = None
+    intent_latency_ms: int | None = None
     lag_detected: bool | None = None
     reason_selected: str | None = None
     reason_skipped: str | None = None

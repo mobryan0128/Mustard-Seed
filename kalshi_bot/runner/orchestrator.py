@@ -306,7 +306,14 @@ class KalshiBotRunner:
     def _run_single_cycle(self) -> RunnerCycleResult:
         self._cycle_count += 1
         cycle_number = self._cycle_count
-        self._log_cycle_event("cycle_start", {"cycle_number": cycle_number})
+        cycle_started_at = _utc_now_iso()
+        self._log_cycle_event(
+            "cycle_start",
+            {
+                "cycle_number": cycle_number,
+                "cycle_started_at": cycle_started_at,
+            },
+        )
         self._refresh_market_discovery_if_due(cycle_number)
 
         kalshi_result, crypto_result = asyncio.run(self._run_ingestion_cycle())
@@ -333,6 +340,7 @@ class KalshiBotRunner:
             bias_snapshot=bias_snapshot,
             crypto_snapshot=crypto_snapshot,
             market_snapshot=market_snapshot,
+            cycle_started_at=cycle_started_at,
         )
         self._log_mispricing_opportunities(
             cycle_number=cycle_number,
@@ -571,6 +579,7 @@ class KalshiBotRunner:
                     "close_time": market.close_time,
                     "expiration_time": market.expiration_time,
                     "contract_target_price": market.contract_target_price,
+                    "target_source_field": market.target_source_field,
                 }
                 for market in snapshot.discovered_markets
             ),
@@ -588,6 +597,7 @@ class KalshiBotRunner:
         bias_snapshot: BiasSnapshot,
         crypto_snapshot: Any,
         market_snapshot: MarketStateSnapshot,
+        cycle_started_at: str | None = None,
     ) -> ContractScanSnapshot:
         opportunity_mode = getattr(
             self._settings,
@@ -628,6 +638,22 @@ class KalshiBotRunner:
                 "live_max_execution_spread_dollars",
                 Decimal("0.100"),
             ),
+            min_edge_bps=getattr(
+                self._settings,
+                "live_mispricing_min_edge_bps",
+                None,
+            ),
+            max_external_price_age_ms=getattr(
+                self._settings,
+                "live_mispricing_max_external_price_age_ms",
+                None,
+            ),
+            max_kalshi_quote_age_ms=getattr(
+                self._settings,
+                "live_mispricing_max_kalshi_quote_age_ms",
+                None,
+            ),
+            cycle_started_at=cycle_started_at,
         )
         if opportunity_mode == "mispricing":
             return mispricing_snapshot
@@ -1003,6 +1029,8 @@ def _opportunity_payload(item) -> dict[str, object]:  # noqa: ANN001
         "external_price": getattr(item, "external_price", None),
         "external_price_timestamp": getattr(item, "external_price_timestamp", None),
         "contract_target_price": getattr(item, "contract_target_price", None),
+        "target_source_field": getattr(item, "target_source_field", None),
+        "market_as_of": getattr(item, "market_as_of", None),
         "distance_to_target": getattr(item, "distance_to_target", None),
         "implied_side": getattr(item, "implied_side", None),
         "kalshi_yes_bid": getattr(item, "kalshi_yes_bid", None),
@@ -1011,6 +1039,10 @@ def _opportunity_payload(item) -> dict[str, object]:  # noqa: ANN001
         "kalshi_no_ask": getattr(item, "kalshi_no_ask", None),
         "executable_price": getattr(item, "executable_price", None),
         "edge_bps": getattr(item, "edge_bps", None),
+        "external_price_age_ms": getattr(item, "external_price_age_ms", None),
+        "kalshi_quote_age_ms": getattr(item, "kalshi_quote_age_ms", None),
+        "cycle_started_at": getattr(item, "cycle_started_at", None),
+        "intent_latency_ms": getattr(item, "intent_latency_ms", None),
         "lag_detected": getattr(item, "lag_detected", None),
         "reason_selected": getattr(item, "reason_selected", None),
         "reason_skipped": getattr(item, "reason_skipped", None),

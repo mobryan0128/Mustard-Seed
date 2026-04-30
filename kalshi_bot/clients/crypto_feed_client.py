@@ -60,6 +60,7 @@ class CryptoPriceState:
     best_ask_quantity: Optional[Decimal] = None
     volume_24_h: Optional[Decimal] = None
     source_timestamp: Optional[str] = None
+    price_source_timestamp: Optional[str] = None
     sequence_num: Optional[int] = None
     last_heartbeat_time: Optional[str] = None
     last_heartbeat_counter: Optional[int] = None
@@ -238,6 +239,11 @@ class CryptoFeedClient:
                 best_ask_quantity=_prefer(message.best_ask_quantity, current.best_ask_quantity),
                 volume_24_h=_prefer(message.volume_24_h, current.volume_24_h),
                 source_timestamp=_prefer(message.source_timestamp, current.source_timestamp),
+                price_source_timestamp=(
+                    _prefer(message.source_timestamp, current.price_source_timestamp)
+                    if message.price is not None
+                    else current.price_source_timestamp
+                ),
                 sequence_num=_prefer(message.sequence_num, current.sequence_num),
                 last_heartbeat_time=current.last_heartbeat_time,
                 last_heartbeat_counter=current.last_heartbeat_counter,
@@ -263,7 +269,8 @@ class CryptoFeedClient:
                     best_bid_quantity=current.best_bid_quantity,
                     best_ask_quantity=current.best_ask_quantity,
                     volume_24_h=current.volume_24_h,
-                    source_timestamp=_prefer(message.source_timestamp, current.source_timestamp),
+                    source_timestamp=current.source_timestamp,
+                    price_source_timestamp=current.price_source_timestamp,
                     sequence_num=_prefer(message.sequence_num, current.sequence_num),
                     last_heartbeat_time=_prefer(message.current_time, current.last_heartbeat_time),
                     last_heartbeat_counter=_prefer(

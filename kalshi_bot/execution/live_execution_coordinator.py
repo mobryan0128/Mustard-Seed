@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from typing import Any
 
@@ -1789,15 +1790,15 @@ def _opportunity_diagnostics_payload(contract: ScannedContract) -> dict[str, obj
         if opportunity_source is None:
             return {}
         return {"opportunity_source": opportunity_source}
+    external_price_timestamp = getattr(contract, "external_price_timestamp", None)
+    market_as_of = getattr(contract, "market_as_of", None)
     return {
         "opportunity_source": opportunity_source,
         "external_price": getattr(contract, "external_price", None),
-        "external_price_timestamp": getattr(
-            contract,
-            "external_price_timestamp",
-            None,
-        ),
+        "external_price_timestamp": external_price_timestamp,
         "contract_target_price": getattr(contract, "contract_target_price", None),
+        "target_source_field": getattr(contract, "target_source_field", None),
+        "market_as_of": market_as_of,
         "distance_to_target": getattr(contract, "distance_to_target", None),
         "implied_side": getattr(contract, "implied_side", None),
         "kalshi_yes_bid": getattr(contract, "kalshi_yes_bid", None),
@@ -1806,10 +1807,61 @@ def _opportunity_diagnostics_payload(contract: ScannedContract) -> dict[str, obj
         "kalshi_no_ask": getattr(contract, "kalshi_no_ask", None),
         "executable_price": getattr(contract, "executable_price", None),
         "edge_bps": getattr(contract, "edge_bps", None),
+        "external_price_age_ms": _timestamp_age_ms(
+            external_price_timestamp,
+            fallback=getattr(contract, "external_price_age_ms", None),
+        ),
+        "kalshi_quote_age_ms": _timestamp_age_ms(
+            market_as_of,
+            fallback=getattr(contract, "kalshi_quote_age_ms", None),
+        ),
+        "cycle_started_at": getattr(contract, "cycle_started_at", None),
+        "intent_latency_ms": _intent_latency_ms(contract),
         "lag_detected": getattr(contract, "lag_detected", None),
         "reason_selected": getattr(contract, "reason_selected", None),
         "reason_skipped": getattr(contract, "reason_skipped", None),
     }
+
+
+def _intent_latency_ms(contract: ScannedContract) -> int | None:
+    existing = getattr(contract, "intent_latency_ms", None)
+    if existing is not None:
+        return existing
+    cycle_started_at = getattr(contract, "cycle_started_at", None)
+    parsed = _parse_timestamp(cycle_started_at)
+    if parsed is None:
+        return None
+    return max(
+        int((datetime.now(timezone.utc) - parsed).total_seconds() * 1000),
+        0,
+    )
+
+
+def _timestamp_age_ms(value: str | None, *, fallback: int | None) -> int | None:
+    parsed = _parse_timestamp(value)
+    if parsed is None:
+        return fallback
+    return max(
+        int((datetime.now(timezone.utc) - parsed).total_seconds() * 1000),
+        0,
+    )
+
+
+def _parse_timestamp(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    stripped = str(value).strip()
+    if not stripped:
+        return None
+    if stripped.isdigit():
+        return datetime.fromtimestamp(int(stripped) / 1000, tz=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _trend_momentum_threshold(settings: KalshiSettings | None) -> Decimal:

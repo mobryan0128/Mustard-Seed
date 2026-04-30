@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -31,9 +32,15 @@ def scan_mispricing_opportunities(
     min_entry_price: Decimal,
     max_entry_price: Decimal,
     max_execution_spread_dollars: Decimal,
+    min_edge_bps: Decimal | None = None,
+    max_external_price_age_ms: int | None = None,
+    max_kalshi_quote_age_ms: int | None = None,
+    cycle_started_at: str | None = None,
 ) -> ContractScanSnapshot:
     """Return mispricing candidates without applying directional-bias skips."""
 
+    scan_time = _parse_timestamp(cycle_started_at) or datetime.now(timezone.utc)
+    scan_started_at = scan_time.isoformat()
     ranked_contracts: list[ScannedContract] = []
     skipped_contracts: list[SkippedContract] = []
 
@@ -47,6 +54,11 @@ def scan_mispricing_opportunities(
             min_entry_price=min_entry_price,
             max_entry_price=max_entry_price,
             max_execution_spread_dollars=max_execution_spread_dollars,
+            min_edge_bps=min_edge_bps,
+            max_external_price_age_ms=max_external_price_age_ms,
+            max_kalshi_quote_age_ms=max_kalshi_quote_age_ms,
+            scan_time=scan_time,
+            cycle_started_at=scan_started_at,
         )
         if candidate is not None:
             ranked_contracts.append(candidate)
@@ -75,15 +87,32 @@ def _evaluate_market(
     min_entry_price: Decimal,
     max_entry_price: Decimal,
     max_execution_spread_dollars: Decimal,
+    min_edge_bps: Decimal | None,
+    max_external_price_age_ms: int | None,
+    max_kalshi_quote_age_ms: int | None,
+    scan_time: datetime,
+    cycle_started_at: str,
 ) -> tuple[ScannedContract | None, SkippedContract | None]:
     external_price = getattr(product_state, "price", None)
-    external_price_timestamp = getattr(product_state, "source_timestamp", None)
+    external_price_timestamp = (
+        getattr(product_state, "price_source_timestamp", None)
+        or getattr(product_state, "source_timestamp", None)
+    )
     target_price = market.contract_target_price
+    market_as_of = _market_as_of(ticker_state) if ticker_state is not None else None
+    external_price_age_ms = _age_ms(external_price_timestamp, scan_time)
+    kalshi_quote_age_ms = _age_ms(market_as_of, scan_time)
     base_payload = {
         "opportunity_source": "mispricing",
         "external_price": external_price,
         "external_price_timestamp": external_price_timestamp,
         "contract_target_price": target_price,
+        "target_source_field": market.target_source_field,
+        "market_as_of": market_as_of,
+        "external_price_age_ms": external_price_age_ms,
+        "kalshi_quote_age_ms": kalshi_quote_age_ms,
+        "cycle_started_at": cycle_started_at,
+        "intent_latency_ms": None,
     }
 
     if target_price is None:
@@ -94,6 +123,30 @@ def _evaluate_market(
         return None, _skipped(market, "missing_market_state", base_payload)
     if target_price <= Decimal("0"):
         return None, _skipped(market, "invalid_contract_target_price", base_payload)
+    if (
+        max_external_price_age_ms is not None
+        and (
+            external_price_age_ms is None
+            or external_price_age_ms > max_external_price_age_ms
+        )
+    ):
+        return None, _skipped(
+            market,
+            "mispricing_external_price_stale",
+            base_payload,
+        )
+    if (
+        max_kalshi_quote_age_ms is not None
+        and (
+            kalshi_quote_age_ms is None
+            or kalshi_quote_age_ms > max_kalshi_quote_age_ms
+        )
+    ):
+        return None, _skipped(
+            market,
+            "mispricing_kalshi_quote_stale",
+            base_payload,
+        )
 
     distance_to_target = (external_price - target_price).quantize(Decimal("0.001"))
     implied_side = _implied_side(distance_to_target)
@@ -105,6 +158,16 @@ def _evaluate_market(
     )
     if implied_side is None:
         return None, _skipped(market, "external_price_at_target", base_payload)
+    edge_bps = (
+        abs(distance_to_target) / target_price * BASIS_POINTS_MULTIPLIER
+    ).quantize(Decimal("0.001"))
+    base_payload["edge_bps"] = edge_bps
+    if min_edge_bps is not None and edge_bps < min_edge_bps:
+        return None, _skipped(
+            market,
+            "mispricing_edge_below_minimum",
+            base_payload,
+        )
 
     quote_payload = _quote_payload(ticker_state)
     base_payload.update(quote_payload)
@@ -135,9 +198,6 @@ def _evaluate_market(
     if side_liquidity is None or side_liquidity <= Decimal("0"):
         return None, _skipped(market, "liquidity_missing", base_payload)
 
-    edge_bps = (
-        abs(distance_to_target) / target_price * BASIS_POINTS_MULTIPLIER
-    ).quantize(Decimal("0.001"))
     direction = "up" if implied_side == "yes" else "down"
     confidence = _confidence_from_edge(edge_bps)
     midpoint = (
@@ -164,7 +224,7 @@ def _evaluate_market(
             best_ask=ticker_state.yes_ask_dollars,
             midpoint=midpoint,
             bias_as_of=external_price_timestamp,
-            market_as_of=_market_as_of(ticker_state),
+            market_as_of=market_as_of,
             score=score,
             classification_reason="mispricing_edge",
             confidence_reason="mispricing_edge_bucket",
@@ -172,6 +232,7 @@ def _evaluate_market(
             external_price=external_price,
             external_price_timestamp=external_price_timestamp,
             contract_target_price=target_price,
+            target_source_field=market.target_source_field,
             distance_to_target=distance_to_target,
             implied_side=implied_side,
             kalshi_yes_bid=ticker_state.yes_bid_dollars,
@@ -180,6 +241,10 @@ def _evaluate_market(
             kalshi_no_ask=quote_payload["kalshi_no_ask"],
             executable_price=executable_price,
             edge_bps=edge_bps,
+            external_price_age_ms=external_price_age_ms,
+            kalshi_quote_age_ms=kalshi_quote_age_ms,
+            cycle_started_at=cycle_started_at,
+            intent_latency_ms=None,
             lag_detected=True,
             reason_selected="mispricing_edge_available",
         ),
@@ -272,6 +337,8 @@ def _skipped(
         external_price=payload.get("external_price"),
         external_price_timestamp=payload.get("external_price_timestamp"),
         contract_target_price=payload.get("contract_target_price"),
+        target_source_field=payload.get("target_source_field"),
+        market_as_of=payload.get("market_as_of"),
         distance_to_target=payload.get("distance_to_target"),
         implied_side=payload.get("implied_side"),
         kalshi_yes_bid=payload.get("kalshi_yes_bid"),
@@ -280,6 +347,10 @@ def _skipped(
         kalshi_no_ask=payload.get("kalshi_no_ask"),
         executable_price=payload.get("executable_price"),
         edge_bps=payload.get("edge_bps"),
+        external_price_age_ms=payload.get("external_price_age_ms"),
+        kalshi_quote_age_ms=payload.get("kalshi_quote_age_ms"),
+        cycle_started_at=payload.get("cycle_started_at"),
+        intent_latency_ms=payload.get("intent_latency_ms"),
         lag_detected=False,
         reason_skipped=reason,
     )
@@ -291,3 +362,29 @@ def _market_as_of(ticker_state: TickerState) -> str | None:
     if ticker_state.exchange_ts is not None:
         return str(ticker_state.exchange_ts)
     return None
+
+
+def _age_ms(source_timestamp: str | int | None, now: datetime) -> int | None:
+    parsed = _parse_timestamp(source_timestamp)
+    if parsed is None:
+        return None
+    return max(int((now - parsed).total_seconds() * 1000), 0)
+
+
+def _parse_timestamp(value: str | int | None) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+    stripped = str(value).strip()
+    if not stripped:
+        return None
+    if stripped.isdigit():
+        return datetime.fromtimestamp(int(stripped) / 1000, tz=timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(stripped.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
