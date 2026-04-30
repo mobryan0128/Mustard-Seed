@@ -1202,7 +1202,7 @@ class KalshiBotRunner:
             self._log_cycle_event(
                 "mispricing_fast_scan_selected",
                 {
-                    "cycle_number": self._cycle_count,
+                    "fast_scan": True,
                     "fast_scan_number": fast_scan_number,
                     **_opportunity_payload(contract),
                 },
@@ -1213,18 +1213,8 @@ class KalshiBotRunner:
             self._log_cycle_event(
                 "mispricing_fast_scan_skipped",
                 {
-                    "cycle_number": self._cycle_count,
+                    "fast_scan": True,
                     "fast_scan_number": fast_scan_number,
-                    **_opportunity_payload(contract),
-                },
-            )
-        for contract in contract_scan_snapshot.skipped_contracts:
-            if getattr(contract, "opportunity_source", None) != "mispricing":
-                continue
-            self._log_cycle_event(
-                "mispricing_opportunity_skipped",
-                {
-                    "cycle_number": cycle_number,
                     **_opportunity_payload(contract),
                 },
             )
