@@ -75,6 +75,7 @@ def _run_fixtures(scanner: ContractScanner) -> list[str]:
     failures.extend(_validate_missing_quote_skip(scanner))
     failures.extend(_validate_ranking_tiebreak(scanner))
     failures.extend(_validate_bias_diagnostics_copied_to_ranked_contract(scanner))
+    failures.extend(_validate_market_metadata_copied_to_ranked_contract())
     failures.extend(_validate_low_confidence_mature_impulse_skip(scanner))
     failures.extend(_validate_low_confidence_small_impulse_ranks(scanner))
     failures.extend(_validate_low_confidence_down_impulse_ranks(scanner))
@@ -213,6 +214,33 @@ def _validate_bias_diagnostics_copied_to_ranked_contract(scanner: ContractScanne
             failures.append(
                 f"diagnostic {key}={getattr(btc_contract, key)} expected={value}"
             )
+    return failures
+
+
+def _validate_market_metadata_copied_to_ranked_contract() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": "2026-04-23T12:15:00+00:00",
+                "expiration_time": "2026-04-23T12:15:00+00:00",
+            }
+        },
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=_base_bias_snapshot(),
+        market_snapshot=_base_market_snapshot(),
+    )
+    contract = snapshot.ranked_contracts[0]
+    failures: list[str] = []
+    if contract.contract_close_time != "2026-04-23T12:15:00+00:00":
+        failures.append(f"contract_close_time mismatch: {contract.contract_close_time}")
+    if contract.contract_expiration_time != "2026-04-23T12:15:00+00:00":
+        failures.append(
+            f"contract_expiration_time mismatch: {contract.contract_expiration_time}"
+        )
+    if contract.opportunity_source != "directional":
+        failures.append(f"opportunity_source mismatch: {contract.opportunity_source}")
     return failures
 
 

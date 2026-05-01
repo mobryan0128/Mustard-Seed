@@ -71,6 +71,7 @@ def main() -> int:
     failures.extend(_validate_live_runner_risk_does_not_require_live_validation())
     failures.extend(_validate_fast_scan_requires_min_edge())
     failures.extend(_validate_fast_scan_throttles_duplicate_submission())
+    failures.extend(_validate_directional_fast_scan_uses_cached_cycle_state())
 
     if failures:
         for failure in failures:
@@ -823,6 +824,52 @@ def _validate_fast_scan_throttles_duplicate_submission() -> list[str]:
     return failures
 
 
+def _validate_directional_fast_scan_uses_cached_cycle_state() -> list[str]:
+    clock = _FakeClock()
+    live_coordinator = _FakeLiveExecutionCoordinator(
+        intents=(),
+        fast_intents=(_approved_intent("directional-fast"),),
+    )
+    runner, state = _build_runner(
+        live_runner_execution_enabled=True,
+        simulation_enabled=False,
+        live_execution_coordinator=live_coordinator,
+        live_opportunity_mode="directional",
+        live_directional_fast_scan_enabled=True,
+        runner_loop_interval_seconds=3.0,
+        live_directional_fast_scan_interval_seconds=1.0,
+        live_directional_fast_scan_cooldown_seconds=10.0,
+        live_directional_fast_scan_max_per_market_per_window=1,
+        sleep_fn=clock.sleep,
+        monotonic_fn=clock.monotonic,
+    )
+    runner.run_cycles(1)
+    failures: list[str] = []
+    if live_coordinator.fast_contract_process_calls < 2:
+        failures.append(
+            "directional fast process calls="
+            f"{live_coordinator.fast_contract_process_calls}"
+        )
+    if len(live_coordinator.submit_calls) != 1:
+        failures.append(
+            f"directional fast submissions={len(live_coordinator.submit_calls)}"
+        )
+    if state.discovery_calls != 1:
+        failures.append(
+            f"directional fast discovery calls={state.discovery_calls}"
+        )
+    if state.log_written_ref is None:
+        return failures + ["directional fast missing log path"]
+    payload = _first_event_payload(
+        _jsonl_records(state.log_written_ref),
+        key="event_type",
+        value="directional_fast_scan_candidates",
+    )
+    if payload is None:
+        failures.append("directional fast candidates log missing")
+    return failures
+
+
 def _build_runner(
     *,
     stop_after_first_cycle: bool = False,
@@ -844,6 +891,12 @@ def _build_runner(
     live_mispricing_fast_scan_interval_seconds: float = 1.0,
     live_mispricing_fast_scan_max_per_market_per_window: int = 1,
     live_mispricing_fast_scan_cooldown_seconds: float = 10.0,
+    live_directional_end_window_only: bool = False,
+    live_directional_end_window_minutes: int = 5,
+    live_directional_fast_scan_enabled: bool = False,
+    live_directional_fast_scan_interval_seconds: float = 3.0,
+    live_directional_fast_scan_max_per_market_per_window: int = 1,
+    live_directional_fast_scan_cooldown_seconds: float = 10.0,
     runner_loop_interval_seconds: float = 0.001,
     sleep_fn=None,  # noqa: ANN001
     monotonic_fn=None,  # noqa: ANN001
@@ -870,6 +923,18 @@ def _build_runner(
             ),
             live_mispricing_fast_scan_cooldown_seconds=(
                 live_mispricing_fast_scan_cooldown_seconds
+            ),
+            live_directional_end_window_only=live_directional_end_window_only,
+            live_directional_end_window_minutes=live_directional_end_window_minutes,
+            live_directional_fast_scan_enabled=live_directional_fast_scan_enabled,
+            live_directional_fast_scan_interval_seconds=(
+                live_directional_fast_scan_interval_seconds
+            ),
+            live_directional_fast_scan_max_per_market_per_window=(
+                live_directional_fast_scan_max_per_market_per_window
+            ),
+            live_directional_fast_scan_cooldown_seconds=(
+                live_directional_fast_scan_cooldown_seconds
             ),
             simulation_enabled=simulation_enabled,
             fail_fast_on_startup=fail_fast_on_startup,
@@ -915,6 +980,18 @@ def _build_runner(
                 live_mispricing_fast_scan_cooldown_seconds=(
                     live_mispricing_fast_scan_cooldown_seconds
                 ),
+                live_directional_end_window_only=live_directional_end_window_only,
+                live_directional_end_window_minutes=live_directional_end_window_minutes,
+                live_directional_fast_scan_enabled=live_directional_fast_scan_enabled,
+                live_directional_fast_scan_interval_seconds=(
+                    live_directional_fast_scan_interval_seconds
+                ),
+                live_directional_fast_scan_max_per_market_per_window=(
+                    live_directional_fast_scan_max_per_market_per_window
+                ),
+                live_directional_fast_scan_cooldown_seconds=(
+                    live_directional_fast_scan_cooldown_seconds
+                ),
                 simulation_enabled=simulation_enabled,
                 fail_fast_on_startup=fail_fast_on_startup,
                 market_discovery_refresh_cycles=market_discovery_refresh_cycles,
@@ -945,6 +1022,12 @@ def _settings(
     live_mispricing_fast_scan_interval_seconds: float = 1.0,
     live_mispricing_fast_scan_max_per_market_per_window: int = 1,
     live_mispricing_fast_scan_cooldown_seconds: float = 10.0,
+    live_directional_end_window_only: bool = False,
+    live_directional_end_window_minutes: int = 5,
+    live_directional_fast_scan_enabled: bool = False,
+    live_directional_fast_scan_interval_seconds: float = 3.0,
+    live_directional_fast_scan_max_per_market_per_window: int = 1,
+    live_directional_fast_scan_cooldown_seconds: float = 10.0,
     simulation_enabled: bool = True,
     market_discovery_refresh_cycles: int = 2,
     runner_loop_interval_seconds: float = 0.001,
@@ -1019,6 +1102,7 @@ def _settings(
         live_kill_switch_active=False,
         live_runner_execution_enabled=live_runner_execution_enabled,
         live_opportunity_mode=live_opportunity_mode,
+        live_tracked_products=(),
         live_max_order_count=1,
         live_max_open_positions=1,
         live_min_entry_price_dollars=Decimal("0"),
@@ -1047,6 +1131,18 @@ def _settings(
         ),
         live_mispricing_fast_scan_cooldown_seconds=(
             live_mispricing_fast_scan_cooldown_seconds
+        ),
+        live_directional_end_window_only=live_directional_end_window_only,
+        live_directional_end_window_minutes=live_directional_end_window_minutes,
+        live_directional_fast_scan_enabled=live_directional_fast_scan_enabled,
+        live_directional_fast_scan_interval_seconds=(
+            live_directional_fast_scan_interval_seconds
+        ),
+        live_directional_fast_scan_max_per_market_per_window=(
+            live_directional_fast_scan_max_per_market_per_window
+        ),
+        live_directional_fast_scan_cooldown_seconds=(
+            live_directional_fast_scan_cooldown_seconds
         ),
         live_profit_trailing_exit_enabled=False,
         live_profit_trailing_activation_price=Decimal("0.90"),
@@ -1423,6 +1519,13 @@ class _FakeLiveExecutionCoordinator:
         return self._intents
 
     def process_fast_mispricing_scan_snapshot(self, contract_scan_snapshot, *, cycle_number=None):  # noqa: ANN001
+        self.process_calls += 1
+        self.fast_contract_process_calls += 1
+        if not contract_scan_snapshot.ranked_contracts:
+            return ()
+        return self._fast_intents
+
+    def process_fast_directional_scan_snapshot(self, contract_scan_snapshot, *, cycle_number=None):  # noqa: ANN001
         self.process_calls += 1
         self.fast_contract_process_calls += 1
         if not contract_scan_snapshot.ranked_contracts:

@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -66,6 +67,9 @@ def main() -> int:
     failures.extend(_validate_reversal_range_gate_allows_at_minimum())
     failures.extend(_validate_signal_gate_missing_data_skips_when_enabled())
     failures.extend(_validate_mispricing_bypasses_directional_signal_gates())
+    failures.extend(_validate_directional_end_window_gate_blocks_early_contract())
+    failures.extend(_validate_directional_end_window_gate_allows_late_contract())
+    failures.extend(_validate_directional_end_window_gate_skips_missing_end_time())
     failures.extend(_validate_impulse_override_default_allows_intent())
     failures.extend(_validate_impulse_override_block_skips())
     failures.extend(_validate_impulse_override_momentum_missing_data_skips())
@@ -1009,6 +1013,110 @@ def _validate_mispricing_bypasses_directional_signal_gates() -> list[str]:
         return failures
 
 
+def _validate_directional_end_window_gate_blocks_early_contract() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            balance_payload={"balance": 25000},
+            live_directional_end_window_only=True,
+            live_directional_end_window_minutes=5,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    opportunity_source="directional",
+                    contract_close_time=_future_time(minutes=8),
+                )
+            ),
+            cycle_number=73,
+        )
+        failures: list[str] = []
+        if intents:
+            failures.append("directional end-window early contract created intent")
+        failures.extend(
+            _assert_event_payload(
+                temp_path,
+                "live_order_intent_skipped",
+                {
+                    "reason": "directional_end_window_not_open",
+                    "opportunity_source": "directional",
+                    "end_window_allowed": False,
+                    "end_window_reason": "directional_end_window_not_open",
+                },
+            )
+        )
+        return failures
+
+
+def _validate_directional_end_window_gate_allows_late_contract() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            balance_payload={"balance": 25000},
+            live_directional_end_window_only=True,
+            live_directional_end_window_minutes=5,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    opportunity_source="directional",
+                    contract_close_time=_future_time(minutes=3),
+                )
+            ),
+            cycle_number=74,
+        )
+        failures: list[str] = []
+        if len(intents) != 1:
+            failures.append(
+                f"directional end-window late intent count={len(intents)}"
+            )
+            return failures
+        failures.extend(
+            _assert_event_payload(
+                temp_path,
+                "live_intent_created",
+                {
+                    "opportunity_source": "directional",
+                    "end_window_allowed": True,
+                    "end_window_reason": "directional_end_window_open",
+                },
+            )
+        )
+        return failures
+
+
+def _validate_directional_end_window_gate_skips_missing_end_time() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            balance_payload={"balance": 25000},
+            live_directional_end_window_only=True,
+            live_directional_end_window_minutes=5,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(_contract(opportunity_source="directional")),
+            cycle_number=75,
+        )
+        failures: list[str] = []
+        if intents:
+            failures.append("directional missing end time created intent")
+        failures.extend(
+            _assert_event_payload(
+                temp_path,
+                "live_order_intent_skipped",
+                {
+                    "reason": "directional_end_time_missing",
+                    "opportunity_source": "directional",
+                    "end_window_reason": "directional_end_time_missing",
+                },
+            )
+        )
+        return failures
+
+
 def _validate_impulse_override_default_allows_intent() -> list[str]:
     with TemporaryDirectory() as temp_dir:
         coordinator = _coordinator(Path(temp_dir), balance_payload={"balance": 25000})
@@ -1205,6 +1313,8 @@ def _coordinator(
     live_impulse_override_require_range_position: bool = False,
     live_impulse_override_min_recent_return_bps: Decimal | None = None,
     live_trend_momentum_min_recent_return_bps: Decimal | None = None,
+    live_directional_end_window_only: bool = False,
+    live_directional_end_window_minutes: int = 5,
 ) -> LiveExecutionCoordinator:
     client = (
         _FakeBalanceClient(
@@ -1242,6 +1352,8 @@ def _coordinator(
             live_trend_momentum_min_recent_return_bps=(
                 live_trend_momentum_min_recent_return_bps
             ),
+            live_directional_end_window_only=live_directional_end_window_only,
+            live_directional_end_window_minutes=live_directional_end_window_minutes,
         ),
         client=client,
     )
@@ -1287,6 +1399,9 @@ def _contract(
     lag_detected: bool | None = None,
     reason_selected: str | None = None,
     reason_skipped: str | None = None,
+    contract_close_time: str | None = None,
+    contract_expiration_time: str | None = None,
+    fast_directional_scan: bool | None = None,
 ) -> ScannedContract:
     resolved_best_bid = (
         None
@@ -1329,6 +1444,9 @@ def _contract(
         confidence_reason="test_confidence",
         utc_hour=12,
         opportunity_source=opportunity_source,
+        contract_close_time=contract_close_time,
+        contract_expiration_time=contract_expiration_time,
+        fast_directional_scan=fast_directional_scan,
         external_price=external_price,
         external_price_timestamp=external_price_timestamp,
         contract_target_price=contract_target_price,
@@ -1344,6 +1462,10 @@ def _contract(
         reason_selected=reason_selected,
         reason_skipped=reason_skipped,
     )
+
+
+def _future_time(*, minutes: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
 
 
 def _mispricing_contract(
@@ -1500,6 +1622,8 @@ class _Settings:
     live_impulse_override_require_range_position: bool = False
     live_impulse_override_min_recent_return_bps: Decimal | None = None
     live_trend_momentum_min_recent_return_bps: Decimal | None = None
+    live_directional_end_window_only: bool = False
+    live_directional_end_window_minutes: int = 5
 
 
 class _FakeBalanceClient:

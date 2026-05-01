@@ -91,6 +91,11 @@ class CryptoMarketDiscovery:
 
         for product_id in self._products:
             series_tickers = self._product_series.get(product_id, ())
+            if not series_tickers:
+                self._log_product_skipped(
+                    product_id=product_id,
+                    reason="market_series_unavailable",
+                )
             product_discovered: list[DiscoveredCryptoMarket] = []
             for series_ticker in series_tickers:
                 product_discovered.extend(
@@ -227,6 +232,22 @@ class CryptoMarketDiscovery:
                 "series_tickers": series_tickers,
                 "selected_market_count": len(selected_market_tickers),
                 "selected_market_tickers": selected_market_tickers,
+            },
+        )
+
+    def _log_product_skipped(self, *, product_id: str, reason: str) -> None:
+        if self._logger is None:
+            return
+        self._logger.log_event(
+            category="market_discovery",
+            event_type="crypto_market_discovery_product_skipped",
+            source="crypto_market_discovery",
+            identifier=product_id,
+            payload={
+                "product_id": product_id,
+                "reason": reason,
+                "reason_skipped": reason,
+                "tracked_product_enabled": product_id in self._products,
             },
         )
 

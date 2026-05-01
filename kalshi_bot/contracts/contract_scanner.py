@@ -45,6 +45,13 @@ class ScannedContract:
     confidence_reason: str | None = None
     utc_hour: int | None = None
     opportunity_source: str | None = None
+    contract_close_time: str | None = None
+    contract_expiration_time: str | None = None
+    contract_time_remaining_seconds: int | None = None
+    end_window_allowed: bool | None = None
+    end_window_reason: str | None = None
+    tracked_product_enabled: bool | None = None
+    fast_directional_scan: bool | None = None
     external_price: Decimal | None = None
     external_price_timestamp: str | None = None
     contract_target_price: Decimal | None = None
@@ -75,6 +82,13 @@ class SkippedContract:
     market_ticker: str
     reason: str
     opportunity_source: str | None = None
+    contract_close_time: str | None = None
+    contract_expiration_time: str | None = None
+    contract_time_remaining_seconds: int | None = None
+    end_window_allowed: bool | None = None
+    end_window_reason: str | None = None
+    tracked_product_enabled: bool | None = None
+    fast_directional_scan: bool | None = None
     external_price: Decimal | None = None
     external_price_timestamp: str | None = None
     contract_target_price: Decimal | None = None
@@ -109,7 +123,12 @@ class ContractScanSnapshot:
 class ContractScanner:
     """Read-only scanner over mapped Kalshi markets already present in local state."""
 
-    def __init__(self, *, product_markets: Mapping[str, tuple[str, ...]]) -> None:
+    def __init__(
+        self,
+        *,
+        product_markets: Mapping[str, tuple[str, ...]],
+        market_metadata_by_ticker: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> None:
         normalized = {
             product_id.strip(): tuple(
                 dict.fromkeys(market_ticker.strip() for market_ticker in market_tickers if market_ticker.strip())
@@ -122,6 +141,10 @@ class ContractScanner:
         if any(not market_tickers for market_tickers in normalized.values()):
             raise ContractScannerError("Each contract scanner product must map to at least one market.")
         self._product_markets = normalized
+        self._market_metadata_by_ticker = {
+            str(market_ticker): dict(metadata)
+            for market_ticker, metadata in (market_metadata_by_ticker or {}).items()
+        }
 
     @classmethod
     def from_settings(cls, settings: KalshiSettings) -> "ContractScanner":
@@ -144,6 +167,7 @@ class ContractScanner:
                 ticker_state = market_snapshot.tickers.get(market_ticker)
                 if ticker_state is None:
                     continue
+                metadata = self._market_metadata_by_ticker.get(market_ticker, {})
                 skip_reason = _skip_reason(bias_state, ticker_state)
                 if skip_reason is not None:
                     skipped_contracts.append(
@@ -151,6 +175,16 @@ class ContractScanner:
                             product_id=product_id,
                             market_ticker=market_ticker,
                             reason=skip_reason,
+                            opportunity_source="directional",
+                            contract_close_time=_optional_str_metadata(
+                                metadata,
+                                "close_time",
+                            ),
+                            contract_expiration_time=_optional_str_metadata(
+                                metadata,
+                                "expiration_time",
+                            ),
+                            tracked_product_enabled=True,
                         )
                     )
                     continue
@@ -211,6 +245,15 @@ class ContractScanner:
                         ),
                         utc_hour=getattr(bias_state, "utc_hour", None),
                         opportunity_source="directional",
+                        contract_close_time=_optional_str_metadata(
+                            metadata,
+                            "close_time",
+                        ),
+                        contract_expiration_time=_optional_str_metadata(
+                            metadata,
+                            "expiration_time",
+                        ),
+                        tracked_product_enabled=True,
                     )
                 )
 
@@ -284,3 +327,13 @@ def _market_as_of(ticker_state: TickerState) -> str | None:
     if ticker_state.exchange_ts is not None:
         return str(ticker_state.exchange_ts)
     return None
+
+
+def _optional_str_metadata(
+    metadata: Mapping[str, object],
+    key: str,
+) -> str | None:
+    value = metadata.get(key)
+    if value is None:
+        return None
+    return str(value)

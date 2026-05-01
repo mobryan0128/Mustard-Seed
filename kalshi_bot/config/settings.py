@@ -80,6 +80,12 @@ DEFAULT_LIVE_MISPRICING_FAST_SCAN_ENABLED = False
 DEFAULT_LIVE_MISPRICING_FAST_SCAN_INTERVAL_SECONDS = 1.0
 DEFAULT_LIVE_MISPRICING_FAST_SCAN_MAX_PER_MARKET_PER_WINDOW = 1
 DEFAULT_LIVE_MISPRICING_FAST_SCAN_COOLDOWN_SECONDS = 10.0
+DEFAULT_LIVE_DIRECTIONAL_END_WINDOW_ONLY = False
+DEFAULT_LIVE_DIRECTIONAL_END_WINDOW_MINUTES = 5
+DEFAULT_LIVE_DIRECTIONAL_FAST_SCAN_ENABLED = False
+DEFAULT_LIVE_DIRECTIONAL_FAST_SCAN_INTERVAL_SECONDS = 3.0
+DEFAULT_LIVE_DIRECTIONAL_FAST_SCAN_MAX_PER_MARKET_PER_WINDOW = 1
+DEFAULT_LIVE_DIRECTIONAL_FAST_SCAN_COOLDOWN_SECONDS = 10.0
 DEFAULT_LIVE_PROFIT_TRAILING_EXIT_ENABLED = False
 DEFAULT_LIVE_PROFIT_TRAILING_ACTIVATION_PRICE = Decimal("0.90")
 DEFAULT_LIVE_PROFIT_TRAILING_DROP_DOLLARS = Decimal("0.01")
@@ -94,6 +100,9 @@ DEFAULT_CRYPTO_MARKET_SERIES = {
     "ETH-USD": ("KXETH15M", "KXETH30M"),
     "SOL-USD": ("KXSOL15M",),
     "XRP-USD": ("KXXRP15M",),
+    "DOGE-USD": ("KXDOGE15M",),
+    "BNB-USD": ("KXBNB15M",),
+    "HYPE-USD": ("KXHYPE15M",),
 }
 DEFAULT_MARKET_DISCOVERY_REFRESH_CYCLES = 12
 
@@ -172,6 +181,7 @@ class KalshiSettings:
     live_kill_switch_active: bool
     live_runner_execution_enabled: bool
     live_opportunity_mode: str
+    live_tracked_products: tuple[str, ...]
     live_max_order_count: int
     live_max_open_positions: int
     live_min_entry_price_dollars: Decimal
@@ -195,6 +205,12 @@ class KalshiSettings:
     live_mispricing_fast_scan_interval_seconds: float
     live_mispricing_fast_scan_max_per_market_per_window: int
     live_mispricing_fast_scan_cooldown_seconds: float
+    live_directional_end_window_only: bool
+    live_directional_end_window_minutes: int
+    live_directional_fast_scan_enabled: bool
+    live_directional_fast_scan_interval_seconds: float
+    live_directional_fast_scan_max_per_market_per_window: int
+    live_directional_fast_scan_cooldown_seconds: float
     live_profit_trailing_exit_enabled: bool
     live_profit_trailing_activation_price: Decimal
     live_profit_trailing_drop_dollars: Decimal
@@ -303,6 +319,20 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         product_id: tuple(series_tickers)
         for product_id, series_tickers in DEFAULT_CRYPTO_MARKET_SERIES.items()
     }
+    live_tracked_products = _parse_csv(values.get("LIVE_TRACKED_PRODUCTS"))
+    if live_tracked_products:
+        crypto_feed_products = live_tracked_products
+        bias_products = live_tracked_products
+        contract_scanner_product_markets = {
+            product_id: market_tickers
+            for product_id, market_tickers in contract_scanner_product_markets.items()
+            if product_id in live_tracked_products
+        }
+        crypto_market_series = {
+            product_id: series_tickers
+            for product_id, series_tickers in crypto_market_series.items()
+            if product_id in live_tracked_products
+        }
     market_discovery_refresh_cycles = _parse_positive_int(
         values.get("KALSHI_MARKET_DISCOVERY_REFRESH_CYCLES"),
         DEFAULT_MARKET_DISCOVERY_REFRESH_CYCLES,
@@ -537,6 +567,36 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         DEFAULT_LIVE_MISPRICING_FAST_SCAN_COOLDOWN_SECONDS,
         "LIVE_MISPRICING_FAST_SCAN_COOLDOWN_SECONDS",
     )
+    live_directional_end_window_only = _parse_bool(
+        values.get("LIVE_DIRECTIONAL_END_WINDOW_ONLY"),
+        DEFAULT_LIVE_DIRECTIONAL_END_WINDOW_ONLY,
+        "LIVE_DIRECTIONAL_END_WINDOW_ONLY",
+    )
+    live_directional_end_window_minutes = _parse_positive_int(
+        values.get("LIVE_DIRECTIONAL_END_WINDOW_MINUTES"),
+        DEFAULT_LIVE_DIRECTIONAL_END_WINDOW_MINUTES,
+        "LIVE_DIRECTIONAL_END_WINDOW_MINUTES",
+    )
+    live_directional_fast_scan_enabled = _parse_bool(
+        values.get("LIVE_DIRECTIONAL_FAST_SCAN_ENABLED"),
+        DEFAULT_LIVE_DIRECTIONAL_FAST_SCAN_ENABLED,
+        "LIVE_DIRECTIONAL_FAST_SCAN_ENABLED",
+    )
+    live_directional_fast_scan_interval_seconds = _parse_positive_float(
+        values.get("LIVE_DIRECTIONAL_FAST_SCAN_INTERVAL_SECONDS"),
+        DEFAULT_LIVE_DIRECTIONAL_FAST_SCAN_INTERVAL_SECONDS,
+        "LIVE_DIRECTIONAL_FAST_SCAN_INTERVAL_SECONDS",
+    )
+    live_directional_fast_scan_max_per_market_per_window = _parse_positive_int(
+        values.get("LIVE_DIRECTIONAL_FAST_SCAN_MAX_PER_MARKET_PER_WINDOW"),
+        DEFAULT_LIVE_DIRECTIONAL_FAST_SCAN_MAX_PER_MARKET_PER_WINDOW,
+        "LIVE_DIRECTIONAL_FAST_SCAN_MAX_PER_MARKET_PER_WINDOW",
+    )
+    live_directional_fast_scan_cooldown_seconds = _parse_positive_float(
+        values.get("LIVE_DIRECTIONAL_FAST_SCAN_COOLDOWN_SECONDS"),
+        DEFAULT_LIVE_DIRECTIONAL_FAST_SCAN_COOLDOWN_SECONDS,
+        "LIVE_DIRECTIONAL_FAST_SCAN_COOLDOWN_SECONDS",
+    )
     live_profit_trailing_exit_enabled = _parse_bool(
         values.get("LIVE_PROFIT_TRAILING_EXIT_ENABLED"),
         DEFAULT_LIVE_PROFIT_TRAILING_EXIT_ENABLED,
@@ -742,6 +802,7 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_kill_switch_active=live_kill_switch_active,
         live_runner_execution_enabled=live_runner_execution_enabled,
         live_opportunity_mode=live_opportunity_mode,
+        live_tracked_products=live_tracked_products,
         live_max_order_count=live_max_order_count,
         live_max_open_positions=live_max_open_positions,
         live_min_entry_price_dollars=live_min_entry_price_dollars,
@@ -786,6 +847,18 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         ),
         live_mispricing_fast_scan_cooldown_seconds=(
             live_mispricing_fast_scan_cooldown_seconds
+        ),
+        live_directional_end_window_only=live_directional_end_window_only,
+        live_directional_end_window_minutes=live_directional_end_window_minutes,
+        live_directional_fast_scan_enabled=live_directional_fast_scan_enabled,
+        live_directional_fast_scan_interval_seconds=(
+            live_directional_fast_scan_interval_seconds
+        ),
+        live_directional_fast_scan_max_per_market_per_window=(
+            live_directional_fast_scan_max_per_market_per_window
+        ),
+        live_directional_fast_scan_cooldown_seconds=(
+            live_directional_fast_scan_cooldown_seconds
         ),
         live_profit_trailing_exit_enabled=live_profit_trailing_exit_enabled,
         live_profit_trailing_activation_price=(
@@ -907,6 +980,7 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_KILL_SWITCH_ACTIVE",
         "LIVE_RUNNER_EXECUTION_ENABLED",
         "LIVE_OPPORTUNITY_MODE",
+        "LIVE_TRACKED_PRODUCTS",
         "LIVE_MAX_ORDER_COUNT",
         "LIVE_MAX_OPEN_POSITIONS",
         "LIVE_MIN_ENTRY_PRICE_DOLLARS",
@@ -930,6 +1004,12 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_MISPRICING_FAST_SCAN_INTERVAL_SECONDS",
         "LIVE_MISPRICING_FAST_SCAN_MAX_PER_MARKET_PER_WINDOW",
         "LIVE_MISPRICING_FAST_SCAN_COOLDOWN_SECONDS",
+        "LIVE_DIRECTIONAL_END_WINDOW_ONLY",
+        "LIVE_DIRECTIONAL_END_WINDOW_MINUTES",
+        "LIVE_DIRECTIONAL_FAST_SCAN_ENABLED",
+        "LIVE_DIRECTIONAL_FAST_SCAN_INTERVAL_SECONDS",
+        "LIVE_DIRECTIONAL_FAST_SCAN_MAX_PER_MARKET_PER_WINDOW",
+        "LIVE_DIRECTIONAL_FAST_SCAN_COOLDOWN_SECONDS",
         "LIVE_PROFIT_TRAILING_EXIT_ENABLED",
         "LIVE_PROFIT_TRAILING_ACTIVATION_PRICE",
         "LIVE_PROFIT_TRAILING_DROP_DOLLARS",

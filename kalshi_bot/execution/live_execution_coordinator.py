@@ -284,6 +284,97 @@ class LiveExecutionCoordinator:
             live_risk_state=self._latest_live_risk_state,
         )
 
+    def process_fast_directional_scan_snapshot(
+        self,
+        contract_scan_snapshot: ContractScanSnapshot,
+        *,
+        cycle_number: int | None = None,
+    ) -> tuple[LiveOrderIntent, ...]:
+        """Create live intents from fast directional scans using cached risk inputs."""
+
+        if not contract_scan_snapshot.ranked_contracts:
+            self._log_intent_skipped(
+                reason="no_ranked_contracts",
+                product_id="",
+                market_ticker=None,
+                simulation_position_id=None,
+                details={"cycle_number": cycle_number, "fast_directional_scan": True},
+            )
+            return ()
+
+        if self._latest_balance_dollars is None:
+            self._log_intent_skipped(
+                reason="fast_scan_risk_cache_missing",
+                product_id="",
+                market_ticker=None,
+                simulation_position_id=None,
+                details={
+                    "cycle_number": cycle_number,
+                    "fast_directional_scan": True,
+                    "missing": "balance_dollars",
+                },
+            )
+            return ()
+        if self._latest_live_risk_state is None:
+            self._log_intent_skipped(
+                reason="fast_scan_risk_cache_missing",
+                product_id="",
+                market_ticker=None,
+                simulation_position_id=None,
+                details={
+                    "cycle_number": cycle_number,
+                    "fast_directional_scan": True,
+                    "missing": "live_risk_state",
+                },
+            )
+            return ()
+
+        directional_contracts = tuple(
+            contract
+            for contract in contract_scan_snapshot.ranked_contracts
+            if getattr(contract, "opportunity_source", None) == "directional"
+        )
+        if not directional_contracts:
+            self._log_intent_skipped(
+                reason="fast_scan_no_directional_candidates",
+                product_id="",
+                market_ticker=None,
+                simulation_position_id=None,
+                details={
+                    "cycle_number": cycle_number,
+                    "fast_directional_scan": True,
+                },
+            )
+            return ()
+
+        return self._create_contract_scan_intents(
+            ContractScanSnapshot(
+                ranked_contracts=directional_contracts,
+                skipped_contracts=contract_scan_snapshot.skipped_contracts,
+            ),
+            cycle_number=cycle_number,
+            balance_dollars=self._latest_balance_dollars,
+            entry_risk_manager=self._entry_risk_manager_for_balance(
+                self._latest_balance_dollars
+            ),
+            live_risk_state=self._fast_directional_live_risk_state(),
+        )
+
+    def _fast_directional_live_risk_state(self) -> LiveRiskState:
+        assert self._latest_live_risk_state is not None
+        ledger_state = self._ledger_live_risk_state()
+        return LiveRiskState(
+            open_position_count=max(
+                self._latest_live_risk_state.open_position_count,
+                ledger_state.open_position_count,
+            ),
+            current_exposure_dollars=max(
+                self._latest_live_risk_state.current_exposure_dollars,
+                ledger_state.current_exposure_dollars,
+            ),
+            source=f"{self._latest_live_risk_state.source}+ledger_fast_directional",
+        )
+
     def _create_contract_scan_intents(
         self,
         contract_scan_snapshot: ContractScanSnapshot,
@@ -1175,6 +1266,7 @@ class LiveExecutionCoordinator:
             "structure": contract.structure,
             "confidence": contract.confidence,
             "entry_price": contract.midpoint,
+            "reason_skipped": reason,
             **_signal_diagnostics_payload(
                 contract,
                 settings=self._settings,
@@ -1640,6 +1732,14 @@ def _evaluate_signal_gates(
     if getattr(contract, "opportunity_source", None) == "mispricing":
         return None, details
 
+    end_window_skip_reason = _apply_directional_end_window_gate(
+        contract,
+        settings=settings,
+        details=details,
+    )
+    if end_window_skip_reason is not None:
+        return end_window_skip_reason, details
+
     impulse_skip_reason = _apply_impulse_override_signal_gate(
         contract,
         settings=settings,
@@ -1683,6 +1783,29 @@ def _evaluate_signal_gates(
             return "reversal_range_position_below_minimum", details
 
     return None, details
+
+
+def _apply_directional_end_window_gate(
+    contract: ScannedContract,
+    *,
+    settings: KalshiSettings,
+    details: dict[str, object],
+) -> str | None:
+    if not getattr(settings, "live_directional_end_window_only", False):
+        return None
+    if getattr(contract, "opportunity_source", None) != "directional":
+        return None
+
+    allowed, reason, remaining_seconds = _directional_end_window_status(
+        contract,
+        settings=settings,
+    )
+    details["contract_time_remaining_seconds"] = remaining_seconds
+    details["end_window_allowed"] = allowed
+    details["end_window_reason"] = reason
+    if allowed:
+        return None
+    return reason
 
 
 def _apply_impulse_override_signal_gate(
@@ -1812,6 +1935,40 @@ def _contract_recent_momentum_aligned(contract: ScannedContract) -> bool | None:
     return None
 
 
+def _directional_end_window_status(
+    contract: ScannedContract,
+    *,
+    settings: KalshiSettings | None,
+) -> tuple[bool | None, str | None, int | None]:
+    end_time = getattr(contract, "contract_close_time", None) or getattr(
+        contract,
+        "contract_expiration_time",
+        None,
+    )
+    if end_time is None:
+        return None, "directional_end_time_missing", None
+
+    parsed_end_time = _parse_timestamp(end_time)
+    if parsed_end_time is None:
+        return None, "directional_end_time_missing", None
+
+    remaining_seconds = int(
+        (parsed_end_time - datetime.now(timezone.utc)).total_seconds()
+    )
+    if settings is None:
+        return None, None, remaining_seconds
+
+    if remaining_seconds < 0:
+        return False, "directional_contract_expired", remaining_seconds
+
+    window_seconds = (
+        getattr(settings, "live_directional_end_window_minutes", 5) * 60
+    )
+    if remaining_seconds <= window_seconds:
+        return True, "directional_end_window_open", remaining_seconds
+    return False, "directional_end_window_not_open", remaining_seconds
+
+
 def _signal_diagnostics_payload(
     contract: ScannedContract,
     *,
@@ -1849,6 +2006,21 @@ def _signal_diagnostics_payload(
         == IMPULSE_OVERRIDE_CLASSIFICATION_REASON
     ):
         impulse_override_allowed = True
+    end_window_allowed = None
+    end_window_reason = None
+    contract_time_remaining_seconds = None
+    if getattr(contract, "opportunity_source", None) == "directional":
+        end_window_settings = (
+            settings
+            if (
+                settings is not None
+                and getattr(settings, "live_directional_end_window_only", False)
+            )
+            else None
+        )
+        end_window_allowed, end_window_reason, contract_time_remaining_seconds = (
+            _directional_end_window_status(contract, settings=end_window_settings)
+        )
 
     return {
         "lookback_return_bps": getattr(contract, "lookback_return_bps", None),
@@ -1873,7 +2045,23 @@ def _signal_diagnostics_payload(
         "recent_return_required_bps": recent_return_required_bps,
         "trend_momentum_confirmed_reason": trend_confirmed_reason,
         **_opportunity_diagnostics_payload(contract),
+        "contract_time_remaining_seconds": _prefer_diagnostic_value(
+            getattr(contract, "contract_time_remaining_seconds", None),
+            contract_time_remaining_seconds,
+        ),
+        "end_window_allowed": _prefer_diagnostic_value(
+            getattr(contract, "end_window_allowed", None),
+            end_window_allowed,
+        ),
+        "end_window_reason": _prefer_diagnostic_value(
+            getattr(contract, "end_window_reason", None),
+            end_window_reason,
+        ),
     }
+
+
+def _prefer_diagnostic_value(primary, fallback):  # noqa: ANN001
+    return primary if primary is not None else fallback
 
 
 def _opportunity_diagnostics_payload(contract: ScannedContract) -> dict[str, object]:
@@ -1881,7 +2069,42 @@ def _opportunity_diagnostics_payload(contract: ScannedContract) -> dict[str, obj
     if opportunity_source != "mispricing":
         if opportunity_source is None:
             return {}
-        return {"opportunity_source": opportunity_source}
+        allowed, reason, remaining_seconds = _directional_end_window_status(
+            contract,
+            settings=None,
+        )
+        return {
+            "opportunity_source": opportunity_source,
+            "contract_close_time": getattr(contract, "contract_close_time", None),
+            "contract_expiration_time": getattr(
+                contract,
+                "contract_expiration_time",
+                None,
+            ),
+            "contract_time_remaining_seconds": _prefer_diagnostic_value(
+                getattr(contract, "contract_time_remaining_seconds", None),
+                remaining_seconds,
+            ),
+            "end_window_allowed": _prefer_diagnostic_value(
+                getattr(contract, "end_window_allowed", None),
+                allowed,
+            ),
+            "end_window_reason": _prefer_diagnostic_value(
+                getattr(contract, "end_window_reason", None),
+                reason,
+            ),
+            "tracked_product_enabled": getattr(
+                contract,
+                "tracked_product_enabled",
+                None,
+            ),
+            "fast_directional_scan": getattr(
+                contract,
+                "fast_directional_scan",
+                None,
+            ),
+            "reason_skipped": getattr(contract, "reason_skipped", None),
+        }
     external_price_timestamp = getattr(contract, "external_price_timestamp", None)
     market_as_of = getattr(contract, "market_as_of", None)
     return {

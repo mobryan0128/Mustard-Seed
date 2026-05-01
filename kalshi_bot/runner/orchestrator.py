@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -170,9 +170,11 @@ class KalshiBotRunner:
         self._stopped = False
         self._cycle_count = 0
         self._fast_scan_count = 0
+        self._directional_fast_scan_count = 0
         self._last_successful_cycle_at: str | None = None
         self._last_error: str | None = None
         self._fast_scan_submission_history: dict[tuple[str, str], list[float]] = {}
+        self._directional_fast_scan_submission_history: dict[tuple[str, str], list[float]] = {}
         self._latest_result: RunnerCycleResult | None = None
         self._last_market_discovery_cycle: int | None = None
         self._consecutive_kalshi_feed_timeouts = 0
@@ -309,30 +311,66 @@ class KalshiBotRunner:
 
     def _sleep_between_cycles(self) -> None:
         slow_interval = self._settings.runner_loop_interval_seconds
-        if not self._mispricing_fast_scan_active():
+        if not self._mispricing_fast_scan_active() and not self._directional_fast_scan_active():
             self._sleep_fn(slow_interval)
             return
 
         deadline = self._monotonic_fn() + slow_interval
-        fast_interval = self._settings.live_mispricing_fast_scan_interval_seconds
-        next_fast_scan_at = self._monotonic_fn() + fast_interval
+        next_mispricing_fast_scan_at = (
+            self._monotonic_fn() + self._settings.live_mispricing_fast_scan_interval_seconds
+            if self._mispricing_fast_scan_active()
+            else None
+        )
+        next_directional_fast_scan_at = (
+            self._monotonic_fn() + self._settings.live_directional_fast_scan_interval_seconds
+            if self._directional_fast_scan_active()
+            else None
+        )
         while not self._stopped:
             now = self._monotonic_fn()
             if now >= deadline:
                 break
-            wake_at = min(deadline, next_fast_scan_at)
+            wake_candidates = [deadline]
+            if next_mispricing_fast_scan_at is not None:
+                wake_candidates.append(next_mispricing_fast_scan_at)
+            if next_directional_fast_scan_at is not None:
+                wake_candidates.append(next_directional_fast_scan_at)
+            wake_at = min(wake_candidates)
             self._sleep_fn(max(wake_at - now, 0))
             now = self._monotonic_fn()
-            if now < next_fast_scan_at or now >= deadline or self._stopped:
+            if now >= deadline or self._stopped:
                 continue
-            self._run_mispricing_fast_scan_tick()
-            next_fast_scan_at = now + fast_interval
+            if (
+                next_mispricing_fast_scan_at is not None
+                and now >= next_mispricing_fast_scan_at
+            ):
+                self._run_mispricing_fast_scan_tick()
+                next_mispricing_fast_scan_at = (
+                    now + self._settings.live_mispricing_fast_scan_interval_seconds
+                )
+            if (
+                next_directional_fast_scan_at is not None
+                and now >= next_directional_fast_scan_at
+            ):
+                self._run_directional_fast_scan_tick()
+                next_directional_fast_scan_at = (
+                    now + self._settings.live_directional_fast_scan_interval_seconds
+                )
 
     def _mispricing_fast_scan_active(self) -> bool:
         return (
             getattr(self._settings, "live_mispricing_fast_scan_enabled", False)
             and getattr(self._settings, "live_opportunity_mode", "directional")
             in {"mispricing", "hybrid"}
+            and getattr(self._settings, "live_runner_execution_enabled", False)
+            and self._live_execution_coordinator is not None
+        )
+
+    def _directional_fast_scan_active(self) -> bool:
+        return (
+            getattr(self._settings, "live_directional_fast_scan_enabled", False)
+            and getattr(self._settings, "live_opportunity_mode", "directional")
+            in {"directional", "hybrid"}
             and getattr(self._settings, "live_runner_execution_enabled", False)
             and self._live_execution_coordinator is not None
         )
@@ -356,6 +394,7 @@ class KalshiBotRunner:
             kalshi_result=kalshi_result,
         )
         crypto_snapshot = self._crypto_feed_client.snapshot()
+        self._log_external_price_availability(crypto_snapshot=crypto_snapshot)
         bias_snapshot = self._bias_engine.ingest(crypto_snapshot)
         market_snapshot = self._market_state_cache.snapshot()
         if (
@@ -701,6 +740,142 @@ class KalshiBotRunner:
             allowed.append(intent)
         return tuple(allowed)
 
+    def _run_directional_fast_scan_tick(self) -> None:
+        self._directional_fast_scan_count += 1
+        fast_scan_number = self._directional_fast_scan_count
+        self._log_cycle_event(
+            "directional_fast_scan_started",
+            {
+                "cycle_number": self._cycle_count,
+                "fast_scan_number": fast_scan_number,
+                "cycle_started_at": _utc_now_iso(),
+            },
+        )
+        try:
+            kalshi_result, crypto_result = asyncio.run(self._run_fast_ingestion_cycle())
+        except Exception as exc:  # noqa: BLE001
+            self._log_cycle_event(
+                "directional_fast_scan_skipped",
+                {
+                    "cycle_number": self._cycle_count,
+                    "fast_scan_number": fast_scan_number,
+                    "reason": "fast_scan_ingestion_failed",
+                    "message": str(exc),
+                },
+            )
+            return
+
+        crypto_snapshot = self._crypto_feed_client.snapshot()
+        self._log_external_price_availability(crypto_snapshot=crypto_snapshot)
+        bias_snapshot = self._bias_engine.ingest(crypto_snapshot)
+        market_snapshot = self._market_state_cache.snapshot()
+        contract_scan_snapshot = self._scan_fast_directional_contracts(
+            bias_snapshot=bias_snapshot,
+            market_snapshot=market_snapshot,
+        )
+        self._log_cycle_event(
+            "directional_fast_scan_candidates",
+            {
+                "cycle_number": self._cycle_count,
+                "fast_scan_number": fast_scan_number,
+                "kalshi_market_data_message_count": _market_data_message_count(
+                    kalshi_result
+                ),
+                "crypto_feed_message_count": crypto_result.messages_received,
+                "ranked_contract_count": len(contract_scan_snapshot.ranked_contracts),
+                "skipped_contract_count": len(
+                    contract_scan_snapshot.skipped_contracts
+                ),
+            },
+        )
+        self._log_fast_directional_opportunities(
+            fast_scan_number=fast_scan_number,
+            contract_scan_snapshot=contract_scan_snapshot,
+        )
+        assert self._live_execution_coordinator is not None
+        intents = (
+            self._live_execution_coordinator.process_fast_directional_scan_snapshot(
+                contract_scan_snapshot,
+                cycle_number=self._cycle_count,
+            )
+        )
+        intents = self._filter_directional_fast_scan_intents(
+            intents,
+            fast_scan_number=fast_scan_number,
+        )
+        self._submit_live_runner_intents(
+            cycle_number=self._cycle_count,
+            intents=intents,
+        )
+
+    def _scan_fast_directional_contracts(
+        self,
+        *,
+        bias_snapshot: BiasSnapshot,
+        market_snapshot: MarketStateSnapshot,
+    ) -> ContractScanSnapshot:
+        if self._contract_scanner is None:
+            return ContractScanSnapshot(ranked_contracts=(), skipped_contracts=())
+        snapshot = self._contract_scanner.scan(
+            bias_snapshot=bias_snapshot,
+            market_snapshot=market_snapshot,
+        )
+        return ContractScanSnapshot(
+            ranked_contracts=tuple(
+                replace(contract, fast_directional_scan=True)
+                for contract in snapshot.ranked_contracts
+            ),
+            skipped_contracts=tuple(
+                replace(contract, fast_directional_scan=True)
+                for contract in snapshot.skipped_contracts
+            ),
+        )
+
+    def _filter_directional_fast_scan_intents(
+        self,
+        intents: tuple[Any, ...],
+        *,
+        fast_scan_number: int,
+    ) -> tuple[Any, ...]:
+        allowed: list[Any] = []
+        now = self._monotonic_fn()
+        cooldown_seconds = getattr(
+            self._settings,
+            "live_directional_fast_scan_cooldown_seconds",
+            10.0,
+        )
+        max_per_window = getattr(
+            self._settings,
+            "live_directional_fast_scan_max_per_market_per_window",
+            1,
+        )
+        for intent in intents:
+            key = (str(getattr(intent, "ticker", "")), str(getattr(intent, "side", "")))
+            attempts = [
+                timestamp
+                for timestamp in self._directional_fast_scan_submission_history.get(key, [])
+                if now - timestamp < cooldown_seconds
+            ]
+            self._directional_fast_scan_submission_history[key] = attempts
+            if len(attempts) >= max_per_window:
+                self._log_cycle_event(
+                    "directional_fast_scan_skipped",
+                    {
+                        "cycle_number": self._cycle_count,
+                        "fast_scan_number": fast_scan_number,
+                        "reason": "duplicate_fast_scan_submission_throttled",
+                        "ticker": key[0],
+                        "side": key[1],
+                        "attempts_in_window": len(attempts),
+                        "cooldown_seconds": cooldown_seconds,
+                    },
+                )
+                continue
+            attempts.append(now)
+            self._directional_fast_scan_submission_history[key] = attempts
+            allowed.append(intent)
+        return tuple(allowed)
+
     def _refresh_market_discovery_if_due(self, cycle_number: int) -> None:
         if self._market_discovery is None:
             return
@@ -752,7 +927,12 @@ class KalshiBotRunner:
         self._active_discovered_markets = snapshot.discovered_markets
         self._market_tickers = next_tickers
         self._contract_scanner = (
-            ContractScanner(product_markets=next_product_markets)
+            ContractScanner(
+                product_markets=next_product_markets,
+                market_metadata_by_ticker=_market_metadata_by_ticker(
+                    snapshot.discovered_markets
+                ),
+            )
             if next_product_markets
             else None
         )
@@ -1190,6 +1370,30 @@ class KalshiBotRunner:
                 },
             )
 
+    def _log_external_price_availability(self, *, crypto_snapshot: Any) -> None:
+        for product_id in self._settings.bias_products:
+            product_state = getattr(crypto_snapshot, "products", {}).get(product_id)
+            if (
+                product_state is not None
+                and getattr(product_state, "price", None) is not None
+            ):
+                continue
+            self._log_cycle_event(
+                "directional_product_skipped",
+                {
+                    "cycle_number": self._cycle_count,
+                    "product_id": product_id,
+                    "opportunity_source": "directional",
+                    "tracked_product_enabled": (
+                        product_id in self._settings.live_tracked_products
+                        if self._settings.live_tracked_products
+                        else product_id in self._settings.bias_products
+                    ),
+                    "reason": "external_price_unavailable",
+                    "reason_skipped": "external_price_unavailable",
+                },
+            )
+
     def _log_fast_mispricing_opportunities(
         self,
         *,
@@ -1203,6 +1407,35 @@ class KalshiBotRunner:
                 "mispricing_fast_scan_selected",
                 {
                     "fast_scan": True,
+                    "fast_scan_number": fast_scan_number,
+                    **_opportunity_payload(contract),
+                },
+            )
+
+    def _log_fast_directional_opportunities(
+        self,
+        *,
+        fast_scan_number: int,
+        contract_scan_snapshot: ContractScanSnapshot,
+    ) -> None:
+        for contract in contract_scan_snapshot.ranked_contracts:
+            if getattr(contract, "opportunity_source", None) != "directional":
+                continue
+            self._log_cycle_event(
+                "directional_fast_scan_selected",
+                {
+                    "fast_directional_scan": True,
+                    "fast_scan_number": fast_scan_number,
+                    **_opportunity_payload(contract),
+                },
+            )
+        for contract in contract_scan_snapshot.skipped_contracts:
+            if getattr(contract, "opportunity_source", None) != "directional":
+                continue
+            self._log_cycle_event(
+                "directional_fast_scan_skipped",
+                {
+                    "fast_directional_scan": True,
                     "fast_scan_number": fast_scan_number,
                     **_opportunity_payload(contract),
                 },
@@ -1241,6 +1474,18 @@ def _manual_discovered_markets(
     )
 
 
+def _market_metadata_by_ticker(
+    discovered_markets: tuple[DiscoveredCryptoMarket, ...],
+) -> dict[str, dict[str, object]]:
+    return {
+        market.market_ticker: {
+            "close_time": market.close_time,
+            "expiration_time": market.expiration_time,
+        }
+        for market in discovered_markets
+    }
+
+
 def _hybrid_rank_key(contract) -> tuple[object, ...]:  # noqa: ANN001
     if getattr(contract, "opportunity_source", None) == "mispricing":
         edge_bps = getattr(contract, "edge_bps", None) or Decimal("0")
@@ -1263,6 +1508,17 @@ def _opportunity_payload(item) -> dict[str, object]:  # noqa: ANN001
         "product_id": getattr(item, "product_id", None),
         "market_ticker": getattr(item, "market_ticker", None),
         "opportunity_source": getattr(item, "opportunity_source", None),
+        "contract_close_time": getattr(item, "contract_close_time", None),
+        "contract_expiration_time": getattr(item, "contract_expiration_time", None),
+        "contract_time_remaining_seconds": getattr(
+            item,
+            "contract_time_remaining_seconds",
+            None,
+        ),
+        "end_window_allowed": getattr(item, "end_window_allowed", None),
+        "end_window_reason": getattr(item, "end_window_reason", None),
+        "tracked_product_enabled": getattr(item, "tracked_product_enabled", None),
+        "fast_directional_scan": getattr(item, "fast_directional_scan", None),
         "external_price": getattr(item, "external_price", None),
         "external_price_timestamp": getattr(item, "external_price_timestamp", None),
         "contract_target_price": getattr(item, "contract_target_price", None),
@@ -1283,7 +1539,12 @@ def _opportunity_payload(item) -> dict[str, object]:  # noqa: ANN001
         "intent_latency_ms": getattr(item, "intent_latency_ms", None),
         "lag_detected": getattr(item, "lag_detected", None),
         "reason_selected": getattr(item, "reason_selected", None),
-        "reason_skipped": getattr(item, "reason_skipped", None),
+        "reason_skipped": getattr(
+            item,
+            "reason_skipped",
+            None,
+        )
+        or getattr(item, "reason", None),
         "reason": getattr(item, "reason", None),
     }
 

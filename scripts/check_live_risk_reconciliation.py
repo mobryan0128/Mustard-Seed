@@ -93,6 +93,10 @@ def _validate_settings_defaults() -> list[str]:
         failures.append(
             f"default live_opportunity_mode={settings.live_opportunity_mode}"
         )
+    if settings.live_tracked_products != ():
+        failures.append(
+            f"default live_tracked_products={settings.live_tracked_products}"
+        )
     if settings.live_require_momentum_alignment:
         failures.append("default live_require_momentum_alignment=True")
     if settings.live_require_trend_momentum_confirmation:
@@ -156,6 +160,30 @@ def _validate_settings_defaults() -> list[str]:
             "default live_mispricing_fast_scan_cooldown_seconds="
             f"{settings.live_mispricing_fast_scan_cooldown_seconds}"
         )
+    if settings.live_directional_end_window_only:
+        failures.append("default live_directional_end_window_only=True")
+    if settings.live_directional_end_window_minutes != 5:
+        failures.append(
+            "default live_directional_end_window_minutes="
+            f"{settings.live_directional_end_window_minutes}"
+        )
+    if settings.live_directional_fast_scan_enabled:
+        failures.append("default live_directional_fast_scan_enabled=True")
+    if settings.live_directional_fast_scan_interval_seconds != 3.0:
+        failures.append(
+            "default live_directional_fast_scan_interval_seconds="
+            f"{settings.live_directional_fast_scan_interval_seconds}"
+        )
+    if settings.live_directional_fast_scan_max_per_market_per_window != 1:
+        failures.append(
+            "default live_directional_fast_scan_max_per_market_per_window="
+            f"{settings.live_directional_fast_scan_max_per_market_per_window}"
+        )
+    if settings.live_directional_fast_scan_cooldown_seconds != 10.0:
+        failures.append(
+            "default live_directional_fast_scan_cooldown_seconds="
+            f"{settings.live_directional_fast_scan_cooldown_seconds}"
+        )
     if settings.live_max_total_exposure_dollars is not None:
         failures.append(
             "default live_max_total_exposure_dollars="
@@ -175,6 +203,7 @@ def _validate_settings_overrides() -> list[str]:
             + "LIVE_MAX_ENTRY_PRICE_DOLLARS=0.850\n"
             + "LIVE_MAX_EXECUTION_SPREAD_DOLLARS=0.150\n"
             + "LIVE_OPPORTUNITY_MODE=hybrid\n"
+            + "LIVE_TRACKED_PRODUCTS=XRP-USD,DOGE-USD,BNB-USD,HYPE-USD\n"
             + "LIVE_REQUIRE_MOMENTUM_ALIGNMENT=true\n"
             + "LIVE_REQUIRE_TREND_MOMENTUM_CONFIRMATION=true\n"
             + "LIVE_REQUIRE_REVERSAL_RANGE_POSITION=true\n"
@@ -192,6 +221,12 @@ def _validate_settings_overrides() -> list[str]:
             + "LIVE_MISPRICING_FAST_SCAN_INTERVAL_SECONDS=0.5\n"
             + "LIVE_MISPRICING_FAST_SCAN_MAX_PER_MARKET_PER_WINDOW=2\n"
             + "LIVE_MISPRICING_FAST_SCAN_COOLDOWN_SECONDS=12.5\n"
+            + "LIVE_DIRECTIONAL_END_WINDOW_ONLY=true\n"
+            + "LIVE_DIRECTIONAL_END_WINDOW_MINUTES=3\n"
+            + "LIVE_DIRECTIONAL_FAST_SCAN_ENABLED=true\n"
+            + "LIVE_DIRECTIONAL_FAST_SCAN_INTERVAL_SECONDS=2.5\n"
+            + "LIVE_DIRECTIONAL_FAST_SCAN_MAX_PER_MARKET_PER_WINDOW=3\n"
+            + "LIVE_DIRECTIONAL_FAST_SCAN_COOLDOWN_SECONDS=8.5\n"
             + "LIVE_MAX_TOTAL_EXPOSURE_DOLLARS=12.34\n",
             encoding="utf-8",
         )
@@ -222,6 +257,22 @@ def _validate_settings_overrides() -> list[str]:
         failures.append(
             f"override live_opportunity_mode={settings.live_opportunity_mode}"
         )
+    if settings.live_tracked_products != (
+        "XRP-USD",
+        "DOGE-USD",
+        "BNB-USD",
+        "HYPE-USD",
+    ):
+        failures.append(
+            f"override live_tracked_products={settings.live_tracked_products}"
+        )
+    if settings.crypto_feed_products != settings.live_tracked_products:
+        failures.append(
+            "override crypto_feed_products="
+            f"{settings.crypto_feed_products}"
+        )
+    if settings.bias_products != settings.live_tracked_products:
+        failures.append(f"override bias_products={settings.bias_products}")
     if not settings.live_require_momentum_alignment:
         failures.append("override live_require_momentum_alignment=False")
     if not settings.live_require_trend_momentum_confirmation:
@@ -285,6 +336,30 @@ def _validate_settings_overrides() -> list[str]:
             "override live_mispricing_fast_scan_cooldown_seconds="
             f"{settings.live_mispricing_fast_scan_cooldown_seconds}"
         )
+    if not settings.live_directional_end_window_only:
+        failures.append("override live_directional_end_window_only=False")
+    if settings.live_directional_end_window_minutes != 3:
+        failures.append(
+            "override live_directional_end_window_minutes="
+            f"{settings.live_directional_end_window_minutes}"
+        )
+    if not settings.live_directional_fast_scan_enabled:
+        failures.append("override live_directional_fast_scan_enabled=False")
+    if settings.live_directional_fast_scan_interval_seconds != 2.5:
+        failures.append(
+            "override live_directional_fast_scan_interval_seconds="
+            f"{settings.live_directional_fast_scan_interval_seconds}"
+        )
+    if settings.live_directional_fast_scan_max_per_market_per_window != 3:
+        failures.append(
+            "override live_directional_fast_scan_max_per_market_per_window="
+            f"{settings.live_directional_fast_scan_max_per_market_per_window}"
+        )
+    if settings.live_directional_fast_scan_cooldown_seconds != 8.5:
+        failures.append(
+            "override live_directional_fast_scan_cooldown_seconds="
+            f"{settings.live_directional_fast_scan_cooldown_seconds}"
+        )
     if settings.live_max_total_exposure_dollars != Decimal("12.34"):
         failures.append(
             "override live_max_total_exposure_dollars="
@@ -312,6 +387,10 @@ def _validate_invalid_fast_scan_settings_fail() -> list[str]:
         "LIVE_MISPRICING_FAST_SCAN_INTERVAL_SECONDS=0",
         "LIVE_MISPRICING_FAST_SCAN_MAX_PER_MARKET_PER_WINDOW=0",
         "LIVE_MISPRICING_FAST_SCAN_COOLDOWN_SECONDS=0",
+        "LIVE_DIRECTIONAL_END_WINDOW_MINUTES=0",
+        "LIVE_DIRECTIONAL_FAST_SCAN_INTERVAL_SECONDS=0",
+        "LIVE_DIRECTIONAL_FAST_SCAN_MAX_PER_MARKET_PER_WINDOW=0",
+        "LIVE_DIRECTIONAL_FAST_SCAN_COOLDOWN_SECONDS=0",
     )
     failures: list[str] = []
     for entry in invalid_entries:
