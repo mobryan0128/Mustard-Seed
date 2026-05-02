@@ -46,6 +46,11 @@ def main() -> int:
     failures.extend(_validate_candidate_log_payload())
     failures.extend(_validate_direct_contract_scan_creates_live_intent())
     failures.extend(_validate_direct_contract_scan_midpoint_fallback())
+    failures.extend(_validate_executable_price_below_minimum_skip())
+    failures.extend(_validate_executable_price_above_maximum_skip())
+    failures.extend(_validate_executable_price_above_premium_skip())
+    failures.extend(_validate_midpoint_fallback_price_below_minimum_skip())
+    failures.extend(_validate_midpoint_fallback_price_above_maximum_skip())
     failures.extend(_validate_direct_contract_scan_count_below_one_skip())
 
     if failures:
@@ -160,11 +165,14 @@ def _validate_candidate_log_payload() -> list[str]:
 def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
     with TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
-        coordinator = _coordinator(temp_path)
+        coordinator = _coordinator(
+            temp_path,
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
         market_snapshot = _market_snapshot(
             market_ticker="KXBTC15M-DIRECT",
-            yes_bid=Decimal("0.04"),
-            yes_ask=Decimal("0.05"),
+            yes_bid=Decimal("0.09"),
+            yes_ask=Decimal("0.10"),
             yes_bid_size=Decimal("50"),
             yes_ask_size=Decimal("10"),
             orderbook_seq=123,
@@ -186,10 +194,10 @@ def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
         intent = intents[0]
         if intent.risk_approval_source != "live_entry_risk_gate":
             failures.append(f"direct risk source={intent.risk_approval_source}")
-        if intent.price_dollars != Decimal("0.05"):
-            failures.append(f"direct price={intent.price_dollars} expected=0.05")
-        if intent.count != 60:
-            failures.append(f"direct count={intent.count} expected=60")
+        if intent.price_dollars != Decimal("0.10"):
+            failures.append(f"direct price={intent.price_dollars} expected=0.10")
+        if intent.count != 30:
+            failures.append(f"direct count={intent.count} expected=30")
         payload = _first_event_payload(
             _jsonl_records(temp_path / "runtime.jsonl"),
             event_type="live_intent_created",
@@ -201,12 +209,12 @@ def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
                 "ticker": "KXBTC15M-DIRECT",
                 "pricing_source": "executable_side_ask",
                 "scanner_midpoint": "0.10",
-                "intent_price_dollars": "0.05",
-                "intent_count": 60,
+                "intent_price_dollars": "0.10",
+                "intent_count": 30,
                 "intent_side": "yes",
-                "yes_bid": "0.04",
-                "yes_ask": "0.05",
-                "executable_side_ask": "0.05",
+                "yes_bid": "0.09",
+                "yes_ask": "0.10",
+                "executable_side_ask": "0.10",
                 "executable_side_ask_size_fp": "10",
                 "available_count_at_intent_price": "10",
                 "orderbook_present": True,
@@ -221,7 +229,10 @@ def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
 def _validate_direct_contract_scan_midpoint_fallback() -> list[str]:
     with TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
-        coordinator = _coordinator(temp_path)
+        coordinator = _coordinator(
+            temp_path,
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
         intents = coordinator.process_contract_scan_snapshot(
             _contract_snapshot(
                 _contract(
@@ -248,6 +259,143 @@ def _validate_direct_contract_scan_midpoint_fallback() -> list[str]:
             failures.append("fallback live_intent_created log missing")
         elif payload.get("pricing_source") != "midpoint_fallback":
             failures.append(f"fallback pricing_source={payload.get('pricing_source')}")
+        return failures
+
+
+def _validate_executable_price_below_minimum_skip() -> list[str]:
+    return _validate_execution_price_safety_skip(
+        market_ticker="KXBTC15M-BELOW-MIN",
+        midpoint=Decimal("0.10"),
+        yes_bid=Decimal("0.08"),
+        yes_ask=Decimal("0.09"),
+        expected_reason="executable_price_below_minimum",
+        expected_count=33,
+        expected_intent_side="yes",
+        expected_executable_side_ask="0.09",
+    )
+
+
+def _validate_executable_price_above_maximum_skip() -> list[str]:
+    return _validate_execution_price_safety_skip(
+        market_ticker="KXBTC15M-ABOVE-MAX",
+        midpoint=Decimal("0.75"),
+        yes_bid=Decimal("0.79"),
+        yes_ask=Decimal("0.81"),
+        expected_reason="executable_price_above_maximum",
+        expected_count=3,
+        expected_intent_side="yes",
+        expected_executable_side_ask="0.81",
+    )
+
+
+def _validate_executable_price_above_premium_skip() -> list[str]:
+    return _validate_execution_price_safety_skip(
+        market_ticker="KXBTC15M-PREMIUM",
+        midpoint=Decimal("0.30"),
+        yes_bid=Decimal("0.39"),
+        yes_ask=Decimal("0.41"),
+        expected_reason="executable_price_above_scanner_premium",
+        expected_count=7,
+        expected_intent_side="yes",
+        expected_executable_side_ask="0.41",
+    )
+
+
+def _validate_midpoint_fallback_price_below_minimum_skip() -> list[str]:
+    return _validate_execution_price_safety_skip(
+        market_ticker="KXBTC15M-FALLBACK-BELOW-MIN",
+        midpoint=Decimal("0.09"),
+        expected_reason="executable_price_below_minimum",
+        expected_count=33,
+        expected_intent_side="yes",
+        expected_executable_side_ask=None,
+        market_snapshot=None,
+    )
+
+
+def _validate_midpoint_fallback_price_above_maximum_skip() -> list[str]:
+    return _validate_execution_price_safety_skip(
+        market_ticker="KXBTC15M-FALLBACK-ABOVE-MAX",
+        midpoint=Decimal("0.81"),
+        expected_reason="executable_price_above_maximum",
+        expected_count=3,
+        expected_intent_side="yes",
+        expected_executable_side_ask=None,
+        market_snapshot=None,
+    )
+
+
+def _validate_execution_price_safety_skip(
+    *,
+    market_ticker: str,
+    midpoint: Decimal,
+    expected_reason: str,
+    expected_count: int,
+    expected_intent_side: str,
+    expected_executable_side_ask: str | None,
+    yes_bid: Decimal = Decimal("0.09"),
+    yes_ask: Decimal = Decimal("0.10"),
+    market_snapshot: MarketStateSnapshot | None | bool = True,
+) -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        snapshot = (
+            _market_snapshot(
+                market_ticker=market_ticker,
+                yes_bid=yes_bid,
+                yes_ask=yes_ask,
+                yes_bid_size=Decimal("50"),
+                yes_ask_size=Decimal("10"),
+                orderbook_seq=123,
+            )
+            if market_snapshot is True
+            else market_snapshot
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    market_ticker=market_ticker,
+                    midpoint=midpoint,
+                )
+            ),
+            cycle_number=45,
+            market_snapshot=snapshot,
+        )
+        failures: list[str] = []
+        if intents:
+            failures.append(f"{market_ticker} intents={intents} expected empty")
+        payload = _first_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            failures.append(f"{market_ticker} skip log missing")
+            return failures
+        expected = {
+            "reason": expected_reason,
+            "ticker": market_ticker,
+            "market_ticker": market_ticker,
+            "product_id": "BTC-USD",
+            "scanner_midpoint": str(midpoint),
+            "intent_price_dollars": (
+                expected_executable_side_ask
+                if expected_executable_side_ask is not None
+                else str(midpoint)
+            ),
+            "intent_side": expected_intent_side,
+            "executable_side_ask": expected_executable_side_ask,
+            "count": expected_count,
+            "stake_dollars": "3.00",
+        }
+        for key, value in expected.items():
+            if payload.get(key) != value:
+                failures.append(
+                    f"{market_ticker} {key}={payload.get(key)} expected={value}"
+                )
         return failures
 
 

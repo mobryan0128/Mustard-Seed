@@ -31,6 +31,9 @@ RISK_APPROVAL_SOURCES = frozenset(
     {"simulation_entry_risk_gate", "live_entry_risk_gate"}
 )
 LIVE_RUNNER_REALIZED_DAILY_PNL_DOLLARS = Decimal("0")
+MIN_LIVE_EXECUTION_PRICE_DOLLARS = Decimal("0.10")
+MAX_LIVE_EXECUTION_PRICE_DOLLARS = Decimal("0.80")
+MAX_EXECUTION_PREMIUM_OVER_SCANNER_DOLLARS = Decimal("0.10")
 
 
 @dataclass(frozen=True)
@@ -199,14 +202,6 @@ class LiveExecutionCoordinator:
                     cycle_number=cycle_number,
                 )
                 continue
-            if contract.midpoint > MAX_ENTRY_PRICE:
-                self._log_contract_intent_skipped(
-                    reason="entry_price_too_high",
-                    contract=contract,
-                    cycle_number=cycle_number,
-                )
-                continue
-
             current_exposure_dollars = self._live_current_exposure_dollars()
             risk_decision = self._risk_manager.evaluate_entry_risk(
                 product_id=contract.product_id,
@@ -242,6 +237,30 @@ class LiveExecutionCoordinator:
                 contract=contract,
                 market_snapshot=market_snapshot,
             )
+            execution_safety_reason = _execution_safety_rejection_reason(pricing)
+            if execution_safety_reason is not None:
+                self._log_contract_intent_skipped(
+                    reason=execution_safety_reason,
+                    contract=contract,
+                    cycle_number=cycle_number,
+                    details={
+                        "ticker": contract.market_ticker,
+                        "stake_dollars": stake_dollars,
+                        "count": _candidate_count(
+                            stake_dollars=stake_dollars,
+                            price_dollars=pricing.intent_price_dollars,
+                        ),
+                        **_execution_pricing_payload(pricing),
+                    },
+                )
+                continue
+            if contract.midpoint > MAX_ENTRY_PRICE:
+                self._log_contract_intent_skipped(
+                    reason="entry_price_too_high",
+                    contract=contract,
+                    cycle_number=cycle_number,
+                )
+                continue
             if int(stake_dollars // pricing.intent_price_dollars) < 1:
                 self._log_contract_intent_skipped(
                     reason="count_below_one",
@@ -767,6 +786,27 @@ def _intent_side_from_direction(direction: str) -> str:
     if direction == "down":
         return "no"
     return ""
+
+
+def _execution_safety_rejection_reason(pricing: ExecutionPricing) -> str | None:
+    if pricing.intent_price_dollars < MIN_LIVE_EXECUTION_PRICE_DOLLARS:
+        return "executable_price_below_minimum"
+    if pricing.intent_price_dollars > MAX_LIVE_EXECUTION_PRICE_DOLLARS:
+        return "executable_price_above_maximum"
+    if (
+        pricing.pricing_source == "executable_side_ask"
+        and pricing.executable_side_ask is not None
+        and pricing.executable_side_ask
+        > pricing.scanner_midpoint + MAX_EXECUTION_PREMIUM_OVER_SCANNER_DOLLARS
+    ):
+        return "executable_price_above_scanner_premium"
+    return None
+
+
+def _candidate_count(*, stake_dollars: Decimal, price_dollars: Decimal) -> int:
+    if stake_dollars <= Decimal("0") or price_dollars <= Decimal("0"):
+        return 0
+    return int(stake_dollars // price_dollars)
 
 
 def _available_count_at_intent_price(
