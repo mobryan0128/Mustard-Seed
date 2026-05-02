@@ -760,7 +760,7 @@ def _live_runner_risk_manager_from_settings(settings: KalshiSettings) -> RiskMan
         live_kill_switch_active=settings.live_kill_switch_active,
         env=settings.env,
         live_validation_env="prod",
-        max_live_order_count=1,
+        max_live_order_count=1000,
         required_time_in_force=settings.live_validation_time_in_force,
         account_balance_dollars=settings.risk_account_balance_dollars,
         min_percent_per_trade=settings.risk_min_percent_per_trade,
