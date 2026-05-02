@@ -43,7 +43,7 @@ class CryptoMarketDiscoverySnapshot:
 
 
 class CryptoMarketDiscovery:
-    """Discover active BTC/ETH Kalshi crypto duration markets."""
+    """Discover active Kalshi crypto duration markets."""
 
     def __init__(
         self,
@@ -84,6 +84,12 @@ class CryptoMarketDiscovery:
 
         for product_id in self._products:
             series_tickers = self._product_series.get(product_id, ())
+            if not series_tickers:
+                self._log_skipped_product(
+                    product_id=product_id,
+                    reason="missing_series_mapping",
+                )
+                continue
             product_discovered: list[DiscoveredCryptoMarket] = []
             for series_ticker in series_tickers:
                 product_discovered.extend(
@@ -100,6 +106,7 @@ class CryptoMarketDiscovery:
                 product_id=product_id,
                 series_tickers=series_tickers,
                 selected_market_tickers=tickers,
+                skip_reason=None if tickers else "no_currently_tradable_markets",
             )
             if tickers:
                 product_markets[product_id] = tickers
@@ -201,6 +208,7 @@ class CryptoMarketDiscovery:
         product_id: str,
         series_tickers: tuple[str, ...],
         selected_market_tickers: tuple[str, ...],
+        skip_reason: str | None,
     ) -> None:
         if self._logger is None:
             return
@@ -214,6 +222,26 @@ class CryptoMarketDiscovery:
                 "series_tickers": series_tickers,
                 "selected_market_count": len(selected_market_tickers),
                 "selected_market_tickers": selected_market_tickers,
+                "skip_reason": skip_reason,
+            },
+        )
+
+    def _log_skipped_product(
+        self,
+        *,
+        product_id: str,
+        reason: str,
+    ) -> None:
+        if self._logger is None:
+            return
+        self._logger.log_event(
+            category="market_discovery",
+            event_type="crypto_market_discovery_skipped_product",
+            source="crypto_market_discovery",
+            identifier=product_id,
+            payload={
+                "product_id": product_id,
+                "reason": reason,
             },
         )
 
