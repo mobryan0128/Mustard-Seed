@@ -8,14 +8,14 @@ from decimal import Decimal, InvalidOperation
 from kalshi_bot.config.settings import KalshiSettings
 
 
-DEFAULT_ACCOUNT_BALANCE_DOLLARS = Decimal("10")
-DEFAULT_MIN_PERCENT_PER_TRADE = Decimal("0.01")
-DEFAULT_MAX_PERCENT_PER_TRADE = Decimal("0.03")
-DEFAULT_MIN_STAKE_DOLLARS = Decimal("0.10")
-DEFAULT_MAX_STAKE_DOLLARS = Decimal("3")
-DEFAULT_MAX_OPEN_POSITIONS = 2
-DEFAULT_MAX_TOTAL_EXPOSURE_DOLLARS = Decimal("10")
-DEFAULT_DAILY_LOSS_LIMIT_DOLLARS = Decimal("5")
+DEFAULT_ACCOUNT_BALANCE_DOLLARS = Decimal("100")
+DEFAULT_MIN_PERCENT_PER_TRADE = Decimal("0.02")
+DEFAULT_MAX_PERCENT_PER_TRADE = Decimal("0.05")
+DEFAULT_MIN_STAKE_DOLLARS = Decimal("2")
+DEFAULT_MAX_STAKE_DOLLARS = Decimal("5")
+DEFAULT_MAX_OPEN_POSITIONS = 10
+DEFAULT_MAX_TOTAL_EXPOSURE_DOLLARS = Decimal("20")
+DEFAULT_DAILY_LOSS_LIMIT_DOLLARS = Decimal("10")
 MID_CONFIDENCE_PERCENT = Decimal("0.02")
 
 
@@ -47,7 +47,7 @@ class RiskManager:
         live_kill_switch_active: bool,
         env: str,
         live_validation_env: str,
-        max_live_order_count: int = 1,
+        max_live_order_count: int = 300,
         required_time_in_force: str = "immediate_or_cancel",
         account_balance_dollars: Decimal = DEFAULT_ACCOUNT_BALANCE_DOLLARS,
         min_percent_per_trade: Decimal = DEFAULT_MIN_PERCENT_PER_TRADE,
@@ -117,7 +117,7 @@ class RiskManager:
             live_kill_switch_active=settings.live_kill_switch_active,
             env=settings.env,
             live_validation_env=settings.live_validation_env,
-            max_live_order_count=1,
+            max_live_order_count=300,
             required_time_in_force=settings.live_validation_time_in_force,
             account_balance_dollars=settings.risk_account_balance_dollars,
             min_percent_per_trade=settings.risk_min_percent_per_trade,
@@ -141,7 +141,7 @@ class RiskManager:
             return LiveSafetyDecision(allow=False, reason="live_env_not_prod")
         if _missing_live_order_field(order):
             return LiveSafetyDecision(allow=False, reason="missing_live_order_field")
-        if order.count != self._max_live_order_count:
+        if order.count > self._max_live_order_count:
             return LiveSafetyDecision(allow=False, reason="order_count_exceeds_phase10_cap")
         if order.time_in_force.strip().lower() != self._required_time_in_force:
             return LiveSafetyDecision(allow=False, reason="unsupported_time_in_force")
