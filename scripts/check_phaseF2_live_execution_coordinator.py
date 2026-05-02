@@ -25,6 +25,12 @@ from kalshi_bot.execution.execution_engine import (  # noqa: E402
     SimulationSnapshot,
 )
 from kalshi_bot.execution.live_execution_coordinator import LiveExecutionCoordinator  # noqa: E402
+from kalshi_bot.market.market_state_cache import (  # noqa: E402
+    MarketStateSnapshot,
+    OrderBookState,
+    TickerState,
+)
+from kalshi_bot.risk.risk_manager import RiskDecision  # noqa: E402
 
 
 def main() -> int:
@@ -39,6 +45,7 @@ def main() -> int:
     failures.extend(_validate_count_below_one_logs_skip())
     failures.extend(_validate_candidate_log_payload())
     failures.extend(_validate_direct_contract_scan_creates_live_intent())
+    failures.extend(_validate_direct_contract_scan_midpoint_fallback())
     failures.extend(_validate_direct_contract_scan_count_below_one_skip())
 
     if failures:
@@ -154,6 +161,14 @@ def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
     with TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
         coordinator = _coordinator(temp_path)
+        market_snapshot = _market_snapshot(
+            market_ticker="KXBTC15M-DIRECT",
+            yes_bid=Decimal("0.04"),
+            yes_ask=Decimal("0.05"),
+            yes_bid_size=Decimal("50"),
+            yes_ask_size=Decimal("10"),
+            orderbook_seq=123,
+        )
         intents = coordinator.process_contract_scan_snapshot(
             _contract_snapshot(
                 _contract(
@@ -162,6 +177,7 @@ def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
                 )
             ),
             cycle_number=42,
+            market_snapshot=market_snapshot,
         )
         failures: list[str] = []
         if len(intents) != 1:
@@ -170,26 +186,81 @@ def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
         intent = intents[0]
         if intent.risk_approval_source != "live_entry_risk_gate":
             failures.append(f"direct risk source={intent.risk_approval_source}")
-        if intent.count != 2:
-            failures.append(f"direct count={intent.count} expected=2")
+        if intent.price_dollars != Decimal("0.05"):
+            failures.append(f"direct price={intent.price_dollars} expected=0.05")
+        if intent.count != 60:
+            failures.append(f"direct count={intent.count} expected=60")
         payload = _first_event_payload(
             _jsonl_records(temp_path / "runtime.jsonl"),
             event_type="live_intent_created",
         )
         if payload is None:
             failures.append("direct live_intent_created log missing")
-        elif payload.get("ticker") != "KXBTC15M-DIRECT":
-            failures.append(f"direct log ticker={payload.get('ticker')}")
+        else:
+            expected = {
+                "ticker": "KXBTC15M-DIRECT",
+                "pricing_source": "executable_side_ask",
+                "scanner_midpoint": "0.10",
+                "intent_price_dollars": "0.05",
+                "intent_count": 60,
+                "intent_side": "yes",
+                "yes_bid": "0.04",
+                "yes_ask": "0.05",
+                "executable_side_ask": "0.05",
+                "executable_side_ask_size_fp": "10",
+                "available_count_at_intent_price": "10",
+                "orderbook_present": True,
+                "orderbook_seq": 123,
+            }
+            for key, value in expected.items():
+                if payload.get(key) != value:
+                    failures.append(f"direct log {key}={payload.get(key)} expected={value}")
+        return failures
+
+
+def _validate_direct_contract_scan_midpoint_fallback() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(temp_path)
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    market_ticker="KXBTC15M-FALLBACK",
+                    midpoint=Decimal("0.10"),
+                )
+            ),
+            cycle_number=43,
+        )
+        failures: list[str] = []
+        if len(intents) != 1:
+            failures.append(f"fallback intent count={len(intents)} expected=1")
+            return failures
+        intent = intents[0]
+        if intent.price_dollars != Decimal("0.10"):
+            failures.append(f"fallback price={intent.price_dollars} expected=0.10")
+        if intent.count != 30:
+            failures.append(f"fallback count={intent.count} expected=30")
+        payload = _first_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_intent_created",
+        )
+        if payload is None:
+            failures.append("fallback live_intent_created log missing")
+        elif payload.get("pricing_source") != "midpoint_fallback":
+            failures.append(f"fallback pricing_source={payload.get('pricing_source')}")
         return failures
 
 
 def _validate_direct_contract_scan_count_below_one_skip() -> list[str]:
     with TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
-        coordinator = _coordinator(temp_path)
+        coordinator = _coordinator(
+            temp_path,
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("0.20")),
+        )
         intents = coordinator.process_contract_scan_snapshot(
             _contract_snapshot(_contract(midpoint=Decimal("0.46"))),
-            cycle_number=43,
+            cycle_number=44,
         )
         if intents:
             return [f"direct small-count intents={intents} expected empty"]
@@ -204,12 +275,16 @@ def _validate_direct_contract_scan_count_below_one_skip() -> list[str]:
         return []
 
 
-def _coordinator(temp_path: Path) -> LiveExecutionCoordinator:
+def _coordinator(
+    temp_path: Path,
+    risk_manager=None,  # noqa: ANN001
+) -> LiveExecutionCoordinator:
     return LiveExecutionCoordinator(
         settings=_Settings(
             log_directory=temp_path,
             log_jsonl_enabled=True,
-        )
+        ),
+        risk_manager=risk_manager,
     )
 
 
@@ -245,6 +320,42 @@ def _contract(
             top_of_book_liquidity=Decimal("100"),
             dollar_volume=Decimal("1000"),
         ),
+    )
+
+
+def _market_snapshot(
+    *,
+    market_ticker: str,
+    yes_bid: Decimal,
+    yes_ask: Decimal,
+    yes_bid_size: Decimal,
+    yes_ask_size: Decimal,
+    orderbook_seq: int,
+) -> MarketStateSnapshot:
+    no_bid = Decimal("1") - yes_ask
+    return MarketStateSnapshot(
+        tickers={
+            market_ticker: TickerState(
+                market_ticker=market_ticker,
+                yes_bid_dollars=yes_bid,
+                yes_ask_dollars=yes_ask,
+                yes_bid_size_fp=yes_bid_size,
+                yes_ask_size_fp=yes_ask_size,
+                seq=orderbook_seq,
+            )
+        },
+        orderbooks={
+            market_ticker: OrderBookState(
+                market_ticker=market_ticker,
+                yes={yes_bid: yes_bid_size},
+                no={
+                    no_bid: yes_ask_size,
+                    no_bid - Decimal("0.01"): Decimal("2"),
+                },
+                seq=orderbook_seq,
+            )
+        },
+        last_sequence_by_sid={},
     )
 
 
@@ -319,6 +430,18 @@ def _first_event_payload(
 class _Settings:
     log_directory: Path
     log_jsonl_enabled: bool
+
+
+class _FixedEntryRiskManager:
+    def __init__(self, *, stake_dollars: Decimal) -> None:
+        self._stake_dollars = stake_dollars
+
+    def evaluate_entry_risk(self, **kwargs):  # noqa: ANN003,ARG002
+        return RiskDecision(
+            allowed=True,
+            reason="allowed",
+            stake_dollars=self._stake_dollars,
+        )
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ from kalshi_bot.execution.execution_engine import (
     build_live_order_intent,
     build_live_order_intent_from_contract,
 )
+from kalshi_bot.market.market_state_cache import MarketStateSnapshot
 from kalshi_bot.observability.logger import StructuredLogger
 from kalshi_bot.observability.replay_engine import ReplayEngine
 from kalshi_bot.risk.risk_manager import RiskManager
@@ -30,6 +31,21 @@ RISK_APPROVAL_SOURCES = frozenset(
     {"simulation_entry_risk_gate", "live_entry_risk_gate"}
 )
 LIVE_RUNNER_REALIZED_DAILY_PNL_DOLLARS = Decimal("0")
+
+
+@dataclass(frozen=True)
+class ExecutionPricing:
+    pricing_source: str
+    intent_price_dollars: Decimal
+    scanner_midpoint: Decimal
+    intent_side: str
+    yes_bid: Decimal | None
+    yes_ask: Decimal | None
+    executable_side_ask: Decimal | None
+    executable_side_ask_size_fp: Decimal | None
+    available_count_at_intent_price: Decimal | None
+    orderbook_present: bool
+    orderbook_seq: int | None
 
 
 @dataclass(frozen=True)
@@ -153,6 +169,7 @@ class LiveExecutionCoordinator:
         contract_scan_snapshot: ContractScanSnapshot,
         *,
         cycle_number: int | None = None,
+        market_snapshot: MarketStateSnapshot | None = None,
     ) -> tuple[LiveOrderIntent, ...]:
         """Create live intents directly from ranked contracts after entry risk approval."""
 
@@ -220,18 +237,27 @@ class LiveExecutionCoordinator:
                     cycle_number=cycle_number,
                 )
                 continue
-            if int(stake_dollars // contract.midpoint) < 1:
+
+            pricing = _execution_pricing(
+                contract=contract,
+                market_snapshot=market_snapshot,
+            )
+            if int(stake_dollars // pricing.intent_price_dollars) < 1:
                 self._log_contract_intent_skipped(
                     reason="count_below_one",
                     contract=contract,
                     cycle_number=cycle_number,
-                    details={"stake_dollars": stake_dollars},
+                    details={
+                        "stake_dollars": stake_dollars,
+                        **_execution_pricing_payload(pricing),
+                    },
                 )
                 continue
 
             intent = build_live_order_intent_from_contract(
                 contract,
                 stake_dollars=stake_dollars,
+                price_dollars=pricing.intent_price_dollars,
                 source_id=f"cycle-{cycle_number}-{contract.product_id}-{contract.market_ticker}"
                 if cycle_number is not None
                 else None,
@@ -261,6 +287,8 @@ class LiveExecutionCoordinator:
                     "direction": intent.direction,
                     "confidence": intent.confidence,
                     "risk_approval_source": intent.risk_approval_source,
+                    **_execution_pricing_payload(pricing),
+                    "intent_count": intent.count,
                 },
             )
         return tuple(intents)
@@ -673,6 +701,116 @@ def _order_summary_payload(order: KalshiOrderSummary) -> dict[str, object]:
         "remaining_count_fp": order.remaining_count_fp,
         "initial_count_fp": order.initial_count_fp,
         "last_update_time": order.last_update_time,
+    }
+
+
+def _execution_pricing(
+    *,
+    contract: ScannedContract,
+    market_snapshot: MarketStateSnapshot | None,
+) -> ExecutionPricing:
+    intent_side = _intent_side_from_direction(contract.direction)
+    ticker_state = (
+        market_snapshot.tickers.get(contract.market_ticker)
+        if market_snapshot is not None
+        else None
+    )
+    orderbook = (
+        market_snapshot.orderbooks.get(contract.market_ticker)
+        if market_snapshot is not None
+        else None
+    )
+    yes_bid = ticker_state.yes_bid_dollars if ticker_state is not None else None
+    yes_ask = ticker_state.yes_ask_dollars if ticker_state is not None else None
+    executable_side_ask: Decimal | None = None
+    executable_side_ask_size_fp: Decimal | None = None
+    if intent_side == "yes":
+        executable_side_ask = yes_ask
+        executable_side_ask_size_fp = (
+            ticker_state.yes_ask_size_fp if ticker_state is not None else None
+        )
+    elif yes_bid is not None:
+        executable_side_ask = Decimal("1") - yes_bid
+        executable_side_ask_size_fp = ticker_state.yes_bid_size_fp
+
+    intent_price_dollars = (
+        executable_side_ask
+        if executable_side_ask is not None
+        else contract.midpoint
+    )
+    return ExecutionPricing(
+        pricing_source=(
+            "executable_side_ask"
+            if executable_side_ask is not None
+            else "midpoint_fallback"
+        ),
+        intent_price_dollars=intent_price_dollars,
+        scanner_midpoint=contract.midpoint,
+        intent_side=intent_side,
+        yes_bid=yes_bid,
+        yes_ask=yes_ask,
+        executable_side_ask=executable_side_ask,
+        executable_side_ask_size_fp=executable_side_ask_size_fp,
+        available_count_at_intent_price=_available_count_at_intent_price(
+            orderbook=orderbook,
+            intent_side=intent_side,
+            intent_price_dollars=intent_price_dollars,
+        ),
+        orderbook_present=orderbook is not None,
+        orderbook_seq=orderbook.seq if orderbook is not None else None,
+    )
+
+
+def _intent_side_from_direction(direction: str) -> str:
+    if direction == "up":
+        return "yes"
+    if direction == "down":
+        return "no"
+    return ""
+
+
+def _available_count_at_intent_price(
+    *,
+    orderbook,
+    intent_side: str,
+    intent_price_dollars: Decimal,
+) -> Decimal | None:
+    if orderbook is None:
+        return None
+    if intent_side == "yes":
+        return sum(
+            (
+                quantity
+                for no_bid_price, quantity in orderbook.no.items()
+                if Decimal("1") - no_bid_price <= intent_price_dollars
+            ),
+            Decimal("0"),
+        )
+    if intent_side == "no":
+        return sum(
+            (
+                quantity
+                for yes_bid_price, quantity in orderbook.yes.items()
+                if Decimal("1") - yes_bid_price <= intent_price_dollars
+            ),
+            Decimal("0"),
+        )
+    return None
+
+
+def _execution_pricing_payload(pricing: ExecutionPricing) -> dict[str, object]:
+    return {
+        "pricing_source": pricing.pricing_source,
+        "scanner_midpoint": pricing.scanner_midpoint,
+        "intent_price_dollars": pricing.intent_price_dollars,
+        "intent_side": pricing.intent_side,
+        "yes_bid": pricing.yes_bid,
+        "yes_ask": pricing.yes_ask,
+        "executable_side_ask": pricing.executable_side_ask,
+        "executable_side_ask_size_fp": pricing.executable_side_ask_size_fp,
+        "available_count_at_intent_price": pricing.available_count_at_intent_price,
+        "orderbook_present": pricing.orderbook_present,
+        "orderbook_seq": pricing.orderbook_seq,
     }
 
 

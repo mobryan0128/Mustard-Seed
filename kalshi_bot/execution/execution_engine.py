@@ -550,6 +550,7 @@ def build_live_order_intent_from_contract(
     contract: ScannedContract,
     *,
     stake_dollars: Decimal,
+    price_dollars: Decimal | None = None,
     client_order_id_prefix: str = "live-runner",
     source_id: str | None = None,
 ) -> LiveOrderIntent | None:
@@ -562,10 +563,11 @@ def build_live_order_intent_from_contract(
     else:
         return None
 
-    if stake_dollars <= Decimal("0") or contract.midpoint <= Decimal("0"):
+    intent_price_dollars = price_dollars if price_dollars is not None else contract.midpoint
+    if stake_dollars <= Decimal("0") or intent_price_dollars <= Decimal("0"):
         return None
 
-    count = int(stake_dollars // contract.midpoint)
+    count = int(stake_dollars // intent_price_dollars)
     if count < 1:
         return None
 
@@ -580,7 +582,7 @@ def build_live_order_intent_from_contract(
         ticker=contract.market_ticker,
         action="buy",
         side=side,
-        price_dollars=contract.midpoint,
+        price_dollars=intent_price_dollars,
         count=count,
         client_order_id=f"{normalized_prefix}-{normalized_source_id}",
         stake_dollars=stake_dollars,

@@ -309,6 +309,7 @@ class KalshiBotRunner:
                     self._live_execution_coordinator.process_contract_scan_snapshot(
                         contract_scan_snapshot,
                         cycle_number=cycle_number,
+                        market_snapshot=market_snapshot,
                     )
                 )
                 self._submit_live_runner_intents(

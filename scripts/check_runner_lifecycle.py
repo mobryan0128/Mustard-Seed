@@ -1143,7 +1143,13 @@ class _FakeLiveExecutionCoordinator:
         self.simulation_process_calls += 1
         return self._intents
 
-    def process_contract_scan_snapshot(self, contract_scan_snapshot, *, cycle_number=None):  # noqa: ANN001
+    def process_contract_scan_snapshot(
+        self,
+        contract_scan_snapshot,  # noqa: ANN001
+        *,
+        cycle_number=None,
+        market_snapshot=None,  # noqa: ANN001,ARG002
+    ):
         self.process_calls += 1
         self.contract_process_calls += 1
         return self._intents
