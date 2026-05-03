@@ -16,6 +16,7 @@ from kalshi_bot.config.settings import KalshiSettings
 BALANCE_PATH = "/portfolio/balance"
 MARKETS_PATH = "/markets"
 ORDERS_PATH = "/portfolio/orders"
+POSITIONS_PATH = "/portfolio/positions"
 
 
 class KalshiClientError(RuntimeError):
@@ -69,6 +70,25 @@ class KalshiOrderSummary:
     initial_count_fp: Decimal | None
     created_time: str | None
     last_update_time: str | None
+
+
+@dataclass(frozen=True)
+class KalshiMarketPosition:
+    """Minimal normalized current market position used for live exits."""
+
+    ticker: str
+    position_fp: Decimal
+    market_exposure_dollars: Decimal
+    resting_orders_count: int | None
+    last_updated_ts: str | None
+
+
+@dataclass(frozen=True)
+class KalshiPositionPage:
+    """One paginated Kalshi positions response."""
+
+    market_positions: tuple[KalshiMarketPosition, ...]
+    cursor: str | None
 
 
 @dataclass(frozen=True)
@@ -210,6 +230,35 @@ class KalshiClient:
             raise KalshiClientError("Kalshi get-order response did not include an order.")
         return _normalize_order_payload(order_payload)
 
+    def get_positions(
+        self,
+        *,
+        count_filter: str = "position",
+        settlement_status: str = "unsettled",
+        limit: int = 1000,
+        cursor: str | None = None,
+    ) -> KalshiPositionPage:
+        if limit <= 0 or limit > 1000:
+            raise KalshiClientError("positions limit must be between 1 and 1000.")
+        query_params = {
+            "count_filter": count_filter,
+            "settlement_status": settlement_status,
+            "limit": str(limit),
+            "cursor": cursor or "",
+        }
+        response = self._get(POSITIONS_PATH, query_params=query_params)
+        payload = _json_object(response, "Kalshi positions response")
+        positions_payload = payload.get("market_positions")
+        if not isinstance(positions_payload, list):
+            raise KalshiClientError("Kalshi positions response did not include market_positions.")
+        return KalshiPositionPage(
+            market_positions=tuple(
+                _normalize_position_payload(position)
+                for position in positions_payload
+            ),
+            cursor=_optional_text(payload.get("cursor")),
+        )
+
     def _get(
         self,
         path: str,
@@ -306,6 +355,26 @@ def _normalize_order_payload(payload: dict[str, object]) -> KalshiOrderSummary:
     )
 
 
+def _normalize_position_payload(payload: object) -> KalshiMarketPosition:
+    if not isinstance(payload, dict):
+        raise KalshiClientError("Kalshi position payload was not a JSON object.")
+    return KalshiMarketPosition(
+        ticker=_require_text(payload.get("ticker"), "ticker"),
+        position_fp=(
+            _optional_decimal(payload.get("position_fp"))
+            or _optional_decimal(payload.get("position"))
+            or Decimal("0")
+        ),
+        market_exposure_dollars=(
+            _optional_decimal(payload.get("market_exposure_dollars"))
+            or _optional_decimal(payload.get("market_exposure"))
+            or Decimal("0")
+        ),
+        resting_orders_count=_optional_int(payload.get("resting_orders_count")),
+        last_updated_ts=_optional_text(payload.get("last_updated_ts")),
+    )
+
+
 def _normalize_market_payload(payload: object) -> KalshiMarketSummary:
     if not isinstance(payload, dict):
         raise KalshiClientError("Kalshi market payload was not a JSON object.")
@@ -371,6 +440,15 @@ def _optional_decimal(value: object) -> Decimal | None:
         return Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
         raise KalshiClientError("Kalshi order payload contained an invalid decimal field.") from exc
+
+
+def _optional_int(value: object) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError) as exc:
+        raise KalshiClientError("Kalshi payload contained an invalid integer field.") from exc
 
 
 def _require_text(value: object, field_name: str) -> str:

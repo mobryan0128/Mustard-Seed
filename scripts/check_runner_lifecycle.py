@@ -57,6 +57,7 @@ def main() -> int:
     failures.extend(_validate_startup_fail_closed())
     failures.extend(_validate_market_discovery_tradable_filter())
     failures.extend(_validate_subscription_ack_without_market_data_is_not_connected())
+    failures.extend(_validate_feed_timeout_forces_market_discovery_resubscribe())
     failures.extend(_validate_simulation_trade_events_persisted())
     failures.extend(_validate_simulation_risk_denied_event_persisted())
     failures.extend(_validate_live_order_candidate_logged())
@@ -268,6 +269,86 @@ def _validate_subscription_ack_without_market_data_is_not_connected() -> list[st
         )
     if state.subscribed_tickers_by_call != (("KXBTC15M-OLD",),):
         failures.append(f"ack-only subscriptions={state.subscribed_tickers_by_call}")
+    return failures
+
+
+def _validate_feed_timeout_forces_market_discovery_resubscribe() -> list[str]:
+    runner, state = _build_runner(kalshi_market_data=False)
+    state.cache.replace_orderbook(
+        market_ticker="KXBTC15M-OLD",
+        yes_levels=(("0.44", "100"),),
+        no_levels=(("0.52", "100"),),
+        sid=1,
+        seq=1,
+    )
+    results = runner.run_cycles(3)
+    failures: list[str] = []
+    if len(results) != 3:
+        failures.append(f"timeout recovery count={len(results)}")
+        return failures
+    if state.discovery_calls != 2:
+        failures.append(f"timeout recovery discovery calls={state.discovery_calls}")
+    expected_subscriptions = (
+        ("KXBTC15M-OLD",),
+        ("KXBTC15M-OLD",),
+        ("KXBTC15M-NEW", "KXETH15M-NEW"),
+    )
+    if state.subscribed_tickers_by_call != expected_subscriptions:
+        failures.append(
+            "timeout recovery subscriptions="
+            f"{state.subscribed_tickers_by_call} expected={expected_subscriptions}"
+        )
+    final_status = results[-1].status
+    if final_status.last_market_discovery_cycle != 3:
+        failures.append(
+            f"timeout recovery discovery cycle={final_status.last_market_discovery_cycle}"
+        )
+    if final_status.active_market_tickers != ("KXBTC15M-NEW", "KXETH15M-NEW"):
+        failures.append(f"timeout recovery active={final_status.active_market_tickers}")
+    if "KXBTC15M-OLD" in state.cache.snapshot().tickers:
+        failures.append("timeout recovery stale ticker was not pruned")
+    if state.log_written_ref is None:
+        return failures + ["timeout recovery missing runtime path"]
+
+    records = _jsonl_records(state.log_written_ref)
+    recovery_payload = next(
+        (
+            payload
+            for payload in _event_payloads(
+                records,
+                key="event_type",
+                value="kalshi_feed_timeout_recovery",
+            )
+            if payload.get("kalshi_feed_recovery_attempted") is True
+        ),
+        None,
+    )
+    if recovery_payload is None:
+        failures.append("timeout recovery attempted log missing")
+    else:
+        expected = {
+            "kalshi_feed_timeout_count": 2,
+            "kalshi_feed_recovery_attempted": True,
+            "kalshi_feed_recovery_result": "market_discovery_forced",
+        }
+        for key, value in expected.items():
+            if recovery_payload.get(key) != value:
+                failures.append(
+                    f"timeout recovery {key}={recovery_payload.get(key)}"
+                )
+
+    completed = _first_event_payload(
+        records,
+        key="event_type",
+        value="kalshi_feed_resubscribe_completed",
+    )
+    if completed is None:
+        failures.append("timeout recovery resubscribe completed log missing")
+    elif completed.get("kalshi_feed_recovery_result") != "resubscribe_completed":
+        failures.append(
+            "timeout recovery completed result="
+            f"{completed.get('kalshi_feed_recovery_result')}"
+        )
     return failures
 
 
@@ -787,6 +868,12 @@ def _settings(
         live_trading_enabled=live_flags_present,
         live_kill_switch_active=False,
         live_runner_execution_enabled=live_runner_execution_enabled,
+        live_profit_capture_enabled=False,
+        live_profit_capture_price=Decimal("0.99"),
+        live_trailing_stop_enabled=False,
+        live_trailing_stop_distance=Decimal("0.05"),
+        live_entry_end_window_only=False,
+        live_entry_end_window_minutes=5,
         runner_enabled=True,
         runner_loop_interval_seconds=0.001,
         runner_status_log_every_n_cycles=1,
@@ -1136,6 +1223,7 @@ class _FakeLiveExecutionCoordinator:
         self.process_calls = 0
         self.simulation_process_calls = 0
         self.contract_process_calls = 0
+        self.exit_process_calls = 0
         self.submit_calls: list[LiveOrderIntent] = []
 
     def process_simulation_snapshot(self, simulation_snapshot):  # noqa: ANN001
@@ -1153,6 +1241,15 @@ class _FakeLiveExecutionCoordinator:
         self.process_calls += 1
         self.contract_process_calls += 1
         return self._intents
+
+    def process_profit_capture_exits(
+        self,
+        market_snapshot,  # noqa: ANN001,ARG002
+        *,
+        cycle_number=None,  # noqa: ANN001,ARG002
+    ):
+        self.exit_process_calls += 1
+        return ()
 
     def submit_live_order(self, intent: LiveOrderIntent):
         self.submit_calls.append(intent)
@@ -1273,6 +1370,22 @@ def _first_event_payload(
         if isinstance(payload, dict):
             return payload
     return None
+
+
+def _event_payloads(
+    records: list[dict[str, object]],
+    *,
+    key: str,
+    value: str,
+) -> tuple[dict[str, object], ...]:
+    payloads: list[dict[str, object]] = []
+    for record in records:
+        if record.get(key) != value:
+            continue
+        payload = record.get("payload")
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return tuple(payloads)
 
 
 def _discovery_snapshot(

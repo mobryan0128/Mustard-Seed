@@ -66,6 +66,12 @@ DEFAULT_LIVE_VALIDATION_CLIENT_ORDER_ID_PREFIX = "live-smoke"
 DEFAULT_LIVE_TRADING_ENABLED = False
 DEFAULT_LIVE_KILL_SWITCH_ACTIVE = False
 DEFAULT_LIVE_RUNNER_EXECUTION_ENABLED = False
+DEFAULT_LIVE_PROFIT_CAPTURE_ENABLED = False
+DEFAULT_LIVE_PROFIT_CAPTURE_PRICE = Decimal("0.99")
+DEFAULT_LIVE_TRAILING_STOP_ENABLED = False
+DEFAULT_LIVE_TRAILING_STOP_DISTANCE = Decimal("0.05")
+DEFAULT_LIVE_ENTRY_END_WINDOW_ONLY = False
+DEFAULT_LIVE_ENTRY_END_WINDOW_MINUTES = 5
 DEFAULT_RUNNER_ENABLED = True
 DEFAULT_RUNNER_LOOP_INTERVAL_SECONDS = 5.0
 DEFAULT_RUNNER_STATUS_LOG_EVERY_N_CYCLES = 1
@@ -156,6 +162,12 @@ class KalshiSettings:
     live_trading_enabled: bool
     live_kill_switch_active: bool
     live_runner_execution_enabled: bool
+    live_profit_capture_enabled: bool
+    live_profit_capture_price: Decimal
+    live_trailing_stop_enabled: bool
+    live_trailing_stop_distance: Decimal
+    live_entry_end_window_only: bool
+    live_entry_end_window_minutes: int
     runner_enabled: bool
     runner_loop_interval_seconds: float
     runner_status_log_every_n_cycles: int
@@ -384,6 +396,34 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         DEFAULT_LIVE_RUNNER_EXECUTION_ENABLED,
         "LIVE_RUNNER_EXECUTION_ENABLED",
     )
+    live_profit_capture_enabled = _parse_bool(
+        values.get("LIVE_PROFIT_CAPTURE_ENABLED"),
+        DEFAULT_LIVE_PROFIT_CAPTURE_ENABLED,
+        "LIVE_PROFIT_CAPTURE_ENABLED",
+    )
+    live_profit_capture_price = _parse_price_dollars(
+        values.get("LIVE_PROFIT_CAPTURE_PRICE"),
+        "LIVE_PROFIT_CAPTURE_PRICE",
+    ) or DEFAULT_LIVE_PROFIT_CAPTURE_PRICE
+    live_trailing_stop_enabled = _parse_bool(
+        values.get("LIVE_TRAILING_STOP_ENABLED"),
+        DEFAULT_LIVE_TRAILING_STOP_ENABLED,
+        "LIVE_TRAILING_STOP_ENABLED",
+    )
+    live_trailing_stop_distance = _parse_price_dollars(
+        values.get("LIVE_TRAILING_STOP_DISTANCE"),
+        "LIVE_TRAILING_STOP_DISTANCE",
+    ) or DEFAULT_LIVE_TRAILING_STOP_DISTANCE
+    live_entry_end_window_only = _parse_bool(
+        values.get("LIVE_ENTRY_END_WINDOW_ONLY"),
+        DEFAULT_LIVE_ENTRY_END_WINDOW_ONLY,
+        "LIVE_ENTRY_END_WINDOW_ONLY",
+    )
+    live_entry_end_window_minutes = _parse_positive_int(
+        values.get("LIVE_ENTRY_END_WINDOW_MINUTES"),
+        DEFAULT_LIVE_ENTRY_END_WINDOW_MINUTES,
+        "LIVE_ENTRY_END_WINDOW_MINUTES",
+    )
     runner_enabled = _parse_bool(
         values.get("RUNNER_ENABLED"),
         DEFAULT_RUNNER_ENABLED,
@@ -571,6 +611,12 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_trading_enabled=live_trading_enabled,
         live_kill_switch_active=live_kill_switch_active,
         live_runner_execution_enabled=live_runner_execution_enabled,
+        live_profit_capture_enabled=live_profit_capture_enabled,
+        live_profit_capture_price=live_profit_capture_price,
+        live_trailing_stop_enabled=live_trailing_stop_enabled,
+        live_trailing_stop_distance=live_trailing_stop_distance,
+        live_entry_end_window_only=live_entry_end_window_only,
+        live_entry_end_window_minutes=live_entry_end_window_minutes,
         runner_enabled=runner_enabled,
         runner_loop_interval_seconds=runner_loop_interval_seconds,
         runner_status_log_every_n_cycles=runner_status_log_every_n_cycles,
@@ -684,6 +730,12 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_TRADING_ENABLED",
         "LIVE_KILL_SWITCH_ACTIVE",
         "LIVE_RUNNER_EXECUTION_ENABLED",
+        "LIVE_PROFIT_CAPTURE_ENABLED",
+        "LIVE_PROFIT_CAPTURE_PRICE",
+        "LIVE_TRAILING_STOP_ENABLED",
+        "LIVE_TRAILING_STOP_DISTANCE",
+        "LIVE_ENTRY_END_WINDOW_ONLY",
+        "LIVE_ENTRY_END_WINDOW_MINUTES",
         "RUNNER_ENABLED",
         "RUNNER_LOOP_INTERVAL_SECONDS",
         "RUNNER_STATUS_LOG_EVERY_N_CYCLES",

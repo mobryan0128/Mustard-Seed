@@ -36,6 +36,10 @@ class ScannedContract:
     bias_as_of: str | None
     market_as_of: str | None
     score: ContractScore
+    contract_close_time: str | None = None
+    contract_time_remaining_seconds: int | None = None
+    end_window_allowed: bool | None = None
+    end_window_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -45,6 +49,10 @@ class SkippedContract:
     product_id: str
     market_ticker: str
     reason: str
+    contract_close_time: str | None = None
+    contract_time_remaining_seconds: int | None = None
+    end_window_allowed: bool | None = None
+    end_window_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -58,7 +66,12 @@ class ContractScanSnapshot:
 class ContractScanner:
     """Read-only scanner over mapped Kalshi markets already present in local state."""
 
-    def __init__(self, *, product_markets: Mapping[str, tuple[str, ...]]) -> None:
+    def __init__(
+        self,
+        *,
+        product_markets: Mapping[str, tuple[str, ...]],
+        market_metadata_by_ticker: Mapping[str, Mapping[str, object]] | None = None,
+    ) -> None:
         normalized = {
             product_id.strip(): tuple(
                 dict.fromkeys(market_ticker.strip() for market_ticker in market_tickers if market_ticker.strip())
@@ -71,6 +84,10 @@ class ContractScanner:
         if any(not market_tickers for market_tickers in normalized.values()):
             raise ContractScannerError("Each contract scanner product must map to at least one market.")
         self._product_markets = normalized
+        self._market_metadata_by_ticker = {
+            market_ticker: dict(metadata)
+            for market_ticker, metadata in (market_metadata_by_ticker or {}).items()
+        }
 
     @classmethod
     def from_settings(cls, settings: KalshiSettings) -> "ContractScanner":
@@ -93,6 +110,7 @@ class ContractScanner:
                 ticker_state = market_snapshot.tickers.get(market_ticker)
                 if ticker_state is None:
                     continue
+                metadata = self._market_metadata_by_ticker.get(market_ticker, {})
                 skip_reason = _skip_reason(bias_state, ticker_state)
                 if skip_reason is not None:
                     skipped_contracts.append(
@@ -100,6 +118,10 @@ class ContractScanner:
                             product_id=product_id,
                             market_ticker=market_ticker,
                             reason=skip_reason,
+                            contract_close_time=_optional_str_metadata(
+                                metadata,
+                                "close_time",
+                            ),
                         )
                     )
                     continue
@@ -131,6 +153,10 @@ class ContractScanner:
                         bias_as_of=bias_state.as_of,
                         market_as_of=_market_as_of(ticker_state),
                         score=score,
+                        contract_close_time=_optional_str_metadata(
+                            metadata,
+                            "close_time",
+                        ),
                     )
                 )
 
@@ -204,3 +230,14 @@ def _market_as_of(ticker_state: TickerState) -> str | None:
     if ticker_state.exchange_ts is not None:
         return str(ticker_state.exchange_ts)
     return None
+
+
+def _optional_str_metadata(
+    metadata: Mapping[str, object],
+    key: str,
+) -> str | None:
+    value = metadata.get(key)
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    return normalized or None

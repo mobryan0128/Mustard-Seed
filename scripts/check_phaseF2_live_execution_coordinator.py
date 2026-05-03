@@ -6,6 +6,7 @@ import argparse
 import json
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -51,6 +52,9 @@ def main() -> int:
     failures.extend(_validate_executable_price_above_premium_skip())
     failures.extend(_validate_midpoint_fallback_price_below_minimum_skip())
     failures.extend(_validate_midpoint_fallback_price_above_maximum_skip())
+    failures.extend(_validate_end_window_blocks_early_contract())
+    failures.extend(_validate_end_window_allows_late_contract())
+    failures.extend(_validate_end_window_skips_missing_close_time())
     failures.extend(_validate_direct_contract_scan_count_below_one_skip())
 
     if failures:
@@ -423,12 +427,136 @@ def _validate_direct_contract_scan_count_below_one_skip() -> list[str]:
         return []
 
 
+def _validate_end_window_blocks_early_contract() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_entry_end_window_only=True,
+                live_entry_end_window_minutes=5,
+            ),
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(contract_close_time=_future_time(minutes=8))
+            ),
+            cycle_number=46,
+        )
+        failures: list[str] = []
+        if intents:
+            failures.append(f"end-window early intents={intents} expected empty")
+        payload = _first_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            failures.append("end-window early skip log missing")
+            return failures
+        expected = {
+            "reason": "end_window_not_open",
+            "end_window_allowed": False,
+            "end_window_reason": "end_window_not_open",
+        }
+        for key, value in expected.items():
+            if payload.get(key) != value:
+                failures.append(f"end-window early {key}={payload.get(key)}")
+        if not isinstance(payload.get("contract_time_remaining_seconds"), int):
+            failures.append("end-window early remaining seconds missing")
+        return failures
+
+
+def _validate_end_window_allows_late_contract() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_entry_end_window_only=True,
+                live_entry_end_window_minutes=5,
+            ),
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(contract_close_time=_future_time(minutes=3))
+            ),
+            cycle_number=47,
+        )
+        failures: list[str] = []
+        if len(intents) != 1:
+            failures.append(f"end-window late count={len(intents)} expected=1")
+            return failures
+        payload = _first_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_intent_created",
+        )
+        if payload is None:
+            failures.append("end-window late intent log missing")
+            return failures
+        expected = {
+            "end_window_allowed": True,
+            "end_window_reason": "end_window_open",
+        }
+        for key, value in expected.items():
+            if payload.get(key) != value:
+                failures.append(f"end-window late {key}={payload.get(key)}")
+        if not isinstance(payload.get("contract_time_remaining_seconds"), int):
+            failures.append("end-window late remaining seconds missing")
+        return failures
+
+
+def _validate_end_window_skips_missing_close_time() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_entry_end_window_only=True,
+                live_entry_end_window_minutes=5,
+            ),
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(_contract()),
+            cycle_number=48,
+        )
+        failures: list[str] = []
+        if intents:
+            failures.append(f"end-window missing intents={intents} expected empty")
+        payload = _first_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            failures.append("end-window missing skip log missing")
+            return failures
+        expected = {
+            "reason": "end_window_close_time_missing",
+            "end_window_allowed": False,
+            "end_window_reason": "end_window_close_time_missing",
+        }
+        for key, value in expected.items():
+            if payload.get(key) != value:
+                failures.append(f"end-window missing {key}={payload.get(key)}")
+        return failures
+
+
 def _coordinator(
     temp_path: Path,
+    settings: "_Settings | None" = None,
     risk_manager=None,  # noqa: ANN001
 ) -> LiveExecutionCoordinator:
     return LiveExecutionCoordinator(
-        settings=_Settings(
+        settings=settings
+        or _Settings(
             log_directory=temp_path,
             log_jsonl_enabled=True,
         ),
@@ -450,6 +578,7 @@ def _contract(
     direction: str = "up",
     confidence: int = 70,
     midpoint: Decimal = Decimal("0.10"),
+    contract_close_time: str | None = None,
 ) -> ScannedContract:
     return ScannedContract(
         product_id=product_id,
@@ -468,6 +597,7 @@ def _contract(
             top_of_book_liquidity=Decimal("100"),
             dollar_volume=Decimal("1000"),
         ),
+        contract_close_time=contract_close_time,
     )
 
 
@@ -574,10 +704,16 @@ def _first_event_payload(
     return None
 
 
+def _future_time(*, minutes: int) -> str:
+    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+
+
 @dataclass(frozen=True)
 class _Settings:
     log_directory: Path
     log_jsonl_enabled: bool
+    live_entry_end_window_only: bool = False
+    live_entry_end_window_minutes: int = 5
 
 
 class _FixedEntryRiskManager:

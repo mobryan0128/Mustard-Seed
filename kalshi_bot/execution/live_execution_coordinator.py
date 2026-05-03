@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from decimal import Decimal
+from datetime import datetime, timezone
+from decimal import Decimal, ROUND_FLOOR
 from typing import Any
 
 from kalshi_bot.clients.kalshi_client import (
     KalshiClientError,
+    KalshiMarketPosition,
     KalshiOrderRequest,
     KalshiOrderSummary,
 )
@@ -52,6 +54,13 @@ class ExecutionPricing:
 
 
 @dataclass(frozen=True)
+class EntryEndWindowStatus:
+    allowed: bool | None
+    reason: str | None
+    remaining_seconds: int | None
+
+
+@dataclass(frozen=True)
 class LiveSubmissionResult:
     """Outcome from one guarded live submission attempt."""
 
@@ -89,6 +98,16 @@ class LivePositionRecord:
     updated_at: str | None
 
 
+@dataclass(frozen=True)
+class LiveTrailingStopState:
+    """Per live position trailing-stop state."""
+
+    armed: bool
+    peak_exit_bid: Decimal | None
+    last_position_count: Decimal
+    exit_pending: bool
+
+
 class LiveExecutionCoordinator:
     """Convert simulated entries into intents and optionally submit guarded live orders."""
 
@@ -113,6 +132,7 @@ class LiveExecutionCoordinator:
         self._sleep_fn = sleep_fn
         self._live_position_ledger: dict[str, LivePositionRecord] = {}
         self._client_order_id_by_order_id: dict[str, str] = {}
+        self._trailing_stop_states: dict[str, LiveTrailingStopState] = {}
 
     @property
     def live_position_ledger(self) -> dict[str, LivePositionRecord]:
@@ -200,6 +220,15 @@ class LiveExecutionCoordinator:
                     reason="invalid_entry_price",
                     contract=contract,
                     cycle_number=cycle_number,
+                )
+                continue
+            end_window = _entry_end_window_status(contract, settings=self._settings)
+            if end_window.reason is not None and not end_window.allowed:
+                self._log_contract_intent_skipped(
+                    reason=end_window.reason,
+                    contract=contract,
+                    cycle_number=cycle_number,
+                    details=_end_window_payload(end_window),
                 )
                 continue
             current_exposure_dollars = self._live_current_exposure_dollars()
@@ -306,11 +335,443 @@ class LiveExecutionCoordinator:
                     "direction": intent.direction,
                     "confidence": intent.confidence,
                     "risk_approval_source": intent.risk_approval_source,
+                    "contract_close_time": getattr(contract, "contract_close_time", None),
+                    **_end_window_payload(end_window),
                     **_execution_pricing_payload(pricing),
                     "intent_count": intent.count,
                 },
             )
         return tuple(intents)
+
+    def process_profit_capture_exits(
+        self,
+        market_snapshot: MarketStateSnapshot,
+        *,
+        cycle_number: int | None = None,
+    ) -> tuple[LiveSubmissionResult, ...]:
+        """Evaluate optional live-only profit capture and trailing exits."""
+
+        profit_enabled = getattr(
+            self._settings,
+            "live_profit_capture_enabled",
+            False,
+        )
+        trailing_enabled = getattr(
+            self._settings,
+            "live_trailing_stop_enabled",
+            False,
+        )
+        if not profit_enabled and not trailing_enabled:
+            return ()
+        if self._client is None or not hasattr(self._client, "get_positions"):
+            self._log_exit_skipped(
+                event_type="profit_capture_exit_skipped",
+                reason="positions_client_unavailable",
+                cycle_number=cycle_number,
+            )
+            return ()
+
+        try:
+            position_page = self._client.get_positions(
+                count_filter="position",
+                settlement_status="unsettled",
+                limit=1000,
+            )
+        except KalshiClientError as exc:
+            self._log_exit_skipped(
+                event_type="profit_capture_exit_skipped",
+                reason="positions_fetch_failed",
+                cycle_number=cycle_number,
+                details={"message": str(exc)},
+            )
+            return ()
+
+        active_positions = tuple(
+            position
+            for position in position_page.market_positions
+            if abs(position.position_fp) > Decimal("0")
+        )
+        active_keys = {
+            _exit_state_key(position.ticker, _position_side(position))
+            for position in active_positions
+            if _position_side(position) is not None
+        }
+        for key in tuple(self._trailing_stop_states):
+            if key not in active_keys:
+                self._trailing_stop_states.pop(key, None)
+
+        results: list[LiveSubmissionResult] = []
+        for position in active_positions:
+            result = self._process_live_exit_position(
+                position=position,
+                market_snapshot=market_snapshot,
+                cycle_number=cycle_number,
+                profit_enabled=profit_enabled,
+                trailing_enabled=trailing_enabled,
+            )
+            if result is not None:
+                results.append(result)
+        return tuple(results)
+
+    def _process_live_exit_position(
+        self,
+        *,
+        position: KalshiMarketPosition,
+        market_snapshot: MarketStateSnapshot,
+        cycle_number: int | None,
+        profit_enabled: bool,
+        trailing_enabled: bool,
+    ) -> LiveSubmissionResult | None:
+        side = _position_side(position)
+        if side is None:
+            self._log_exit_skipped(
+                event_type="profit_capture_exit_skipped",
+                reason="invalid_position_side",
+                cycle_number=cycle_number,
+                details={
+                    "ticker": position.ticker,
+                    "position_count": abs(position.position_fp),
+                },
+            )
+            return None
+
+        ticker_state = market_snapshot.tickers.get(position.ticker)
+        if ticker_state is None:
+            self._log_exit_skipped(
+                event_type="profit_capture_exit_skipped",
+                reason="market_state_missing",
+                cycle_number=cycle_number,
+                details={
+                    "ticker": position.ticker,
+                    "side": side,
+                    "position_count": abs(position.position_fp),
+                },
+            )
+            return None
+
+        executable_bid, liquidity_size, skip_reason = _select_executable_exit_bid(
+            ticker_state,
+            side=side,
+        )
+        base_payload = _live_exit_payload(
+            settings=self._settings,
+            cycle_number=cycle_number,
+            ticker=position.ticker,
+            side=side,
+            position_count=abs(position.position_fp),
+            executable_exit_bid=executable_bid,
+            liquidity_size=liquidity_size,
+            peak_exit_bid=None,
+            sell_count=None,
+        )
+        if skip_reason is not None or executable_bid is None:
+            self._log_exit_skipped(
+                event_type="profit_capture_exit_skipped",
+                reason=skip_reason or "executable_exit_bid_missing",
+                cycle_number=cycle_number,
+                details=base_payload,
+            )
+            return None
+
+        if profit_enabled and executable_bid >= getattr(
+            self._settings,
+            "live_profit_capture_price",
+            Decimal("0.99"),
+        ):
+            sell_count = _live_sell_count(position_count=abs(position.position_fp))
+            trigger_payload = {**base_payload, "sell_count": sell_count}
+            if sell_count < 1:
+                self._log_exit_skipped(
+                    event_type="profit_capture_exit_skipped",
+                    reason="sell_count_unavailable",
+                    cycle_number=cycle_number,
+                    details=trigger_payload,
+                )
+                return None
+            self._log_and_record(
+                event_type="profit_capture_exit_triggered",
+                identifier=position.ticker,
+                payload=trigger_payload,
+            )
+            return self._submit_live_exit_order(
+                ticker=position.ticker,
+                side=side,
+                price_dollars=executable_bid,
+                count=sell_count,
+                reason="profit_capture",
+                cycle_number=cycle_number,
+                trigger_payload=trigger_payload,
+            )
+
+        if not trailing_enabled:
+            return None
+        return self._process_trailing_exit(
+            position=position,
+            side=side,
+            executable_bid=executable_bid,
+            base_payload=base_payload,
+            cycle_number=cycle_number,
+        )
+
+    def _process_trailing_exit(
+        self,
+        *,
+        position: KalshiMarketPosition,
+        side: str,
+        executable_bid: Decimal,
+        base_payload: dict[str, object],
+        cycle_number: int | None,
+    ) -> LiveSubmissionResult | None:
+        key = _exit_state_key(position.ticker, side)
+        position_count = abs(position.position_fp)
+        state = self._trailing_stop_states.get(key)
+        if (
+            state is None
+            or state.exit_pending
+            or state.last_position_count != position_count
+        ):
+            state = LiveTrailingStopState(
+                armed=False,
+                peak_exit_bid=None,
+                last_position_count=position_count,
+                exit_pending=False,
+            )
+            self._trailing_stop_states[key] = state
+
+        activation_price = getattr(
+            self._settings,
+            "live_profit_capture_price",
+            Decimal("0.99"),
+        )
+        if not state.armed:
+            if executable_bid < activation_price:
+                return None
+            state = LiveTrailingStopState(
+                armed=True,
+                peak_exit_bid=executable_bid,
+                last_position_count=position_count,
+                exit_pending=False,
+            )
+            self._trailing_stop_states[key] = state
+            self._log_and_record(
+                event_type="trailing_exit_armed",
+                identifier=position.ticker,
+                payload={**base_payload, "peak_exit_bid": executable_bid},
+            )
+            return None
+
+        peak_exit_bid = state.peak_exit_bid or executable_bid
+        if executable_bid > peak_exit_bid:
+            state = LiveTrailingStopState(
+                armed=True,
+                peak_exit_bid=executable_bid,
+                last_position_count=position_count,
+                exit_pending=False,
+            )
+            self._trailing_stop_states[key] = state
+            self._log_and_record(
+                event_type="trailing_exit_peak_updated",
+                identifier=position.ticker,
+                payload={**base_payload, "peak_exit_bid": executable_bid},
+            )
+            return None
+
+        trailing_distance = getattr(
+            self._settings,
+            "live_trailing_stop_distance",
+            Decimal("0.05"),
+        )
+        if peak_exit_bid - executable_bid < trailing_distance:
+            return None
+
+        sell_count = _live_sell_count(position_count=position_count)
+        trigger_payload = {
+            **base_payload,
+            "peak_exit_bid": peak_exit_bid,
+            "sell_count": sell_count,
+        }
+        if sell_count < 1:
+            self._log_exit_skipped(
+                event_type="trailing_exit_skipped",
+                reason="sell_count_unavailable",
+                cycle_number=cycle_number,
+                details=trigger_payload,
+            )
+            return None
+
+        self._log_and_record(
+            event_type="trailing_exit_triggered",
+            identifier=position.ticker,
+            payload=trigger_payload,
+        )
+        result = self._submit_live_exit_order(
+            ticker=position.ticker,
+            side=side,
+            price_dollars=executable_bid,
+            count=sell_count,
+            reason="trailing_stop",
+            cycle_number=cycle_number,
+            trigger_payload=trigger_payload,
+        )
+        self._trailing_stop_states[key] = LiveTrailingStopState(
+            armed=True,
+            peak_exit_bid=peak_exit_bid,
+            last_position_count=position_count,
+            exit_pending=True,
+        )
+        return result
+
+    def _submit_live_exit_order(
+        self,
+        *,
+        ticker: str,
+        side: str,
+        price_dollars: Decimal,
+        count: int,
+        reason: str,
+        cycle_number: int | None,
+        trigger_payload: dict[str, object],
+    ) -> LiveSubmissionResult:
+        order_request = KalshiOrderRequest(
+            ticker=ticker,
+            action="sell",
+            side=side,
+            count=count,
+            price_dollars=price_dollars,
+            time_in_force=getattr(
+                self._settings,
+                "live_validation_time_in_force",
+                "immediate_or_cancel",
+            ),
+            client_order_id=(
+                f"{reason}-{cycle_number}-{ticker}-{side}"
+                if cycle_number is not None
+                else f"{reason}-manual-{ticker}-{side}"
+            ),
+        )
+        blocked_event = (
+            "trailing_exit_skipped"
+            if reason == "trailing_stop"
+            else "profit_capture_exit_skipped"
+        )
+        response_event = (
+            "trailing_exit_order_response"
+            if reason == "trailing_stop"
+            else "profit_capture_exit_order_response"
+        )
+        safety_decision = self._risk_manager.evaluate_live_order(order_request)
+        if not safety_decision.allow:
+            self._log_exit_skipped(
+                event_type=blocked_event,
+                reason="live_safety_blocked",
+                cycle_number=cycle_number,
+                details={
+                    **trigger_payload,
+                    "live_safety_reason": safety_decision.reason,
+                    **_order_request_payload(order_request),
+                },
+            )
+            return LiveSubmissionResult(
+                classification="blocked_by_safeguard",
+                decision_reason=safety_decision.reason,
+                order_placed=False,
+                order_id=None,
+                final_order=None,
+                poll_attempts_used=0,
+                error_message=None,
+            )
+
+        if self._client is None:
+            self._log_exit_skipped(
+                event_type=blocked_event,
+                reason="live_client_unavailable",
+                cycle_number=cycle_number,
+                details={**trigger_payload, **_order_request_payload(order_request)},
+            )
+            return LiveSubmissionResult(
+                classification="blocked_by_safeguard",
+                decision_reason="live_client_unavailable",
+                order_placed=False,
+                order_id=None,
+                final_order=None,
+                poll_attempts_used=0,
+                error_message=None,
+            )
+
+        final_order: KalshiOrderSummary | None = None
+        order_placed = False
+        poll_attempts_used = 0
+        try:
+            created_order = self._client.create_order(order_request)
+            order_placed = True
+            final_order = created_order
+            if not _is_terminal_order(created_order):
+                final_order, poll_attempts_used = self._poll_order(
+                    created_order.order_id,
+                )
+            classification = _classify_order_result(final_order)
+        except KalshiClientError as exc:
+            error_message = str(exc)
+            failure_reason = "order_poll_failed" if order_placed else "order_submit_failed"
+            self._log_exit_skipped(
+                event_type=blocked_event,
+                reason=failure_reason,
+                cycle_number=cycle_number,
+                details={
+                    **trigger_payload,
+                    "message": error_message,
+                    **_order_request_payload(order_request),
+                },
+            )
+            return LiveSubmissionResult(
+                classification="unknown_final_state" if order_placed else "rejected",
+                decision_reason=failure_reason,
+                order_placed=order_placed,
+                order_id=final_order.order_id if final_order is not None else None,
+                final_order=final_order,
+                poll_attempts_used=0,
+                error_message=error_message,
+            )
+
+        self._log_and_record(
+            event_type=response_event,
+            identifier=final_order.order_id,
+            payload={
+                **trigger_payload,
+                "classification": classification,
+                **_order_request_payload(order_request),
+                **_order_summary_payload(final_order),
+            },
+        )
+        return LiveSubmissionResult(
+            classification=classification,
+            decision_reason=None,
+            order_placed=True,
+            order_id=final_order.order_id,
+            final_order=final_order,
+            poll_attempts_used=poll_attempts_used,
+            error_message=None,
+        )
+
+    def _log_exit_skipped(
+        self,
+        *,
+        event_type: str,
+        reason: str,
+        cycle_number: int | None,
+        details: dict[str, object] | None = None,
+    ) -> None:
+        payload: dict[str, object] = {
+            "cycle_number": cycle_number,
+            "reason": reason,
+        }
+        if details:
+            payload.update(details)
+        self._log_and_record(
+            event_type=event_type,
+            identifier=str(payload.get("ticker") or event_type),
+            payload=payload,
+        )
 
     def submit_live_order(self, intent: LiveOrderIntent) -> LiveSubmissionResult:
         """Submit one intent only after all live guardrails allow it."""
@@ -507,6 +968,7 @@ class LiveExecutionCoordinator:
             "structure": contract.structure,
             "confidence": contract.confidence,
             "entry_price": contract.midpoint,
+            "contract_close_time": getattr(contract, "contract_close_time", None),
         }
         if details:
             payload.update(details)
@@ -723,6 +1185,81 @@ def _order_summary_payload(order: KalshiOrderSummary) -> dict[str, object]:
     }
 
 
+def _select_executable_exit_bid(
+    ticker_state,
+    *,
+    side: str,
+) -> tuple[Decimal | None, Decimal | None, str | None]:
+    if side == "yes":
+        executable_bid = ticker_state.yes_bid_dollars
+        liquidity_size = ticker_state.yes_bid_size_fp
+    elif side == "no":
+        if ticker_state.yes_ask_dollars is None:
+            return None, ticker_state.yes_ask_size_fp, "executable_exit_bid_missing"
+        executable_bid = Decimal("1") - ticker_state.yes_ask_dollars
+        liquidity_size = ticker_state.yes_ask_size_fp
+    else:
+        return None, None, "invalid_position_side"
+
+    if executable_bid is None or executable_bid <= Decimal("0"):
+        return executable_bid, liquidity_size, "executable_exit_bid_missing"
+    if executable_bid > Decimal("1"):
+        return executable_bid, liquidity_size, "executable_exit_bid_missing"
+    if liquidity_size is None or liquidity_size <= Decimal("0"):
+        return executable_bid, liquidity_size, "exit_liquidity_missing"
+    return executable_bid, liquidity_size, None
+
+
+def _position_side(position: KalshiMarketPosition) -> str | None:
+    if position.position_fp > Decimal("0"):
+        return "yes"
+    if position.position_fp < Decimal("0"):
+        return "no"
+    return None
+
+
+def _exit_state_key(ticker: str, side: str | None) -> str:
+    return f"{ticker}:{side or 'unknown'}"
+
+
+def _live_sell_count(*, position_count: Decimal) -> int:
+    return max(int(position_count.to_integral_value(rounding=ROUND_FLOOR)), 0)
+
+
+def _live_exit_payload(
+    *,
+    settings: KalshiSettings,
+    cycle_number: int | None,
+    ticker: str,
+    side: str,
+    position_count: Decimal,
+    executable_exit_bid: Decimal | None,
+    liquidity_size: Decimal | None,
+    peak_exit_bid: Decimal | None,
+    sell_count: int | None,
+) -> dict[str, object]:
+    return {
+        "cycle_number": cycle_number,
+        "ticker": ticker,
+        "side": side,
+        "position_count": position_count,
+        "executable_exit_bid": executable_exit_bid,
+        "liquidity_size": liquidity_size,
+        "profit_capture_price": getattr(
+            settings,
+            "live_profit_capture_price",
+            Decimal("0.99"),
+        ),
+        "trailing_stop_distance": getattr(
+            settings,
+            "live_trailing_stop_distance",
+            Decimal("0.05"),
+        ),
+        "peak_exit_bid": peak_exit_bid,
+        "sell_count": sell_count,
+    }
+
+
 def _execution_pricing(
     *,
     contract: ScannedContract,
@@ -786,6 +1323,66 @@ def _intent_side_from_direction(direction: str) -> str:
     if direction == "down":
         return "no"
     return ""
+
+
+def _entry_end_window_status(
+    contract: ScannedContract,
+    *,
+    settings: KalshiSettings,
+) -> EntryEndWindowStatus:
+    if not getattr(settings, "live_entry_end_window_only", False):
+        return EntryEndWindowStatus(
+            allowed=None,
+            reason=None,
+            remaining_seconds=None,
+        )
+    close_time = getattr(contract, "contract_close_time", None)
+    if not close_time:
+        return EntryEndWindowStatus(
+            allowed=False,
+            reason="end_window_close_time_missing",
+            remaining_seconds=None,
+        )
+    try:
+        close_at = _parse_iso_datetime(close_time)
+    except ValueError:
+        return EntryEndWindowStatus(
+            allowed=False,
+            reason="end_window_close_time_invalid",
+            remaining_seconds=None,
+        )
+
+    remaining_seconds = int((close_at - datetime.now(timezone.utc)).total_seconds())
+    window_seconds = getattr(settings, "live_entry_end_window_minutes", 5) * 60
+    if remaining_seconds <= window_seconds:
+        return EntryEndWindowStatus(
+            allowed=True,
+            reason="end_window_open",
+            remaining_seconds=remaining_seconds,
+        )
+    return EntryEndWindowStatus(
+        allowed=False,
+        reason="end_window_not_open",
+        remaining_seconds=remaining_seconds,
+    )
+
+
+def _parse_iso_datetime(value: str) -> datetime:
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _end_window_payload(status: EntryEndWindowStatus) -> dict[str, object]:
+    return {
+        "contract_time_remaining_seconds": status.remaining_seconds,
+        "end_window_allowed": status.allowed,
+        "end_window_reason": status.reason,
+    }
 
 
 def _execution_safety_rejection_reason(pricing: ExecutionPricing) -> str | None:
