@@ -52,8 +52,8 @@ DEFAULT_RISK_MIN_PERCENT_PER_TRADE = Decimal("0.02")
 DEFAULT_RISK_MAX_PERCENT_PER_TRADE = Decimal("0.05")
 DEFAULT_RISK_MIN_STAKE_DOLLARS = Decimal("2")
 DEFAULT_RISK_MAX_STAKE_DOLLARS = Decimal("5")
-DEFAULT_RISK_MAX_OPEN_POSITIONS = 10
-DEFAULT_RISK_MAX_TOTAL_EXPOSURE_DOLLARS = Decimal("300")
+DEFAULT_RISK_MAX_OPEN_POSITIONS = 20
+DEFAULT_RISK_MAX_TOTAL_EXPOSURE_DOLLARS = Decimal("20")
 DEFAULT_RISK_DAILY_LOSS_LIMIT_DOLLARS = Decimal("10")
 DEFAULT_RISK_KILL_SWITCH_ACTIVE = False
 DEFAULT_LIVE_VALIDATION_ENABLED = False
@@ -72,6 +72,9 @@ DEFAULT_LIVE_TRAILING_STOP_ENABLED = False
 DEFAULT_LIVE_TRAILING_STOP_DISTANCE = Decimal("0.05")
 DEFAULT_LIVE_ENTRY_END_WINDOW_ONLY = False
 DEFAULT_LIVE_ENTRY_END_WINDOW_MINUTES = 5
+DEFAULT_LIVE_FAST_SCAN_ENABLED = False
+DEFAULT_LIVE_FAST_SCAN_INTERVAL_SECONDS = 2.0
+DEFAULT_LIVE_FAST_SCAN_COOLDOWN_SECONDS = 5.0
 DEFAULT_RUNNER_ENABLED = True
 DEFAULT_RUNNER_LOOP_INTERVAL_SECONDS = 5.0
 DEFAULT_RUNNER_STATUS_LOG_EVERY_N_CYCLES = 1
@@ -168,6 +171,9 @@ class KalshiSettings:
     live_trailing_stop_distance: Decimal
     live_entry_end_window_only: bool
     live_entry_end_window_minutes: int
+    live_fast_scan_enabled: bool
+    live_fast_scan_interval_seconds: float
+    live_fast_scan_cooldown_seconds: float
     runner_enabled: bool
     runner_loop_interval_seconds: float
     runner_status_log_every_n_cycles: int
@@ -424,6 +430,21 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         DEFAULT_LIVE_ENTRY_END_WINDOW_MINUTES,
         "LIVE_ENTRY_END_WINDOW_MINUTES",
     )
+    live_fast_scan_enabled = _parse_bool(
+        values.get("LIVE_FAST_SCAN_ENABLED"),
+        DEFAULT_LIVE_FAST_SCAN_ENABLED,
+        "LIVE_FAST_SCAN_ENABLED",
+    )
+    live_fast_scan_interval_seconds = _parse_positive_float(
+        values.get("LIVE_FAST_SCAN_INTERVAL_SECONDS"),
+        DEFAULT_LIVE_FAST_SCAN_INTERVAL_SECONDS,
+        "LIVE_FAST_SCAN_INTERVAL_SECONDS",
+    )
+    live_fast_scan_cooldown_seconds = _parse_positive_float(
+        values.get("LIVE_FAST_SCAN_COOLDOWN_SECONDS"),
+        DEFAULT_LIVE_FAST_SCAN_COOLDOWN_SECONDS,
+        "LIVE_FAST_SCAN_COOLDOWN_SECONDS",
+    )
     runner_enabled = _parse_bool(
         values.get("RUNNER_ENABLED"),
         DEFAULT_RUNNER_ENABLED,
@@ -617,6 +638,9 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_trailing_stop_distance=live_trailing_stop_distance,
         live_entry_end_window_only=live_entry_end_window_only,
         live_entry_end_window_minutes=live_entry_end_window_minutes,
+        live_fast_scan_enabled=live_fast_scan_enabled,
+        live_fast_scan_interval_seconds=live_fast_scan_interval_seconds,
+        live_fast_scan_cooldown_seconds=live_fast_scan_cooldown_seconds,
         runner_enabled=runner_enabled,
         runner_loop_interval_seconds=runner_loop_interval_seconds,
         runner_status_log_every_n_cycles=runner_status_log_every_n_cycles,
@@ -736,6 +760,9 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_TRAILING_STOP_DISTANCE",
         "LIVE_ENTRY_END_WINDOW_ONLY",
         "LIVE_ENTRY_END_WINDOW_MINUTES",
+        "LIVE_FAST_SCAN_ENABLED",
+        "LIVE_FAST_SCAN_INTERVAL_SECONDS",
+        "LIVE_FAST_SCAN_COOLDOWN_SECONDS",
         "RUNNER_ENABLED",
         "RUNNER_LOOP_INTERVAL_SECONDS",
         "RUNNER_STATUS_LOG_EVERY_N_CYCLES",

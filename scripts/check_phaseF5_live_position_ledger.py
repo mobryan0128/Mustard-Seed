@@ -14,7 +14,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from kalshi_bot.clients.kalshi_client import KalshiOrderSummary  # noqa: E402
+from kalshi_bot.clients.kalshi_client import (  # noqa: E402
+    KalshiMarketPosition,
+    KalshiOrderSummary,
+    KalshiPositionPage,
+)
 from kalshi_bot.execution.execution_engine import LiveOrderIntent  # noqa: E402
 from kalshi_bot.execution.live_execution_coordinator import LiveExecutionCoordinator  # noqa: E402
 from kalshi_bot.risk.risk_manager import RiskManager  # noqa: E402
@@ -32,6 +36,8 @@ def main() -> int:
     failures.extend(_validate_rejected_order_records_no_open_position())
     failures.extend(_validate_canceled_partial_fill_preserves_partial_position())
     failures.extend(_validate_unknown_state_records_only())
+    failures.extend(_validate_reconciliation_removes_stale_position())
+    failures.extend(_validate_reconciliation_recalculates_active_exposure())
 
     if failures:
         for failure in failures:
@@ -173,6 +179,78 @@ def _validate_unknown_state_records_only() -> list[str]:
     return failures
 
 
+def _validate_reconciliation_removes_stale_position() -> list[str]:
+    state = _run_submission(
+        client_order_id="sim-live-stale",
+        polled_orders=[
+            _order_summary(
+                order_id="ord-stale",
+                client_order_id="sim-live-stale",
+                status="executed",
+                fill_count_fp="1.00",
+                remaining_count_fp="0.00",
+                initial_count_fp="1.00",
+            ),
+        ],
+        positions_after_submit=[],
+        reconcile=True,
+    )
+    failures: list[str] = []
+    if state.ledger:
+        failures.append(f"stale reconciliation ledger={state.ledger}")
+    for event_type in (
+        "live_position_reconciliation_started",
+        "stale_position_removed",
+        "exposure_recalculated",
+        "live_position_reconciliation_completed",
+    ):
+        if not _has_event(state.runtime_records, event_type):
+            failures.append(f"stale reconciliation {event_type} log missing")
+    return failures
+
+
+def _validate_reconciliation_recalculates_active_exposure() -> list[str]:
+    state = _run_submission(
+        client_order_id="sim-live-active",
+        polled_orders=[
+            _order_summary(
+                order_id="ord-active",
+                client_order_id="sim-live-active",
+                status="executed",
+                fill_count_fp="1.00",
+                remaining_count_fp="0.00",
+                initial_count_fp="1.00",
+            ),
+        ],
+        positions_after_submit=[
+            KalshiMarketPosition(
+                ticker="KXBTC15M-TEST",
+                position_fp=Decimal("1"),
+                market_exposure_dollars=Decimal("0.25"),
+                resting_orders_count=None,
+                last_updated_ts=None,
+            )
+        ],
+        reconcile=True,
+    )
+    failures: list[str] = []
+    if "sim-live-active" not in state.ledger:
+        failures.append("active reconciliation removed active ledger record")
+    if state.live_exposure_dollars != Decimal("0.25"):
+        failures.append(
+            f"active reconciliation exposure={state.live_exposure_dollars}"
+        )
+    payload = _first_event_payload(state.runtime_records, "exposure_recalculated")
+    if payload is None:
+        failures.append("active reconciliation exposure_recalculated log missing")
+    elif payload.get("current_exposure_dollars_after") != "0.25":
+        failures.append(
+            "active reconciliation logged exposure="
+            f"{payload.get('current_exposure_dollars_after')}"
+        )
+    return failures
+
+
 def _assert_record(
     *,
     state: "_FixtureState",
@@ -205,6 +283,8 @@ def _run_submission(
     *,
     client_order_id: str,
     polled_orders: list[KalshiOrderSummary],
+    positions_after_submit: list[KalshiMarketPosition] | None = None,
+    reconcile: bool = False,
 ) -> "_FixtureState":
     with TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
@@ -218,6 +298,7 @@ def _run_submission(
                 initial_count_fp="1.00",
             ),
             polled_orders=polled_orders,
+            positions=positions_after_submit or [],
         )
         coordinator = LiveExecutionCoordinator(
             settings=_Settings(
@@ -234,8 +315,11 @@ def _run_submission(
             sleep_fn=lambda _: None,
         )
         coordinator.submit_live_order(_intent(client_order_id=client_order_id))
+        if reconcile:
+            coordinator.reconcile_live_positions(cycle_number=1, reason="fixture")
         return _FixtureState(
             ledger=coordinator.live_position_ledger,
+            live_exposure_dollars=coordinator._live_current_exposure_dollars(),  # noqa: SLF001
             runtime_records=_jsonl_records(temp_path / "logs" / "runtime.jsonl"),
             replay_written=(temp_path / "replay" / "replay.jsonl").exists(),
         )
@@ -311,15 +395,30 @@ def _has_event(records: tuple[dict[str, object], ...], event_type: str) -> bool:
     return any(record.get("event_type") == event_type for record in records)
 
 
+def _first_event_payload(
+    records: tuple[dict[str, object], ...],
+    event_type: str,
+) -> dict[str, object] | None:
+    for record in records:
+        if record.get("event_type") != event_type:
+            continue
+        payload = record.get("payload")
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
 class _FakeKalshiClient:
     def __init__(
         self,
         *,
         created_order: KalshiOrderSummary,
         polled_orders: list[KalshiOrderSummary],
+        positions: list[KalshiMarketPosition],
     ) -> None:
         self._created_order = created_order
         self._polled_orders = list(polled_orders)
+        self._positions = positions
 
     def create_order(self, order_request) -> KalshiOrderSummary:
         return self._created_order
@@ -328,6 +427,12 @@ class _FakeKalshiClient:
         if self._polled_orders:
             return self._polled_orders.pop(0)
         return self._created_order
+
+    def get_positions(self, **kwargs):  # noqa: ANN003,ARG002
+        return KalshiPositionPage(
+            market_positions=tuple(self._positions),
+            cursor=None,
+        )
 
 
 @dataclass(frozen=True)
@@ -344,6 +449,7 @@ class _Settings:
 @dataclass(frozen=True)
 class _FixtureState:
     ledger: dict[str, object]
+    live_exposure_dollars: Decimal
     runtime_records: tuple[dict[str, object], ...]
     replay_written: bool
 

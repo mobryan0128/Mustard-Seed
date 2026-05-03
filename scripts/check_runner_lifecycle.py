@@ -65,6 +65,7 @@ def main() -> int:
     failures.extend(_validate_live_runner_no_intents_logged())
     failures.extend(_validate_live_runner_disabled_does_not_submit())
     failures.extend(_validate_live_runner_enabled_submits_one_intent())
+    failures.extend(_validate_live_fast_scan_uses_cache_only_path())
     failures.extend(_validate_live_runner_blocked_submission_logged())
     failures.extend(_validate_live_runner_starts_without_simulation())
     failures.extend(_validate_live_runner_risk_does_not_require_live_validation())
@@ -608,6 +609,60 @@ def _validate_live_runner_enabled_submits_one_intent() -> list[str]:
     return failures
 
 
+def _validate_live_fast_scan_uses_cache_only_path() -> list[str]:
+    coordinator = _FakeLiveExecutionCoordinator(intents=(_approved_intent("sim-0001"),))
+    runner, state = _build_runner(
+        live_flags_present=True,
+        live_runner_execution_enabled=True,
+        live_fast_scan_enabled=True,
+        live_execution_coordinator=coordinator,
+        time_fn=lambda: 100.0,
+    )
+    results = runner.run_cycles(1)
+    failures: list[str] = []
+    if len(results) != 1:
+        failures.append(f"live fast scan cycle count={len(results)}")
+        return failures
+    if state.kalshi_run_calls != 1 or state.crypto_run_calls != 1:
+        failures.append(
+            "live fast scan ingestion calls="
+            f"{state.kalshi_run_calls}/{state.crypto_run_calls}"
+        )
+    if coordinator.contract_process_calls != 2:
+        failures.append(
+            "live fast scan contract process calls="
+            f"{coordinator.contract_process_calls}"
+        )
+    if len(coordinator.submit_calls) != 2:
+        failures.append(f"live fast scan submit calls={len(coordinator.submit_calls)}")
+    if coordinator.reconcile_calls != 1:
+        failures.append(f"live fast scan reconcile calls={coordinator.reconcile_calls}")
+    if coordinator.allow_reconciliation_values != [True, False]:
+        failures.append(
+            "live fast scan reconciliation flags="
+            f"{coordinator.allow_reconciliation_values}"
+        )
+    if coordinator.scan_sources != ["normal_cycle", "fast_scan"]:
+        failures.append(f"live fast scan sources={coordinator.scan_sources}")
+    if state.log_written_ref is None:
+        return failures + ["live fast scan missing runtime path"]
+    records = _jsonl_records(state.log_written_ref)
+    if _first_event_payload(
+        records,
+        key="event_type",
+        value="live_fast_scan_started",
+    ) is None:
+        failures.append("live fast scan started log missing")
+    skipped = _first_event_payload(
+        records,
+        key="event_type",
+        value="live_fast_scan_skipped",
+    )
+    if skipped is None or skipped.get("reason") != "cooldown_active":
+        failures.append(f"live fast scan cooldown log={skipped}")
+    return failures
+
+
 def _validate_live_runner_blocked_submission_logged() -> list[str]:
     coordinator = _FakeLiveExecutionCoordinator(
         intents=(_approved_intent("sim-0001"),),
@@ -733,6 +788,8 @@ def _build_runner(
     live_order_candidate_events: bool = False,
     live_order_intent_skip_events: bool = False,
     simulation_enabled: bool = True,
+    live_fast_scan_enabled: bool = False,
+    time_fn=None,  # noqa: ANN001
     live_execution_coordinator=None,  # noqa: ANN001
 ):
     temp_dir = TemporaryDirectory()
@@ -748,6 +805,7 @@ def _build_runner(
             live_runner_execution_enabled=live_runner_execution_enabled,
             simulation_enabled=simulation_enabled,
             fail_fast_on_startup=fail_fast_on_startup,
+            live_fast_scan_enabled=live_fast_scan_enabled,
         ),
         market_state_cache=cache,
         kalshi_ws_client=_FakeKalshiClient(
@@ -778,11 +836,13 @@ def _build_runner(
                 live_runner_execution_enabled=live_runner_execution_enabled,
                 simulation_enabled=simulation_enabled,
                 fail_fast_on_startup=fail_fast_on_startup,
+                live_fast_scan_enabled=live_fast_scan_enabled,
             )
         ),
         logger=logger,
         replay_engine=replay_engine,
         sleep_fn=lambda _: None,
+        time_fn=time_fn or (lambda: 100.0),
     )
     if runner._simulation_engine is not None:  # type: ignore[attr-defined]
         runner._simulation_engine._runner_ref = runner  # type: ignore[attr-defined]
@@ -798,6 +858,7 @@ def _settings(
     fail_fast_on_startup: bool,
     live_runner_execution_enabled: bool = False,
     simulation_enabled: bool = True,
+    live_fast_scan_enabled: bool = False,
 ) -> KalshiSettings:
     return KalshiSettings(
         env="demo",
@@ -874,8 +935,11 @@ def _settings(
         live_trailing_stop_distance=Decimal("0.05"),
         live_entry_end_window_only=False,
         live_entry_end_window_minutes=5,
+        live_fast_scan_enabled=live_fast_scan_enabled,
+        live_fast_scan_interval_seconds=2.0,
+        live_fast_scan_cooldown_seconds=5.0,
         runner_enabled=True,
-        runner_loop_interval_seconds=0.001,
+        runner_loop_interval_seconds=5.0 if live_fast_scan_enabled else 0.001,
         runner_status_log_every_n_cycles=1,
         runner_fail_fast_on_startup=fail_fast_on_startup,
         runner_max_cycles=None,
@@ -1224,6 +1288,9 @@ class _FakeLiveExecutionCoordinator:
         self.simulation_process_calls = 0
         self.contract_process_calls = 0
         self.exit_process_calls = 0
+        self.reconcile_calls = 0
+        self.allow_reconciliation_values: list[bool] = []
+        self.scan_sources: list[str] = []
         self.submit_calls: list[LiveOrderIntent] = []
 
     def process_simulation_snapshot(self, simulation_snapshot):  # noqa: ANN001
@@ -1237,9 +1304,13 @@ class _FakeLiveExecutionCoordinator:
         *,
         cycle_number=None,
         market_snapshot=None,  # noqa: ANN001,ARG002
+        allow_reconciliation=True,  # noqa: ANN001,ARG002
+        scan_source="normal_cycle",  # noqa: ANN001,ARG002
     ):
         self.process_calls += 1
         self.contract_process_calls += 1
+        self.allow_reconciliation_values.append(bool(allow_reconciliation))
+        self.scan_sources.append(scan_source)
         return self._intents
 
     def process_profit_capture_exits(
@@ -1250,6 +1321,15 @@ class _FakeLiveExecutionCoordinator:
     ):
         self.exit_process_calls += 1
         return ()
+
+    def reconcile_live_positions(
+        self,
+        *,
+        cycle_number=None,  # noqa: ANN001,ARG002
+        reason="normal_cycle",  # noqa: ANN001,ARG002
+    ):
+        self.reconcile_calls += 1
+        return False
 
     def submit_live_order(self, intent: LiveOrderIntent):
         self.submit_calls.append(intent)

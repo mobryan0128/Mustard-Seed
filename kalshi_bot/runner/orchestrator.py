@@ -137,6 +137,7 @@ class KalshiBotRunner:
         replay_engine: ReplayEngine,
         live_execution_coordinator: LiveExecutionCoordinator | None = None,
         sleep_fn=time.sleep,
+        time_fn=time.monotonic,
     ) -> None:
         if not settings.runner_enabled:
             raise RunnerError("RUNNER_ENABLED must be true.")
@@ -152,6 +153,7 @@ class KalshiBotRunner:
         self._logger = logger
         self._replay_engine = replay_engine
         self._sleep_fn = sleep_fn
+        self._time_fn = time_fn
         self._stopped = False
         self._cycle_count = 0
         self._last_successful_cycle_at: str | None = None
@@ -160,6 +162,7 @@ class KalshiBotRunner:
         self._last_market_discovery_cycle: int | None = None
         self._consecutive_kalshi_feed_timeouts = 0
         self._force_market_discovery_next_cycle = False
+        self._last_fast_scan_submission_at: float | None = None
         self._active_product_markets = (
             {}
             if settings.auto_market_discovery_enabled
@@ -284,8 +287,90 @@ class KalshiBotRunner:
             results.append(result)
             if self._stopped:
                 break
-            self._sleep_fn(self._settings.runner_loop_interval_seconds)
+            self._sleep_between_cycles()
         return results
+
+    def _sleep_between_cycles(self) -> None:
+        loop_interval = self._settings.runner_loop_interval_seconds
+        if not self._fast_scan_available():
+            self._sleep_fn(loop_interval)
+            return
+
+        fast_interval = self._settings.live_fast_scan_interval_seconds
+        remaining = loop_interval
+        while remaining > 0 and not self._stopped:
+            sleep_for = min(fast_interval, remaining)
+            self._sleep_fn(sleep_for)
+            remaining -= sleep_for
+            if self._stopped or remaining <= 0:
+                break
+            self._run_fast_scan_pass()
+
+    def _fast_scan_available(self) -> bool:
+        return (
+            bool(getattr(self._settings, "live_fast_scan_enabled", False))
+            and self._settings.live_runner_execution_enabled
+            and self._live_execution_coordinator is not None
+        )
+
+    def _run_fast_scan_pass(self) -> None:
+        if not self._fast_scan_available():
+            return
+        now = self._time_fn()
+        cooldown_seconds = self._settings.live_fast_scan_cooldown_seconds
+        if (
+            self._last_fast_scan_submission_at is not None
+            and now - self._last_fast_scan_submission_at < cooldown_seconds
+        ):
+            self._log_cycle_event(
+                "live_fast_scan_skipped",
+                {
+                    "cycle_number": self._cycle_count,
+                    "scan_source": "fast_scan",
+                    "reason": "cooldown_active",
+                    "cooldown_seconds": cooldown_seconds,
+                },
+            )
+            return
+
+        self._log_cycle_event(
+            "live_fast_scan_started",
+            {
+                "cycle_number": self._cycle_count,
+                "scan_source": "fast_scan",
+            },
+        )
+        bias_snapshot = self._bias_engine.ingest(self._crypto_feed_client.snapshot())
+        market_snapshot = self._market_state_cache.snapshot()
+        contract_scan_snapshot = self._scan_contracts(
+            bias_snapshot=bias_snapshot,
+            market_snapshot=market_snapshot,
+        )
+        live_intents = (
+            self._live_execution_coordinator.process_contract_scan_snapshot(
+                contract_scan_snapshot,
+                cycle_number=self._cycle_count,
+                market_snapshot=market_snapshot,
+                allow_reconciliation=False,
+                scan_source="fast_scan",
+            )
+        )
+        if live_intents:
+            self._last_fast_scan_submission_at = now
+        self._submit_live_runner_intents(
+            cycle_number=self._cycle_count,
+            intents=live_intents,
+            scan_source="fast_scan",
+        )
+        self._log_cycle_event(
+            "live_fast_scan_completed",
+            {
+                "cycle_number": self._cycle_count,
+                "scan_source": "fast_scan",
+                "ranked_contract_count": len(contract_scan_snapshot.ranked_contracts),
+                "intent_count": len(live_intents),
+            },
+        )
 
     def _run_single_cycle(self) -> RunnerCycleResult:
         self._cycle_count += 1
@@ -319,11 +404,13 @@ class KalshiBotRunner:
                         contract_scan_snapshot,
                         cycle_number=cycle_number,
                         market_snapshot=market_snapshot,
+                        scan_source="normal_cycle",
                     )
                 )
                 self._submit_live_runner_intents(
                     cycle_number=cycle_number,
                     intents=live_intents,
+                    scan_source="normal_cycle",
                 )
             elif self._simulation_engine is not None:
                 live_intents = (
@@ -338,6 +425,10 @@ class KalshiBotRunner:
             self._live_execution_coordinator.process_profit_capture_exits(
                 market_snapshot,
                 cycle_number=cycle_number,
+            )
+            self._live_execution_coordinator.reconcile_live_positions(
+                cycle_number=cycle_number,
+                reason="normal_cycle",
             )
         self._last_successful_cycle_at = _utc_now_iso()
         self._last_error = None
@@ -649,13 +740,14 @@ class KalshiBotRunner:
         *,
         cycle_number: int,
         intents: tuple[Any, ...],
+        scan_source: str = "normal_cycle",
     ) -> None:
         if self._live_execution_coordinator is None:
             return
         if not intents:
             self._log_cycle_event(
                 "live_runner_no_intents",
-                {"cycle_number": cycle_number},
+                {"cycle_number": cycle_number, "scan_source": scan_source},
             )
             return
 
@@ -664,6 +756,7 @@ class KalshiBotRunner:
                 "live_runner_submission_attempted",
                 {
                     "cycle_number": cycle_number,
+                    "scan_source": scan_source,
                     "client_order_id": getattr(intent, "client_order_id", None),
                     "ticker": getattr(intent, "ticker", None),
                     "side": getattr(intent, "side", None),
@@ -678,6 +771,7 @@ class KalshiBotRunner:
             result = self._live_execution_coordinator.submit_live_order(intent)
             payload = {
                 "cycle_number": cycle_number,
+                "scan_source": scan_source,
                 "client_order_id": getattr(intent, "client_order_id", None),
                 "ticker": getattr(intent, "ticker", None),
                 "classification": getattr(result, "classification", None),

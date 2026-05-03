@@ -133,6 +133,8 @@ class LiveExecutionCoordinator:
         self._live_position_ledger: dict[str, LivePositionRecord] = {}
         self._client_order_id_by_order_id: dict[str, str] = {}
         self._trailing_stop_states: dict[str, LiveTrailingStopState] = {}
+        self._reconciled_live_exposure_by_key: dict[str, Decimal] = {}
+        self._live_positions_reconciled = False
 
     @property
     def live_position_ledger(self) -> dict[str, LivePositionRecord]:
@@ -193,6 +195,8 @@ class LiveExecutionCoordinator:
         *,
         cycle_number: int | None = None,
         market_snapshot: MarketStateSnapshot | None = None,
+        allow_reconciliation: bool = True,
+        scan_source: str = "normal_cycle",
     ) -> tuple[LiveOrderIntent, ...]:
         """Create live intents directly from ranked contracts after entry risk approval."""
 
@@ -202,9 +206,17 @@ class LiveExecutionCoordinator:
                 product_id="",
                 market_ticker=None,
                 simulation_position_id=None,
-                details={"cycle_number": cycle_number},
+                details={"cycle_number": cycle_number, "scan_source": scan_source},
             )
             return ()
+
+        if allow_reconciliation and self._should_reconcile_before_entry_risk(
+            market_snapshot=market_snapshot,
+        ):
+            self.reconcile_live_positions(
+                cycle_number=cycle_number,
+                reason="pre_risk",
+            )
 
         intents: list[LiveOrderIntent] = []
         for contract in contract_scan_snapshot.ranked_contracts:
@@ -213,6 +225,7 @@ class LiveExecutionCoordinator:
                     reason="invalid_direction",
                     contract=contract,
                     cycle_number=cycle_number,
+                    scan_source=scan_source,
                 )
                 continue
             if contract.midpoint <= Decimal("0"):
@@ -220,6 +233,7 @@ class LiveExecutionCoordinator:
                     reason="invalid_entry_price",
                     contract=contract,
                     cycle_number=cycle_number,
+                    scan_source=scan_source,
                 )
                 continue
             end_window = _entry_end_window_status(contract, settings=self._settings)
@@ -228,6 +242,7 @@ class LiveExecutionCoordinator:
                     reason=end_window.reason,
                     contract=contract,
                     cycle_number=cycle_number,
+                    scan_source=scan_source,
                     details=_end_window_payload(end_window),
                 )
                 continue
@@ -244,6 +259,7 @@ class LiveExecutionCoordinator:
                     reason=risk_decision.reason,
                     contract=contract,
                     cycle_number=cycle_number,
+                    scan_source=scan_source,
                     details={
                         "current_exposure_dollars": current_exposure_dollars,
                         "realized_daily_pnl_dollars": (
@@ -259,6 +275,7 @@ class LiveExecutionCoordinator:
                     reason="risk_stake_unavailable",
                     contract=contract,
                     cycle_number=cycle_number,
+                    scan_source=scan_source,
                 )
                 continue
 
@@ -272,6 +289,7 @@ class LiveExecutionCoordinator:
                     reason=execution_safety_reason,
                     contract=contract,
                     cycle_number=cycle_number,
+                    scan_source=scan_source,
                     details={
                         "ticker": contract.market_ticker,
                         "stake_dollars": stake_dollars,
@@ -288,6 +306,7 @@ class LiveExecutionCoordinator:
                     reason="entry_price_too_high",
                     contract=contract,
                     cycle_number=cycle_number,
+                    scan_source=scan_source,
                 )
                 continue
             if int(stake_dollars // pricing.intent_price_dollars) < 1:
@@ -295,6 +314,7 @@ class LiveExecutionCoordinator:
                     reason="count_below_one",
                     contract=contract,
                     cycle_number=cycle_number,
+                    scan_source=scan_source,
                     details={
                         "stake_dollars": stake_dollars,
                         **_execution_pricing_payload(pricing),
@@ -306,7 +326,12 @@ class LiveExecutionCoordinator:
                 contract,
                 stake_dollars=stake_dollars,
                 price_dollars=pricing.intent_price_dollars,
-                source_id=f"cycle-{cycle_number}-{contract.product_id}-{contract.market_ticker}"
+                source_id=_live_intent_source_id(
+                    cycle_number=cycle_number,
+                    product_id=contract.product_id,
+                    market_ticker=contract.market_ticker,
+                    scan_source=scan_source,
+                )
                 if cycle_number is not None
                 else None,
             )
@@ -315,6 +340,7 @@ class LiveExecutionCoordinator:
                     reason="intent_unavailable",
                     contract=contract,
                     cycle_number=cycle_number,
+                    scan_source=scan_source,
                     details={"stake_dollars": stake_dollars},
                 )
                 continue
@@ -325,6 +351,7 @@ class LiveExecutionCoordinator:
                 identifier=intent.client_order_id,
                 payload={
                     "cycle_number": cycle_number,
+                    "scan_source": scan_source,
                     "product_id": intent.product_id,
                     "ticker": intent.ticker,
                     "side": intent.side,
@@ -342,6 +369,108 @@ class LiveExecutionCoordinator:
                 },
             )
         return tuple(intents)
+
+    def reconcile_live_positions(
+        self,
+        *,
+        cycle_number: int | None = None,
+        reason: str = "normal_cycle",
+    ) -> bool:
+        """Refresh live exposure from Kalshi unsettled positions."""
+
+        if not self._has_live_position_exposure_state():
+            return False
+        started_payload = {
+            "cycle_number": cycle_number,
+            "reason": reason,
+            "open_position_count_before": self._live_open_position_count(),
+            "current_exposure_dollars_before": self._live_current_exposure_dollars(),
+            "ledger_record_count": len(self._live_position_ledger),
+        }
+        self._log_and_record(
+            event_type="live_position_reconciliation_started",
+            identifier="live_position_reconciliation",
+            payload=started_payload,
+        )
+        if self._client is None or not hasattr(self._client, "get_positions"):
+            self._log_and_record(
+                event_type="reconciliation_failed",
+                identifier="live_position_reconciliation",
+                payload={
+                    **started_payload,
+                    "failure_reason": "positions_client_unavailable",
+                },
+            )
+            return False
+
+        try:
+            position_page = self._client.get_positions(
+                count_filter="position",
+                settlement_status="unsettled",
+                limit=1000,
+            )
+        except KalshiClientError as exc:
+            self._log_and_record(
+                event_type="reconciliation_failed",
+                identifier="live_position_reconciliation",
+                payload={
+                    **started_payload,
+                    "failure_reason": "positions_fetch_failed",
+                    "message": str(exc),
+                },
+            )
+            return False
+
+        active_exposure_by_key = _active_position_exposure_by_key(
+            position_page.market_positions,
+            self._live_position_ledger.values(),
+        )
+        stale_client_order_ids = tuple(
+            client_order_id
+            for client_order_id, record in self._live_position_ledger.items()
+            if _record_has_live_exposure(record)
+            and _live_position_key(record.ticker, record.side) not in active_exposure_by_key
+        )
+        for client_order_id in stale_client_order_ids:
+            record = self._live_position_ledger.pop(client_order_id)
+            self._client_order_id_by_order_id.pop(record.order_id, None)
+            self._log_and_record(
+                event_type="stale_position_removed",
+                identifier=record.client_order_id,
+                payload={
+                    "cycle_number": cycle_number,
+                    "reason": reason,
+                    **_live_position_record_payload(record),
+                },
+            )
+
+        exposure_before = started_payload["current_exposure_dollars_before"]
+        count_before = started_payload["open_position_count_before"]
+        self._reconciled_live_exposure_by_key = active_exposure_by_key
+        self._live_positions_reconciled = True
+        exposure_after = self._live_current_exposure_dollars()
+        count_after = self._live_open_position_count()
+        recalculated_payload = {
+            "cycle_number": cycle_number,
+            "reason": reason,
+            "open_position_count_before": count_before,
+            "open_position_count_after": count_after,
+            "current_exposure_dollars_before": exposure_before,
+            "current_exposure_dollars_after": exposure_after,
+            "stale_position_count": len(stale_client_order_ids),
+            "actual_active_position_count": len(active_exposure_by_key),
+        }
+        self._log_and_record(
+            event_type="exposure_recalculated",
+            identifier="live_position_reconciliation",
+            payload=recalculated_payload,
+        )
+        self._log_and_record(
+            event_type="live_position_reconciliation_completed",
+            identifier="live_position_reconciliation",
+            payload=recalculated_payload,
+        )
+        return True
 
     def process_profit_capture_exits(
         self,
@@ -960,10 +1089,12 @@ class LiveExecutionCoordinator:
         reason: str,
         contract: ScannedContract,
         cycle_number: int | None,
+        scan_source: str | None = None,
         details: dict[str, object] | None = None,
     ) -> None:
         payload = {
             "cycle_number": cycle_number,
+            "scan_source": scan_source,
             "direction": contract.direction,
             "structure": contract.structure,
             "confidence": contract.confidence,
@@ -981,20 +1112,48 @@ class LiveExecutionCoordinator:
         )
 
     def _live_open_position_count(self) -> int:
-        return sum(
-            1
-            for record in self._live_position_ledger.values()
-            if _record_has_live_exposure(record)
-        )
+        if self._live_positions_reconciled:
+            return len(self._reconciled_live_exposure_by_key)
+        return len(_ledger_exposure_by_key(self._live_position_ledger.values()))
 
     def _live_current_exposure_dollars(self) -> Decimal:
+        if self._live_positions_reconciled:
+            return sum(
+                self._reconciled_live_exposure_by_key.values(),
+                Decimal("0"),
+            )
         return sum(
-            (
-                record.filled_count * record.price_dollars
-                for record in self._live_position_ledger.values()
-                if _record_has_live_exposure(record)
-            ),
+            _ledger_exposure_by_key(self._live_position_ledger.values()).values(),
             Decimal("0"),
+        )
+
+    def _has_live_position_exposure_state(self) -> bool:
+        return any(
+            _record_has_live_exposure(record)
+            for record in self._live_position_ledger.values()
+        ) or bool(self._reconciled_live_exposure_by_key)
+
+    def _should_reconcile_before_entry_risk(
+        self,
+        *,
+        market_snapshot: MarketStateSnapshot | None,
+    ) -> bool:
+        if not self._has_live_position_exposure_state():
+            return False
+        if self._live_open_position_count() >= self._settings.risk_max_open_positions:
+            return True
+        if (
+            self._live_current_exposure_dollars()
+            >= self._settings.risk_max_total_exposure_dollars
+        ):
+            return True
+        if market_snapshot is None:
+            return False
+        active_tickers = set(market_snapshot.tickers)
+        return any(
+            _record_has_live_exposure(record)
+            and record.ticker not in active_tickers
+            for record in self._live_position_ledger.values()
         )
 
     def _poll_order(
@@ -1060,6 +1219,14 @@ class LiveExecutionCoordinator:
         )
         self._live_position_ledger[client_order_id] = record
         self._client_order_id_by_order_id[record.order_id] = client_order_id
+        if self._live_positions_reconciled:
+            position_key = _live_position_key(record.ticker, record.side)
+            if _record_has_live_exposure(record):
+                self._reconciled_live_exposure_by_key[position_key] = (
+                    record.filled_count * record.price_dollars
+                )
+            else:
+                self._reconciled_live_exposure_by_key.pop(position_key, None)
         self._log_and_record(
             event_type="live_position_ledger_updated",
             identifier=record.client_order_id,
@@ -1451,6 +1618,18 @@ def _execution_pricing_payload(pricing: ExecutionPricing) -> dict[str, object]:
     }
 
 
+def _live_intent_source_id(
+    *,
+    cycle_number: int,
+    product_id: str,
+    market_ticker: str,
+    scan_source: str,
+) -> str:
+    if scan_source == "normal_cycle":
+        return f"cycle-{cycle_number}-{product_id}-{market_ticker}"
+    return f"{scan_source}-cycle-{cycle_number}-{product_id}-{market_ticker}"
+
+
 def _live_position_record_from_order(
     *,
     intent: LiveOrderIntent,
@@ -1519,6 +1698,45 @@ def _live_position_record_payload(record: LivePositionRecord) -> dict[str, objec
         "opened_at": record.opened_at,
         "updated_at": record.updated_at,
     }
+
+
+def _ledger_exposure_by_key(
+    records: Any,
+) -> dict[str, Decimal]:
+    exposure_by_key: dict[str, Decimal] = {}
+    for record in records:
+        if not _record_has_live_exposure(record):
+            continue
+        position_key = _live_position_key(record.ticker, record.side)
+        exposure_by_key[position_key] = exposure_by_key.get(
+            position_key,
+            Decimal("0"),
+        ) + (record.filled_count * record.price_dollars)
+    return exposure_by_key
+
+
+def _active_position_exposure_by_key(
+    positions: tuple[KalshiMarketPosition, ...],
+    records: Any,
+) -> dict[str, Decimal]:
+    fallback_exposure_by_key = _ledger_exposure_by_key(records)
+    exposure_by_key: dict[str, Decimal] = {}
+    for position in positions:
+        if abs(position.position_fp) <= Decimal("0"):
+            continue
+        side = _position_side(position)
+        if side is None:
+            continue
+        position_key = _live_position_key(position.ticker, side)
+        exposure = abs(position.market_exposure_dollars)
+        if exposure <= Decimal("0"):
+            exposure = fallback_exposure_by_key.get(position_key, Decimal("0"))
+        exposure_by_key[position_key] = exposure
+    return exposure_by_key
+
+
+def _live_position_key(ticker: str, side: str) -> str:
+    return f"{ticker}:{side}"
 
 
 def _record_has_live_exposure(record: LivePositionRecord) -> bool:
