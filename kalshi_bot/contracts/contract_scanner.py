@@ -36,6 +36,14 @@ class ScannedContract:
     bias_as_of: str | None
     market_as_of: str | None
     score: ContractScore
+    latest_price: Decimal | None = None
+    observation_count: int | None = None
+    recent_return_bps: Decimal | None = None
+    lookback_return_bps: Decimal | None = None
+    impulse_direction: str | None = None
+    impulse_return_bps: Decimal | None = None
+    impulse_detected: bool | None = None
+    risk_flags: tuple[tuple[str, bool], ...] = ()
     contract_close_time: str | None = None
     contract_time_remaining_seconds: int | None = None
     end_window_allowed: bool | None = None
@@ -153,6 +161,14 @@ class ContractScanner:
                         bias_as_of=bias_state.as_of,
                         market_as_of=_market_as_of(ticker_state),
                         score=score,
+                        latest_price=bias_state.latest_price,
+                        observation_count=bias_state.observation_count,
+                        recent_return_bps=bias_state.recent_return_bps,
+                        lookback_return_bps=bias_state.lookback_return_bps,
+                        impulse_direction=bias_state.impulse_direction,
+                        impulse_return_bps=bias_state.impulse_return_bps,
+                        impulse_detected=bias_state.impulse_detected,
+                        risk_flags=_risk_flags(bias_state.risk_flags),
                         contract_close_time=_optional_str_metadata(
                             metadata,
                             "close_time",
@@ -230,6 +246,14 @@ def _market_as_of(ticker_state: TickerState) -> str | None:
     if ticker_state.exchange_ts is not None:
         return str(ticker_state.exchange_ts)
     return None
+
+
+def _risk_flags(risk_flags) -> tuple[tuple[str, bool], ...]:  # noqa: ANN001
+    return (
+        ("insufficient_history", bool(risk_flags.insufficient_history)),
+        ("stale_data", bool(risk_flags.stale_data)),
+        ("time_sync_failed", bool(risk_flags.time_sync_failed)),
+    )
 
 
 def _optional_str_metadata(

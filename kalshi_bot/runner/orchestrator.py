@@ -62,6 +62,12 @@ class BiasDiagnostic:
     confidence: int | None
     structure: str | None
     risk_flags: tuple[tuple[str, bool], ...]
+    latest_price: Decimal | None
+    bias_as_of: str | None
+    stale_age_seconds: int | None
+    observation_count: int | None
+    recent_return_bps: Decimal | None
+    lookback_return_bps: Decimal | None
     impulse_direction: str | None
     impulse_return_bps: Decimal | None
     impulse_detected: bool
@@ -1071,6 +1077,16 @@ def _bias_diagnostics(
                 confidence=state.confidence if state is not None else None,
                 structure=state.structure if state is not None else None,
                 risk_flags=_risk_flags(state.risk_flags) if state is not None else (),
+                latest_price=state.latest_price if state is not None else None,
+                bias_as_of=state.as_of if state is not None else None,
+                stale_age_seconds=_stale_age_seconds(state),
+                observation_count=state.observation_count if state is not None else None,
+                recent_return_bps=(
+                    state.recent_return_bps if state is not None else None
+                ),
+                lookback_return_bps=(
+                    state.lookback_return_bps if state is not None else None
+                ),
                 impulse_direction=(
                     state.impulse_direction if state is not None else None
                 ),
@@ -1091,6 +1107,20 @@ def _risk_flags(risk_flags: Any) -> tuple[tuple[str, bool], ...]:
         ("stale_data", bool(risk_flags.stale_data)),
         ("time_sync_failed", bool(risk_flags.time_sync_failed)),
     )
+
+
+def _stale_age_seconds(state: Any) -> int | None:
+    if state is None or state.as_of is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(state.as_of.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return max(int((datetime.now(timezone.utc) - parsed).total_seconds()), 0)
 
 
 def _mapped_market_diagnostics(
@@ -1137,6 +1167,12 @@ def _bias_diagnostic_payloads(
             "confidence": item.confidence,
             "structure": item.structure,
             "risk_flags": dict(item.risk_flags),
+            "latest_price": item.latest_price,
+            "bias_as_of": item.bias_as_of,
+            "stale_age_seconds": item.stale_age_seconds,
+            "observation_count": item.observation_count,
+            "recent_return_bps": item.recent_return_bps,
+            "lookback_return_bps": item.lookback_return_bps,
             "impulse_direction": item.impulse_direction,
             "impulse_return_bps": item.impulse_return_bps,
             "impulse_detected": item.impulse_detected,

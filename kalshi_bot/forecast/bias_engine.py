@@ -20,6 +20,8 @@ BASIS_POINTS_MULTIPLIER = Decimal("10000")
 IMPULSE_SHORT_WINDOW = timedelta(seconds=20)
 IMPULSE_AVERAGE_WINDOW = timedelta(seconds=120)
 IMPULSE_MULTIPLIER = Decimal("2")
+IMPULSE_OVERRIDE_NEAR_CONFIDENCE = 30
+IMPULSE_OVERRIDE_MAX_CONFIDENCE = 40
 
 
 class BiasEngineError(ValueError):
@@ -81,6 +83,7 @@ class BiasEngine:
         min_samples: int,
         stale_data_seconds: int,
         chop_threshold_bps: int | Decimal,
+        impulse_min_abs_bps: Decimal,
     ) -> None:
         normalized_products = tuple(
             dict.fromkeys(product.strip() for product in products if product.strip())
@@ -98,6 +101,8 @@ class BiasEngine:
             raise BiasEngineError("min_samples must be greater than one.")
         if stale_data_seconds <= 0:
             raise BiasEngineError("stale_data_seconds must be greater than zero.")
+        if impulse_min_abs_bps <= 0:
+            raise BiasEngineError("impulse_min_abs_bps must be greater than zero.")
 
         self._products = normalized_products
         self._lookback = timedelta(seconds=lookback_seconds)
@@ -105,6 +110,7 @@ class BiasEngine:
         self._min_samples = min_samples
         self._stale_data = timedelta(seconds=stale_data_seconds)
         self._chop_threshold_bps = Decimal(str(chop_threshold_bps))
+        self._impulse_min_abs_bps = Decimal(str(impulse_min_abs_bps))
         self._history: dict[str, Deque[PriceObservation]] = {
             product: deque() for product in self._products
         }
@@ -119,6 +125,7 @@ class BiasEngine:
             min_samples=settings.bias_min_samples,
             stale_data_seconds=settings.bias_stale_data_seconds,
             chop_threshold_bps=settings.bias_chop_threshold_bps,
+            impulse_min_abs_bps=settings.bias_impulse_min_abs_bps,
         )
 
     def ingest(
@@ -146,7 +153,10 @@ class BiasEngine:
             lookback_return_bps = _compute_return_bps(history, history[0] if history else None)
             recent_anchor = _recent_anchor(history, self._recent_window)
             recent_return_bps = _compute_return_bps(history, recent_anchor)
-            impulse_diagnostics = _impulse_diagnostics(history)
+            impulse_diagnostics = _impulse_diagnostics(
+                history,
+                min_abs_bps=self._impulse_min_abs_bps,
+            )
 
             risk_flags = BiasRiskFlags(
                 insufficient_history=(
@@ -176,6 +186,7 @@ class BiasEngine:
                 classification=classification,
                 risk_flags=risk_flags,
                 impulse_diagnostics=impulse_diagnostics,
+                impulse_min_abs_bps=self._impulse_min_abs_bps,
             )
 
             products[product_id] = BiasState(
@@ -233,6 +244,7 @@ def _apply_impulse_bias_override(
     classification: BiasClassification,
     risk_flags: BiasRiskFlags,
     impulse_diagnostics: _ImpulseDiagnostics,
+    impulse_min_abs_bps: Decimal,
 ) -> BiasClassification:
     clean_risk = not (
         risk_flags.insufficient_history
@@ -250,7 +262,10 @@ def _apply_impulse_bias_override(
         return BiasClassification(
             direction=impulse_diagnostics.direction,
             structure="trend",
-            confidence=40,
+            confidence=_impulse_override_confidence(
+                impulse_diagnostics.return_bps,
+                impulse_min_abs_bps=impulse_min_abs_bps,
+            ),
         )
     return classification
 
@@ -286,7 +301,11 @@ def _recent_anchor(
     return candidate
 
 
-def _impulse_diagnostics(history: Deque[PriceObservation]) -> _ImpulseDiagnostics:
+def _impulse_diagnostics(
+    history: Deque[PriceObservation],
+    *,
+    min_abs_bps: Decimal,
+) -> _ImpulseDiagnostics:
     short_anchor = _recent_anchor(history, IMPULSE_SHORT_WINDOW)
     short_return_bps = _compute_return_bps(history, short_anchor)
     average_movement_bps = _average_absolute_movement_bps(
@@ -299,6 +318,7 @@ def _impulse_diagnostics(history: Deque[PriceObservation]) -> _ImpulseDiagnostic
         short_return_bps is not None
         and average_movement_bps is not None
         and average_movement_bps > 0
+        and abs(short_return_bps) >= min_abs_bps
         and abs(short_return_bps) > average_movement_bps * IMPULSE_MULTIPLIER
     )
     return _ImpulseDiagnostics(
@@ -306,6 +326,18 @@ def _impulse_diagnostics(history: Deque[PriceObservation]) -> _ImpulseDiagnostic
         return_bps=short_return_bps,
         detected=detected,
     )
+
+
+def _impulse_override_confidence(
+    return_bps: Decimal | None,
+    *,
+    impulse_min_abs_bps: Decimal,
+) -> int:
+    if return_bps is None:
+        return IMPULSE_OVERRIDE_NEAR_CONFIDENCE
+    if abs(return_bps) >= impulse_min_abs_bps * Decimal("2"):
+        return IMPULSE_OVERRIDE_MAX_CONFIDENCE
+    return IMPULSE_OVERRIDE_NEAR_CONFIDENCE
 
 
 def _average_absolute_movement_bps(

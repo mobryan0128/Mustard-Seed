@@ -122,6 +122,12 @@ def _validate_single_cycle() -> list[str]:
         or btc_bias.confidence != 70
         or btc_bias.structure != "trend"
         or dict(btc_bias.risk_flags).get("stale_data")
+        or btc_bias.latest_price != Decimal("70000")
+        or btc_bias.bias_as_of != "2026-04-23T12:00:00+00:00"
+        or btc_bias.stale_age_seconds is None
+        or btc_bias.observation_count != 25
+        or btc_bias.recent_return_bps != Decimal("20")
+        or btc_bias.lookback_return_bps != Decimal("100")
     ):
         failures.append(f"single-cycle BTC-USD bias diagnostic={btc_bias}")
     if eth_bias is None or not eth_bias.state_present:
@@ -894,6 +900,7 @@ def _settings(
         bias_min_samples=20,
         bias_stale_data_seconds=15,
         bias_chop_threshold_bps=10,
+        bias_impulse_min_abs_bps=Decimal("15"),
         contract_scanner_product_markets={},
         auto_market_discovery_enabled=True,
         crypto_market_series={

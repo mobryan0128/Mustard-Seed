@@ -42,6 +42,7 @@ DEFAULT_BIAS_RECENT_WINDOW_SECONDS = 60
 DEFAULT_BIAS_MIN_SAMPLES = 20
 DEFAULT_BIAS_STALE_DATA_SECONDS = 15
 DEFAULT_BIAS_CHOP_THRESHOLD_BPS = 10
+DEFAULT_BIAS_IMPULSE_MIN_ABS_BPS = Decimal("15")
 DEFAULT_SIMULATION_ENABLED = True
 DEFAULT_SIMULATION_MAX_NEW_POSITIONS_PER_EVALUATION = 1
 DEFAULT_SIMULATION_POSITION_ID_PREFIX = "sim"
@@ -133,6 +134,7 @@ class KalshiSettings:
     bias_min_samples: int
     bias_stale_data_seconds: int
     bias_chop_threshold_bps: int
+    bias_impulse_min_abs_bps: Decimal
     contract_scanner_product_markets: dict[str, tuple[str, ...]]
     auto_market_discovery_enabled: bool
     crypto_market_series: dict[str, tuple[str, ...]]
@@ -258,6 +260,11 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         values.get("BIAS_RECENT_WINDOW_SECONDS"),
         DEFAULT_BIAS_RECENT_WINDOW_SECONDS,
         "BIAS_RECENT_WINDOW_SECONDS",
+    )
+    bias_impulse_min_abs_bps = _parse_positive_decimal(
+        values.get("BIAS_IMPULSE_MIN_ABS_BPS"),
+        DEFAULT_BIAS_IMPULSE_MIN_ABS_BPS,
+        "BIAS_IMPULSE_MIN_ABS_BPS",
     )
     if bias_recent_window_seconds > bias_lookback_seconds:
         raise SettingsError(
@@ -584,6 +591,7 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
             DEFAULT_BIAS_CHOP_THRESHOLD_BPS,
             "BIAS_CHOP_THRESHOLD_BPS",
         ),
+        bias_impulse_min_abs_bps=bias_impulse_min_abs_bps,
         contract_scanner_product_markets=contract_scanner_product_markets,
         auto_market_discovery_enabled=auto_market_discovery_enabled,
         crypto_market_series=crypto_market_series,
@@ -722,6 +730,7 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "BIAS_MIN_SAMPLES",
         "BIAS_STALE_DATA_SECONDS",
         "BIAS_CHOP_THRESHOLD_BPS",
+        "BIAS_IMPULSE_MIN_ABS_BPS",
         "CONTRACT_SCANNER_PRODUCT_MARKETS_JSON",
         "KALSHI_AUTO_MARKET_DISCOVERY_ENABLED",
         "KALSHI_CRYPTO_MARKET_SERIES_JSON",

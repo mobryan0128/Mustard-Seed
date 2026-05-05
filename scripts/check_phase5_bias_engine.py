@@ -177,6 +177,9 @@ def run_offline_fixtures(settings) -> list[str]:
         )
     )
     failures.extend(_run_pruning_case(settings, now))
+    failures.extend(_run_weak_impulse_below_absolute_threshold_case(settings, now))
+    failures.extend(_run_absolute_threshold_impulse_case(settings, now, direction="up"))
+    failures.extend(_run_absolute_threshold_impulse_case(settings, now, direction="down"))
     failures.extend(_run_impulse_detection_case(settings, now))
     failures.extend(_run_slow_move_no_impulse_case(settings, now))
     failures.extend(_run_impulse_override_case(settings, now, direction="up"))
@@ -271,6 +274,75 @@ def _run_pruning_case(settings, now: datetime) -> list[str]:
         failures.append("pruning: history was not pruned to the lookback window")
     if state.lookback_return_bps is None or state.recent_return_bps is None:
         failures.append("pruning: expected returns were not computed after pruning")
+    return failures
+
+
+def _run_weak_impulse_below_absolute_threshold_case(settings, now: datetime) -> list[str]:
+    engine = BiasEngine.from_settings(settings)
+    product_id = settings.bias_products[0]
+    prices = (Decimal("100"),) * 20 + (Decimal("99.96"),) + (Decimal("100"),) * 4
+    snapshot = _ingest_series(
+        engine=engine,
+        product_id=product_id,
+        observations=_series(now, count=25, step_seconds=5, prices=prices),
+    )
+
+    state = snapshot.products[product_id]
+    failures: list[str] = []
+    if state.impulse_detected:
+        failures.append("weak impulse: sub-threshold move was detected")
+    if state.impulse_direction is not None:
+        failures.append(
+            f"weak impulse: direction={state.impulse_direction} expected=None"
+        )
+    if state.direction != "neutral" or state.structure != "chop":
+        failures.append(
+            "weak impulse: classification="
+            f"{state.direction}/{state.structure} expected neutral/chop"
+        )
+    return failures
+
+
+def _run_absolute_threshold_impulse_case(
+    settings,
+    now: datetime,
+    *,
+    direction: str,
+) -> list[str]:
+    engine = BiasEngine.from_settings(settings)
+    product_id = settings.bias_products[0]
+    impulse_anchor = Decimal("99.84") if direction == "up" else Decimal("100.16")
+    prices = (Decimal("100"),) * 20 + (impulse_anchor,) + (Decimal("100"),) * 4
+    snapshot = _ingest_series(
+        engine=engine,
+        product_id=product_id,
+        observations=_series(now, count=25, step_seconds=5, prices=prices),
+    )
+
+    state = snapshot.products[product_id]
+    failures: list[str] = []
+    if not state.impulse_detected:
+        failures.append(f"threshold impulse {direction}: impulse was not detected")
+    if state.impulse_direction != direction:
+        failures.append(
+            f"threshold impulse {direction}: direction={state.impulse_direction}"
+        )
+    if direction == "up" and (
+        state.impulse_return_bps is None or state.impulse_return_bps <= 0
+    ):
+        failures.append(
+            f"threshold impulse up: return_bps={state.impulse_return_bps}"
+        )
+    if direction == "down" and (
+        state.impulse_return_bps is None or state.impulse_return_bps >= 0
+    ):
+        failures.append(
+            f"threshold impulse down: return_bps={state.impulse_return_bps}"
+        )
+    if state.confidence != 30:
+        failures.append(
+            f"threshold impulse {direction}: confidence={state.confidence} expected=30"
+        )
     return failures
 
 
