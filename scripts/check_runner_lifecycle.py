@@ -238,6 +238,11 @@ def _validate_market_discovery_tradable_filter() -> list[str]:
     discovered_tickers = tuple(market.market_ticker for market in snapshot.discovered_markets)
     if discovered_tickers != ("KXBTC15M-TEST",):
         failures.append(f"tradable discovery tickers={discovered_tickers}")
+    if snapshot.discovered_markets[0].target_price != Decimal("70000"):
+        failures.append(
+            "tradable discovery target_price="
+            f"{snapshot.discovered_markets[0].target_price}"
+        )
     return failures
 
 
@@ -1379,6 +1384,8 @@ class _FakeDiscoveryKalshiClient:
                     open_time=_iso(now - timedelta(minutes=5)),
                     close_time=_iso(now + timedelta(minutes=5)),
                     expiration_time=_iso(now + timedelta(minutes=5)),
+                    target_price=Decimal("70000"),
+                    target_price_source="target_price",
                 ),
                 _market_summary(
                     ticker="KXBTC15M-EXPIRED",
@@ -1505,6 +1512,8 @@ def _market_summary(
     open_time: str,
     close_time: str,
     expiration_time: str,
+    target_price: Decimal | None = None,
+    target_price_source: str | None = None,
 ) -> KalshiMarketSummary:
     return KalshiMarketSummary(
         ticker=ticker,
@@ -1516,6 +1525,8 @@ def _market_summary(
         latest_expiration_time=expiration_time,
         yes_bid_dollars=Decimal("0.44"),
         yes_ask_dollars=Decimal("0.48"),
+        target_price=target_price,
+        target_price_source=target_price_source,
     )
 
 

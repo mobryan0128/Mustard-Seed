@@ -370,6 +370,9 @@ class LiveExecutionCoordinator:
                     "lookback_return_bps": getattr(contract, "lookback_return_bps", None),
                     "risk_flags": dict(getattr(contract, "risk_flags", ()) or ()),
                     "bias_as_of": getattr(contract, "bias_as_of", None),
+                    **_target_feasibility_payload(contract),
+                    **_signal_diagnostic_payload(contract),
+                    "contract_open_time": getattr(contract, "contract_open_time", None),
                     "contract_close_time": getattr(contract, "contract_close_time", None),
                     **_end_window_payload(end_window),
                     **_execution_pricing_payload(pricing),
@@ -1107,7 +1110,10 @@ class LiveExecutionCoordinator:
             "structure": contract.structure,
             "confidence": contract.confidence,
             "entry_price": contract.midpoint,
+            "contract_open_time": getattr(contract, "contract_open_time", None),
             "contract_close_time": getattr(contract, "contract_close_time", None),
+            **_target_feasibility_payload(contract),
+            **_signal_diagnostic_payload(contract),
         }
         if details:
             payload.update(details)
@@ -1623,6 +1629,47 @@ def _execution_pricing_payload(pricing: ExecutionPricing) -> dict[str, object]:
         "available_count_at_intent_price": pricing.available_count_at_intent_price,
         "orderbook_present": pricing.orderbook_present,
         "orderbook_seq": pricing.orderbook_seq,
+    }
+
+
+def _target_feasibility_payload(contract: ScannedContract) -> dict[str, object]:
+    return {
+        "target_price": getattr(contract, "target_price", None),
+        "target_price_source": getattr(contract, "target_price_source", None),
+        "current_spot_price": getattr(contract, "latest_price", None),
+        "distance_to_target": getattr(contract, "distance_to_target", None),
+        "distance_to_target_bps": getattr(contract, "distance_to_target_bps", None),
+        "time_remaining_seconds": getattr(
+            contract,
+            "contract_time_remaining_seconds",
+            None,
+        ),
+        "required_bps_per_minute": getattr(
+            contract,
+            "required_bps_per_minute",
+            None,
+        ),
+        "side_currently_itm": getattr(contract, "side_currently_itm", None),
+        "side_needs_cross": getattr(contract, "side_needs_cross", None),
+        "feasibility_status": getattr(contract, "feasibility_status", None),
+    }
+
+
+def _signal_diagnostic_payload(contract: ScannedContract) -> dict[str, object]:
+    return {
+        "reversal_confirmation_status": getattr(
+            contract,
+            "reversal_confirmation_status",
+            None,
+        ),
+        "signal_conflict_flags": dict(
+            getattr(contract, "signal_conflict_flags", ()) or ()
+        ),
+        "scanner_score_confidence": getattr(
+            contract,
+            "scanner_score_confidence",
+            None,
+        ),
     }
 
 

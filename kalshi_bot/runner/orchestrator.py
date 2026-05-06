@@ -653,6 +653,8 @@ class KalshiBotRunner:
                     "open_time": market.open_time,
                     "close_time": market.close_time,
                     "expiration_time": market.expiration_time,
+                    "target_price": market.target_price,
+                    "target_price_source": market.target_price_source,
                 }
                 for market in snapshot.discovered_markets
             ),
@@ -1035,8 +1037,11 @@ def _product_markets_payload(
 def _market_metadata_by_ticker(markets) -> dict[str, dict[str, object]]:  # noqa: ANN001
     return {
         market.market_ticker: {
+            "open_time": market.open_time,
             "close_time": market.close_time,
             "expiration_time": market.expiration_time,
+            "target_price": market.target_price,
+            "target_price_source": market.target_price_source,
         }
         for market in markets
     }

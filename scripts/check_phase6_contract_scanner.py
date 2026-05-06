@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import sys
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
@@ -85,6 +86,10 @@ def _run_fixtures(scanner: ContractScanner) -> list[str]:
     failures.extend(_validate_high_confidence_mature_impulse_ranks(scanner))
     failures.extend(_validate_reversal_mature_impulse_ranks(scanner))
     failures.extend(_validate_exhaustion_impulse_unchanged(scanner))
+    failures.extend(_validate_target_feasibility_diagnostics())
+    failures.extend(_validate_unrealistic_late_cross_skips())
+    failures.extend(_validate_weak_reversal_score_downgrade(scanner))
+    failures.extend(_validate_impulse_direction_conflict_downgrade(scanner))
     return failures
 
 
@@ -445,6 +450,126 @@ def _validate_exhaustion_impulse_unchanged(scanner: ContractScanner) -> list[str
     return []
 
 
+def _validate_target_feasibility_diagnostics() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=5),
+                "target_price": Decimal("99"),
+                "target_price_source": "target_price",
+            }
+        },
+    )
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        latest_price=Decimal("100"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    contract = snapshot.ranked_contracts[0]
+    failures: list[str] = []
+    if contract.feasibility_status != "currently_itm":
+        failures.append(f"target feasibility status={contract.feasibility_status}")
+    if contract.side_currently_itm is not True or contract.side_needs_cross is not False:
+        failures.append(
+            "target feasibility itm flags="
+            f"{contract.side_currently_itm}/{contract.side_needs_cross}"
+        )
+    if contract.distance_to_target_bps != Decimal("-100.000"):
+        failures.append(f"target distance bps={contract.distance_to_target_bps}")
+    return failures
+
+
+def _validate_unrealistic_late_cross_skips() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(seconds=30),
+                "target_price": Decimal("101"),
+                "target_price_source": "target_price",
+            }
+        },
+    )
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        latest_price=Decimal("100"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    reasons = {(item.market_ticker, item.reason) for item in snapshot.skipped_contracts}
+    if ("KXBTC-1", "target_feasibility_unrealistic_late_cross") not in reasons:
+        return [f"unrealistic late cross skip mismatch: {reasons}"]
+    return []
+
+
+def _validate_weak_reversal_score_downgrade(scanner: ContractScanner) -> list[str]:
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        direction="up",
+        confidence=60,
+        structure="reversal",
+        recent_return_bps=Decimal("5.000"),
+        lookback_return_bps=Decimal("-80.000"),
+        impulse_detected=False,
+        impulse_direction=None,
+        impulse_return_bps=Decimal("1.000"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    contract = next(
+        item for item in snapshot.ranked_contracts if item.market_ticker == "KXBTC-1"
+    )
+    failures: list[str] = []
+    if contract.confidence != 60:
+        failures.append(f"weak reversal raw confidence={contract.confidence}")
+    if contract.score.confidence != 30:
+        failures.append(f"weak reversal score confidence={contract.score.confidence}")
+    if contract.reversal_confirmation_status != "weak_recent_return":
+        failures.append(
+            "weak reversal status="
+            f"{contract.reversal_confirmation_status}"
+        )
+    return failures
+
+
+def _validate_impulse_direction_conflict_downgrade(scanner: ContractScanner) -> list[str]:
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        direction="up",
+        confidence=60,
+        structure="reversal",
+        recent_return_bps=Decimal("20.000"),
+        lookback_return_bps=Decimal("-80.000"),
+        impulse_detected=False,
+        impulse_direction=None,
+        impulse_return_bps=Decimal("-5.000"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    contract = next(
+        item for item in snapshot.ranked_contracts if item.market_ticker == "KXBTC-1"
+    )
+    if contract.score.confidence != 30:
+        return [f"conflict score confidence={contract.score.confidence}"]
+    if not dict(contract.signal_conflict_flags).get("impulse_direction_conflict"):
+        return [f"conflict flags={contract.signal_conflict_flags}"]
+    return []
+
+
 def _base_bias_snapshot() -> BiasSnapshot:
     return BiasSnapshot(
         products={
@@ -518,6 +643,10 @@ def _base_market_snapshot() -> MarketStateSnapshot:
         orderbooks={},
         last_sequence_by_sid={},
     )
+
+
+def _future_iso(*, minutes: int = 0, seconds: int = 0) -> str:
+    return (datetime.now(timezone.utc) + timedelta(minutes=minutes, seconds=seconds)).isoformat()
 
 
 async def _run_live_scan(settings, message_limit: int | None) -> int:

@@ -104,6 +104,8 @@ class KalshiMarketSummary:
     latest_expiration_time: str | None
     yes_bid_dollars: Decimal | None
     yes_ask_dollars: Decimal | None
+    target_price: Decimal | None
+    target_price_source: str | None
 
 
 @dataclass(frozen=True)
@@ -378,6 +380,7 @@ def _normalize_position_payload(payload: object) -> KalshiMarketPosition:
 def _normalize_market_payload(payload: object) -> KalshiMarketSummary:
     if not isinstance(payload, dict):
         raise KalshiClientError("Kalshi market payload was not a JSON object.")
+    target_price, target_price_source = _market_target_price(payload)
     return KalshiMarketSummary(
         ticker=_require_text(payload.get("ticker"), "ticker"),
         event_ticker=_optional_text(payload.get("event_ticker")),
@@ -388,7 +391,31 @@ def _normalize_market_payload(payload: object) -> KalshiMarketSummary:
         latest_expiration_time=_optional_text(payload.get("latest_expiration_time")),
         yes_bid_dollars=_optional_decimal(payload.get("yes_bid_dollars")),
         yes_ask_dollars=_optional_decimal(payload.get("yes_ask_dollars")),
+        target_price=target_price,
+        target_price_source=target_price_source,
     )
+
+
+def _market_target_price(payload: dict[str, object]) -> tuple[Decimal | None, str | None]:
+    for key in (
+        "target_price",
+        "strike_price",
+        "strike",
+        "floor_strike",
+        "cap_strike",
+        "floor_price",
+        "cap_price",
+        "start_price",
+        "initial_price",
+        "reference_price",
+    ):
+        value = payload.get(key)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return _optional_decimal(value), key
+    return None, None
 
 
 def _market_payload_count(markets_payload: object) -> int | None:

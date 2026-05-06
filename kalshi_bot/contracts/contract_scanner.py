@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Mapping
 
@@ -13,12 +14,33 @@ from kalshi_bot.market.market_state_cache import MarketStateSnapshot, TickerStat
 
 
 TWO_DECIMAL = Decimal("2")
+BASIS_POINTS_MULTIPLIER = Decimal("10000")
+SECONDS_PER_MINUTE = Decimal("60")
 LATE_EXPANSION_IMPULSE_RETURN_BPS = Decimal("6.000")
 IMPULSE_CONFIRMATION_RETURN_BPS = Decimal("3.000")
+REVERSAL_MIN_RECENT_RETURN_BPS = Decimal("15.000")
+UNREALISTIC_LATE_CROSS_SECONDS = 60
+UNREALISTIC_LATE_CROSS_DISTANCE_BPS = Decimal("15.000")
+SCORE_DOWNGRADE_CONFLICT_CONFIDENCE = 30
+SCORE_DOWNGRADE_NEEDS_CROSS_CONFIDENCE = 40
 
 
 class ContractScannerError(ValueError):
     """Raised when scanner configuration is missing or invalid."""
+
+
+@dataclass(frozen=True)
+class TargetFeasibility:
+    current_spot_price: Decimal | None
+    target_price: Decimal | None
+    target_price_source: str | None
+    distance_to_target: Decimal | None
+    distance_to_target_bps: Decimal | None
+    time_remaining_seconds: int | None
+    required_bps_per_minute: Decimal | None
+    side_currently_itm: bool | None
+    side_needs_cross: bool | None
+    feasibility_status: str
 
 
 @dataclass(frozen=True)
@@ -44,6 +66,18 @@ class ScannedContract:
     impulse_return_bps: Decimal | None = None
     impulse_detected: bool | None = None
     risk_flags: tuple[tuple[str, bool], ...] = ()
+    target_price: Decimal | None = None
+    target_price_source: str | None = None
+    distance_to_target: Decimal | None = None
+    distance_to_target_bps: Decimal | None = None
+    required_bps_per_minute: Decimal | None = None
+    side_currently_itm: bool | None = None
+    side_needs_cross: bool | None = None
+    feasibility_status: str | None = None
+    reversal_confirmation_status: str | None = None
+    signal_conflict_flags: tuple[tuple[str, bool], ...] = ()
+    scanner_score_confidence: int | None = None
+    contract_open_time: str | None = None
     contract_close_time: str | None = None
     contract_time_remaining_seconds: int | None = None
     end_window_allowed: bool | None = None
@@ -58,6 +92,17 @@ class SkippedContract:
     market_ticker: str
     reason: str
     contract_close_time: str | None = None
+    target_price: Decimal | None = None
+    target_price_source: str | None = None
+    distance_to_target_bps: Decimal | None = None
+    time_remaining_seconds: int | None = None
+    required_bps_per_minute: Decimal | None = None
+    side_currently_itm: bool | None = None
+    side_needs_cross: bool | None = None
+    feasibility_status: str | None = None
+    reversal_confirmation_status: str | None = None
+    signal_conflict_flags: tuple[tuple[str, bool], ...] = ()
+    contract_open_time: str | None = None
     contract_time_remaining_seconds: int | None = None
     end_window_allowed: bool | None = None
     end_window_reason: str | None = None
@@ -126,10 +171,8 @@ class ContractScanner:
                             product_id=product_id,
                             market_ticker=market_ticker,
                             reason=skip_reason,
-                            contract_close_time=_optional_str_metadata(
-                                metadata,
-                                "close_time",
-                            ),
+                            contract_open_time=_optional_str_metadata(metadata, "open_time"),
+                            contract_close_time=_optional_str_metadata(metadata, "close_time"),
                         )
                     )
                     continue
@@ -137,11 +180,58 @@ class ContractScanner:
                 assert bias_state is not None
                 assert ticker_state.yes_bid_dollars is not None
                 assert ticker_state.yes_ask_dollars is not None
+                feasibility = _target_feasibility(
+                    direction=bias_state.direction,
+                    current_spot_price=bias_state.latest_price,
+                    target_price=_optional_decimal_metadata(metadata, "target_price"),
+                    target_price_source=_optional_str_metadata(metadata, "target_price_source"),
+                    close_time=_optional_str_metadata(metadata, "close_time"),
+                )
+                signal_conflict_flags = _signal_conflict_flags(
+                    direction=bias_state.direction,
+                    impulse_return_bps=getattr(bias_state, "impulse_return_bps", None),
+                )
+                reversal_confirmation_status = _reversal_confirmation_status(
+                    bias_state=bias_state,
+                    signal_conflict_flags=signal_conflict_flags,
+                )
+                feasibility_skip_reason = _feasibility_skip_reason(
+                    bias_state=bias_state,
+                    feasibility=feasibility,
+                    signal_conflict_flags=signal_conflict_flags,
+                )
+                if feasibility_skip_reason is not None:
+                    skipped_contracts.append(
+                        SkippedContract(
+                            product_id=product_id,
+                            market_ticker=market_ticker,
+                            reason=feasibility_skip_reason,
+                            contract_open_time=_optional_str_metadata(metadata, "open_time"),
+                            contract_close_time=_optional_str_metadata(metadata, "close_time"),
+                            target_price=feasibility.target_price,
+                            target_price_source=feasibility.target_price_source,
+                            distance_to_target_bps=feasibility.distance_to_target_bps,
+                            time_remaining_seconds=feasibility.time_remaining_seconds,
+                            required_bps_per_minute=feasibility.required_bps_per_minute,
+                            side_currently_itm=feasibility.side_currently_itm,
+                            side_needs_cross=feasibility.side_needs_cross,
+                            feasibility_status=feasibility.feasibility_status,
+                            reversal_confirmation_status=reversal_confirmation_status,
+                            signal_conflict_flags=signal_conflict_flags,
+                        )
+                    )
+                    continue
                 midpoint = ((ticker_state.yes_bid_dollars + ticker_state.yes_ask_dollars) / TWO_DECIMAL).quantize(
                     Decimal("0.001")
                 )
+                score_confidence = _scanner_score_confidence(
+                    bias_state=bias_state,
+                    feasibility=feasibility,
+                    reversal_confirmation_status=reversal_confirmation_status,
+                    signal_conflict_flags=signal_conflict_flags,
+                )
                 score = score_contract(
-                    confidence=bias_state.confidence,
+                    confidence=score_confidence,
                     best_bid=ticker_state.yes_bid_dollars,
                     best_ask=ticker_state.yes_ask_dollars,
                     yes_bid_size_fp=ticker_state.yes_bid_size_fp,
@@ -169,10 +259,20 @@ class ContractScanner:
                         impulse_return_bps=bias_state.impulse_return_bps,
                         impulse_detected=bias_state.impulse_detected,
                         risk_flags=_risk_flags(bias_state.risk_flags),
-                        contract_close_time=_optional_str_metadata(
-                            metadata,
-                            "close_time",
-                        ),
+                        target_price=feasibility.target_price,
+                        target_price_source=feasibility.target_price_source,
+                        distance_to_target=feasibility.distance_to_target,
+                        distance_to_target_bps=feasibility.distance_to_target_bps,
+                        required_bps_per_minute=feasibility.required_bps_per_minute,
+                        side_currently_itm=feasibility.side_currently_itm,
+                        side_needs_cross=feasibility.side_needs_cross,
+                        feasibility_status=feasibility.feasibility_status,
+                        reversal_confirmation_status=reversal_confirmation_status,
+                        signal_conflict_flags=signal_conflict_flags,
+                        scanner_score_confidence=score_confidence,
+                        contract_open_time=_optional_str_metadata(metadata, "open_time"),
+                        contract_close_time=_optional_str_metadata(metadata, "close_time"),
+                        contract_time_remaining_seconds=feasibility.time_remaining_seconds,
                     )
                 )
 
@@ -256,6 +356,246 @@ def _risk_flags(risk_flags) -> tuple[tuple[str, bool], ...]:  # noqa: ANN001
     )
 
 
+def _target_feasibility(
+    *,
+    direction: str,
+    current_spot_price: Decimal | None,
+    target_price: Decimal | None,
+    target_price_source: str | None,
+    close_time: str | None,
+) -> TargetFeasibility:
+    time_remaining_seconds = _time_remaining_seconds(close_time)
+    if current_spot_price is None:
+        return TargetFeasibility(
+            current_spot_price=None,
+            target_price=target_price,
+            target_price_source=target_price_source,
+            distance_to_target=None,
+            distance_to_target_bps=None,
+            time_remaining_seconds=time_remaining_seconds,
+            required_bps_per_minute=None,
+            side_currently_itm=None,
+            side_needs_cross=None,
+            feasibility_status="current_spot_missing",
+        )
+    if target_price is None:
+        return TargetFeasibility(
+            current_spot_price=current_spot_price,
+            target_price=None,
+            target_price_source=target_price_source,
+            distance_to_target=None,
+            distance_to_target_bps=None,
+            time_remaining_seconds=time_remaining_seconds,
+            required_bps_per_minute=None,
+            side_currently_itm=None,
+            side_needs_cross=None,
+            feasibility_status="target_price_missing",
+        )
+    if current_spot_price <= Decimal("0"):
+        return TargetFeasibility(
+            current_spot_price=current_spot_price,
+            target_price=target_price,
+            target_price_source=target_price_source,
+            distance_to_target=None,
+            distance_to_target_bps=None,
+            time_remaining_seconds=time_remaining_seconds,
+            required_bps_per_minute=None,
+            side_currently_itm=None,
+            side_needs_cross=None,
+            feasibility_status="current_spot_invalid",
+        )
+
+    distance_to_target = _directional_distance_to_target(
+        direction=direction,
+        current_spot_price=current_spot_price,
+        target_price=target_price,
+    )
+    if distance_to_target is None:
+        return TargetFeasibility(
+            current_spot_price=current_spot_price,
+            target_price=target_price,
+            target_price_source=target_price_source,
+            distance_to_target=None,
+            distance_to_target_bps=None,
+            time_remaining_seconds=time_remaining_seconds,
+            required_bps_per_minute=None,
+            side_currently_itm=None,
+            side_needs_cross=None,
+            feasibility_status="invalid_direction",
+        )
+
+    distance_to_target_bps = (
+        distance_to_target / current_spot_price * BASIS_POINTS_MULTIPLIER
+    ).quantize(Decimal("0.001"))
+    side_needs_cross = distance_to_target > Decimal("0")
+    required_bps_per_minute = _required_bps_per_minute(
+        distance_to_target_bps=distance_to_target_bps,
+        time_remaining_seconds=time_remaining_seconds,
+    )
+    if time_remaining_seconds is None:
+        feasibility_status = "time_remaining_missing"
+    elif time_remaining_seconds <= 0:
+        feasibility_status = "time_remaining_elapsed"
+    elif (
+        side_needs_cross
+        and time_remaining_seconds <= UNREALISTIC_LATE_CROSS_SECONDS
+        and distance_to_target_bps >= UNREALISTIC_LATE_CROSS_DISTANCE_BPS
+    ):
+        feasibility_status = "unrealistic_late_cross"
+    elif side_needs_cross:
+        feasibility_status = "needs_cross"
+    else:
+        feasibility_status = "currently_itm"
+
+    return TargetFeasibility(
+        current_spot_price=current_spot_price,
+        target_price=target_price,
+        target_price_source=target_price_source,
+        distance_to_target=distance_to_target,
+        distance_to_target_bps=distance_to_target_bps,
+        time_remaining_seconds=time_remaining_seconds,
+        required_bps_per_minute=required_bps_per_minute,
+        side_currently_itm=not side_needs_cross,
+        side_needs_cross=side_needs_cross,
+        feasibility_status=feasibility_status,
+    )
+
+
+def _directional_distance_to_target(
+    *,
+    direction: str,
+    current_spot_price: Decimal,
+    target_price: Decimal,
+) -> Decimal | None:
+    if direction == "up":
+        return target_price - current_spot_price
+    if direction == "down":
+        return current_spot_price - target_price
+    return None
+
+
+def _required_bps_per_minute(
+    *,
+    distance_to_target_bps: Decimal,
+    time_remaining_seconds: int | None,
+) -> Decimal | None:
+    if time_remaining_seconds is None or time_remaining_seconds <= 0:
+        return None
+    remaining_minutes = Decimal(time_remaining_seconds) / SECONDS_PER_MINUTE
+    if distance_to_target_bps <= Decimal("0"):
+        return Decimal("0.000")
+    return (distance_to_target_bps / remaining_minutes).quantize(Decimal("0.001"))
+
+
+def _time_remaining_seconds(close_time: str | None) -> int | None:
+    if close_time is None:
+        return None
+    try:
+        close_at = _parse_iso_datetime(close_time)
+    except ValueError:
+        return None
+    return int((close_at - datetime.now(timezone.utc)).total_seconds())
+
+
+def _parse_iso_datetime(value: str) -> datetime:
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = f"{normalized[:-1]}+00:00"
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _signal_conflict_flags(
+    *,
+    direction: str,
+    impulse_return_bps: Decimal | None,
+) -> tuple[tuple[str, bool], ...]:
+    impulse_conflict = False
+    if impulse_return_bps is not None and abs(Decimal(str(impulse_return_bps))) >= IMPULSE_CONFIRMATION_RETURN_BPS:
+        impulse_sign = _sign(Decimal(str(impulse_return_bps)))
+        direction_sign = _direction_sign(direction)
+        impulse_conflict = direction_sign != 0 and impulse_sign != 0 and impulse_sign != direction_sign
+    return (("impulse_direction_conflict", impulse_conflict),)
+
+
+def _reversal_confirmation_status(
+    *,
+    bias_state,
+    signal_conflict_flags: tuple[tuple[str, bool], ...],
+) -> str:
+    if bias_state.structure != "reversal":
+        return "not_reversal"
+    recent_return_bps = getattr(bias_state, "recent_return_bps", None)
+    if recent_return_bps is None:
+        return "recent_return_missing"
+    recent_return = Decimal(str(recent_return_bps))
+    if _sign(recent_return) != _direction_sign(bias_state.direction):
+        return "recent_direction_mismatch"
+    if abs(recent_return) < REVERSAL_MIN_RECENT_RETURN_BPS:
+        return "weak_recent_return"
+    if dict(signal_conflict_flags).get("impulse_direction_conflict"):
+        return "impulse_direction_conflict"
+    return "confirmed"
+
+
+def _feasibility_skip_reason(
+    *,
+    bias_state,
+    feasibility: TargetFeasibility,
+    signal_conflict_flags: tuple[tuple[str, bool], ...],
+) -> str | None:
+    if feasibility.feasibility_status != "unrealistic_late_cross":
+        return None
+    if (
+        bias_state.structure == "reversal"
+        and dict(signal_conflict_flags).get("impulse_direction_conflict")
+    ):
+        return "signal_conflict_unrealistic_reversal"
+    return "target_feasibility_unrealistic_late_cross"
+
+
+def _scanner_score_confidence(
+    *,
+    bias_state,
+    feasibility: TargetFeasibility,
+    reversal_confirmation_status: str,
+    signal_conflict_flags: tuple[tuple[str, bool], ...],
+) -> int:
+    confidence = int(bias_state.confidence)
+    if dict(signal_conflict_flags).get("impulse_direction_conflict"):
+        confidence = min(confidence, SCORE_DOWNGRADE_NEEDS_CROSS_CONFIDENCE)
+    if feasibility.side_needs_cross:
+        confidence = min(confidence, SCORE_DOWNGRADE_NEEDS_CROSS_CONFIDENCE)
+    if bias_state.structure == "reversal" and feasibility.feasibility_status == "target_price_missing":
+        confidence = min(confidence, SCORE_DOWNGRADE_NEEDS_CROSS_CONFIDENCE)
+    if reversal_confirmation_status in {
+        "recent_return_missing",
+        "recent_direction_mismatch",
+        "weak_recent_return",
+        "impulse_direction_conflict",
+    }:
+        confidence = min(confidence, SCORE_DOWNGRADE_CONFLICT_CONFIDENCE)
+    return confidence
+
+
+def _direction_sign(direction: str) -> int:
+    if direction == "up":
+        return 1
+    if direction == "down":
+        return -1
+    return 0
+
+
+def _sign(value: Decimal) -> int:
+    if value > 0:
+        return 1
+    if value < 0:
+        return -1
+    return 0
+
+
 def _optional_str_metadata(
     metadata: Mapping[str, object],
     key: str,
@@ -265,3 +605,13 @@ def _optional_str_metadata(
         return None
     normalized = value.strip()
     return normalized or None
+
+
+def _optional_decimal_metadata(
+    metadata: Mapping[str, object],
+    key: str,
+) -> Decimal | None:
+    value = metadata.get(key)
+    if value is None:
+        return None
+    return Decimal(str(value))

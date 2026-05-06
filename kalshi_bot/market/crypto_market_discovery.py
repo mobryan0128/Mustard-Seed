@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any, Mapping
 
 from kalshi_bot.clients.kalshi_client import (
@@ -32,6 +33,8 @@ class DiscoveredCryptoMarket:
     close_time: str | None
     open_time: str | None
     expiration_time: str | None
+    target_price: Decimal | None = None
+    target_price_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -158,6 +161,8 @@ class CryptoMarketDiscovery:
                         close_time=market.close_time,
                         open_time=market.open_time,
                         expiration_time=market.expiration_time,
+                        target_price=market.target_price,
+                        target_price_source=market.target_price_source,
                     )
                 )
             if page.cursor is None:
