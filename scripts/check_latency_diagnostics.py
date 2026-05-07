@@ -92,6 +92,54 @@ def main() -> int:
             ticker_state=cache.ticker("KXBTC15M-TEST"),
             orderbook=cache.orderbook("KXBTC15M-TEST"),
         )
+        empty_cache = MarketStateCache()
+        empty_cache.replace_orderbook(
+            market_ticker="KXETH15M-EMPTY",
+            market_id="market-empty",
+            yes_levels=(),
+            no_levels=(),
+            sid=13,
+            seq=8,
+        )
+        diagnostics.record_kalshi_market_update(
+            message_type="orderbook_snapshot",
+            market_ticker="KXETH15M-EMPTY",
+            market_id="market-empty",
+            sid=13,
+            seq=8,
+            local_receive_timestamp=base_time,
+            ticker_state=empty_cache.ticker("KXETH15M-EMPTY"),
+            orderbook=empty_cache.orderbook("KXETH15M-EMPTY"),
+        )
+        partial_cache = MarketStateCache()
+        partial_cache.replace_orderbook(
+            market_ticker="KXSOL15M-PARTIAL",
+            market_id="market-partial",
+            yes_levels=(("0.61", "25"),),
+            no_levels=(),
+            sid=14,
+            seq=9,
+        )
+        diagnostics.record_kalshi_market_update(
+            message_type="orderbook_snapshot",
+            market_ticker="KXSOL15M-PARTIAL",
+            market_id="market-partial",
+            sid=14,
+            seq=9,
+            local_receive_timestamp=base_time,
+            ticker_state=partial_cache.ticker("KXSOL15M-PARTIAL"),
+            orderbook=partial_cache.orderbook("KXSOL15M-PARTIAL"),
+        )
+        diagnostics.record_kalshi_market_update(
+            message_type="ticker",
+            market_ticker="KXXRP15M-ABSENT",
+            market_id="market-absent",
+            sid=15,
+            seq=10,
+            local_receive_timestamp=base_time,
+            ticker_state=None,
+            orderbook=None,
+        )
 
         disabled_logger = StructuredLogger(log_directory=root / "disabled", enabled=True)
         disabled = LatencyDiagnostics(
@@ -134,10 +182,13 @@ def main() -> int:
         elif spot_records[-1]["payload"].get("spot_move_threshold_met") is not True:
             failures.append("spot threshold flag was not set")
 
-        if len(kalshi_records) != 1:
-            failures.append(f"kalshi diagnostics count={len(kalshi_records)} expected=1")
+        if len(kalshi_records) != 4:
+            failures.append(f"kalshi diagnostics count={len(kalshi_records)} expected=4")
         else:
             payload = kalshi_records[0]["payload"]
+            empty_payload = kalshi_records[1]["payload"]
+            partial_payload = kalshi_records[2]["payload"]
+            absent_payload = kalshi_records[3]["payload"]
             if payload.get("yes_bid") != "0.44":
                 failures.append(f"yes_bid={payload.get('yes_bid')} expected=0.44")
             if payload.get("yes_ask") != "0.48":
@@ -148,6 +199,43 @@ def main() -> int:
                 failures.append(f"no_ask={payload.get('no_ask')} expected=0.56")
             if len(payload.get("yes_depth_levels", ())) != 1:
                 failures.append("yes depth was not capped to one level")
+            if payload.get("orderbook_status") != "populated":
+                failures.append(
+                    f"orderbook_status={payload.get('orderbook_status')} expected=populated"
+                )
+            if payload.get("top_of_book_source") != "orderbook":
+                failures.append(
+                    f"top_of_book_source={payload.get('top_of_book_source')} expected=orderbook"
+                )
+            if empty_payload.get("orderbook_status") != "empty":
+                failures.append(
+                    f"empty orderbook_status={empty_payload.get('orderbook_status')} expected=empty"
+                )
+            if (
+                empty_payload.get("orderbook_empty_reason")
+                != "snapshot_no_levels_after_parse"
+            ):
+                failures.append(
+                    "empty orderbook reason was not snapshot_no_levels_after_parse"
+                )
+            if partial_payload.get("orderbook_status") != "yes_side_only":
+                failures.append(
+                    f"partial orderbook_status={partial_payload.get('orderbook_status')} expected=yes_side_only"
+                )
+            if partial_payload.get("yes_bid") != "0.61":
+                failures.append(
+                    f"partial yes_bid={partial_payload.get('yes_bid')} expected=0.61"
+                )
+            if partial_payload.get("no_ask") != "0.39":
+                failures.append(
+                    f"partial no_ask={partial_payload.get('no_ask')} expected=0.39"
+                )
+            if absent_payload.get("orderbook_status") != "absent":
+                failures.append(
+                    f"absent orderbook_status={absent_payload.get('orderbook_status')} expected=absent"
+                )
+            if absent_payload.get("orderbook_empty_reason") != "orderbook_absent":
+                failures.append("absent orderbook reason was not orderbook_absent")
 
         if len(replay_records) != len(records):
             failures.append("replay diagnostics record count did not match runtime logs")
@@ -162,7 +250,7 @@ def main() -> int:
 
     print("Latency diagnostics check succeeded.")
     print("spot_records=2")
-    print("kalshi_records=1")
+    print("kalshi_records=4")
     print("disabled_records=0")
     return 0
 

@@ -173,7 +173,12 @@ class LatencyDiagnostics:
                 else None
             ),
             **_ticker_payload(ticker_state),
-            **_orderbook_payload(orderbook, max_depth_levels=self._max_depth_levels),
+            **_orderbook_payload(
+                orderbook,
+                ticker_state=ticker_state,
+                message_type=message_type,
+                max_depth_levels=self._max_depth_levels,
+            ),
         }
         self._emit(
             event_type="kalshi_market_update_received",
@@ -253,10 +258,10 @@ def _ticker_payload(ticker_state: TickerState | None) -> dict[str, object]:
         return {
             "ticker_present": False,
             "price_dollars": None,
-            "yes_bid": None,
-            "yes_ask": None,
-            "yes_bid_size_fp": None,
-            "yes_ask_size_fp": None,
+            "ticker_yes_bid": None,
+            "ticker_yes_ask": None,
+            "ticker_yes_bid_size_fp": None,
+            "ticker_yes_ask_size_fp": None,
             "ticker_exchange_time": None,
             "ticker_exchange_ts": None,
             "ticker_seq": None,
@@ -264,10 +269,10 @@ def _ticker_payload(ticker_state: TickerState | None) -> dict[str, object]:
     return {
         "ticker_present": True,
         "price_dollars": ticker_state.price_dollars,
-        "yes_bid": ticker_state.yes_bid_dollars,
-        "yes_ask": ticker_state.yes_ask_dollars,
-        "yes_bid_size_fp": ticker_state.yes_bid_size_fp,
-        "yes_ask_size_fp": ticker_state.yes_ask_size_fp,
+        "ticker_yes_bid": ticker_state.yes_bid_dollars,
+        "ticker_yes_ask": ticker_state.yes_ask_dollars,
+        "ticker_yes_bid_size_fp": ticker_state.yes_bid_size_fp,
+        "ticker_yes_ask_size_fp": ticker_state.yes_ask_size_fp,
         "ticker_exchange_time": ticker_state.exchange_time,
         "ticker_exchange_ts": ticker_state.exchange_ts,
         "ticker_seq": ticker_state.seq,
@@ -277,33 +282,152 @@ def _ticker_payload(ticker_state: TickerState | None) -> dict[str, object]:
 def _orderbook_payload(
     orderbook: OrderBookState | None,
     *,
+    ticker_state: TickerState | None,
+    message_type: str,
     max_depth_levels: int,
 ) -> dict[str, object]:
+    fallback = _ticker_top_of_book(ticker_state)
     if orderbook is None:
         return {
             "orderbook_present": False,
+            "orderbook_status": "absent",
+            "orderbook_empty_reason": "orderbook_absent",
             "orderbook_seq": None,
             "orderbook_sid": None,
-            "no_bid": None,
-            "no_ask": None,
-            "no_bid_size_fp": None,
-            "no_ask_size_fp": None,
+            "orderbook_yes_level_count": 0,
+            "orderbook_no_level_count": 0,
+            **fallback,
             "yes_depth_levels": (),
             "no_depth_levels": (),
         }
     best_yes_bid = _best_bid(orderbook.yes)
     best_no_bid = _best_bid(orderbook.no)
+    top_of_book = _orderbook_top_of_book(
+        best_yes_bid=best_yes_bid,
+        best_no_bid=best_no_bid,
+        fallback=fallback,
+    )
+    status = _orderbook_status(orderbook)
     return {
         "orderbook_present": True,
+        "orderbook_status": status,
+        "orderbook_empty_reason": _orderbook_empty_reason(
+            status=status,
+            message_type=message_type,
+        ),
         "orderbook_seq": orderbook.seq,
         "orderbook_sid": orderbook.sid,
-        "no_bid": best_no_bid[0] if best_no_bid is not None else None,
-        "no_ask": Decimal("1") - best_yes_bid[0] if best_yes_bid is not None else None,
-        "no_bid_size_fp": best_no_bid[1] if best_no_bid is not None else None,
-        "no_ask_size_fp": best_yes_bid[1] if best_yes_bid is not None else None,
+        "orderbook_yes_level_count": len(orderbook.yes),
+        "orderbook_no_level_count": len(orderbook.no),
+        **top_of_book,
         "yes_depth_levels": _depth_levels(orderbook.yes, max_depth_levels),
         "no_depth_levels": _depth_levels(orderbook.no, max_depth_levels),
     }
+
+
+def _ticker_top_of_book(ticker_state: TickerState | None) -> dict[str, object]:
+    if ticker_state is None:
+        return {
+            "yes_bid": None,
+            "yes_ask": None,
+            "no_bid": None,
+            "no_ask": None,
+            "yes_bid_size_fp": None,
+            "yes_ask_size_fp": None,
+            "no_bid_size_fp": None,
+            "no_ask_size_fp": None,
+            "top_of_book_source": "unavailable",
+        }
+    no_bid = (
+        Decimal("1") - ticker_state.yes_ask_dollars
+        if ticker_state.yes_ask_dollars is not None
+        else None
+    )
+    no_ask = (
+        Decimal("1") - ticker_state.yes_bid_dollars
+        if ticker_state.yes_bid_dollars is not None
+        else None
+    )
+    return {
+        "yes_bid": ticker_state.yes_bid_dollars,
+        "yes_ask": ticker_state.yes_ask_dollars,
+        "no_bid": no_bid,
+        "no_ask": no_ask,
+        "yes_bid_size_fp": ticker_state.yes_bid_size_fp,
+        "yes_ask_size_fp": ticker_state.yes_ask_size_fp,
+        "no_bid_size_fp": ticker_state.yes_ask_size_fp,
+        "no_ask_size_fp": ticker_state.yes_bid_size_fp,
+        "top_of_book_source": "ticker_fallback",
+    }
+
+
+def _orderbook_top_of_book(
+    *,
+    best_yes_bid: tuple[Decimal, Decimal] | None,
+    best_no_bid: tuple[Decimal, Decimal] | None,
+    fallback: dict[str, object],
+) -> dict[str, object]:
+    yes_bid = best_yes_bid[0] if best_yes_bid is not None else fallback["yes_bid"]
+    yes_ask = (
+        Decimal("1") - best_no_bid[0]
+        if best_no_bid is not None
+        else fallback["yes_ask"]
+    )
+    no_bid = best_no_bid[0] if best_no_bid is not None else fallback["no_bid"]
+    no_ask = (
+        Decimal("1") - best_yes_bid[0]
+        if best_yes_bid is not None
+        else fallback["no_ask"]
+    )
+    yes_bid_size = (
+        best_yes_bid[1] if best_yes_bid is not None else fallback["yes_bid_size_fp"]
+    )
+    yes_ask_size = (
+        best_no_bid[1] if best_no_bid is not None else fallback["yes_ask_size_fp"]
+    )
+    no_bid_size = (
+        best_no_bid[1] if best_no_bid is not None else fallback["no_bid_size_fp"]
+    )
+    no_ask_size = (
+        best_yes_bid[1] if best_yes_bid is not None else fallback["no_ask_size_fp"]
+    )
+    if best_yes_bid is not None or best_no_bid is not None:
+        source = "orderbook"
+    else:
+        source = fallback["top_of_book_source"]
+    return {
+        "yes_bid": yes_bid,
+        "yes_ask": yes_ask,
+        "no_bid": no_bid,
+        "no_ask": no_ask,
+        "yes_bid_size_fp": yes_bid_size,
+        "yes_ask_size_fp": yes_ask_size,
+        "no_bid_size_fp": no_bid_size,
+        "no_ask_size_fp": no_ask_size,
+        "top_of_book_source": source,
+    }
+
+
+def _orderbook_status(orderbook: OrderBookState) -> str:
+    yes_present = bool(orderbook.yes)
+    no_present = bool(orderbook.no)
+    if yes_present and no_present:
+        return "populated"
+    if yes_present:
+        return "yes_side_only"
+    if no_present:
+        return "no_side_only"
+    return "empty"
+
+
+def _orderbook_empty_reason(*, status: str, message_type: str) -> str | None:
+    if status != "empty":
+        return None
+    if message_type == "orderbook_snapshot":
+        return "snapshot_no_levels_after_parse"
+    if message_type == "orderbook_delta":
+        return "delta_no_visible_levels_after_apply"
+    return "unknown_empty_orderbook"
 
 
 def _depth_levels(
