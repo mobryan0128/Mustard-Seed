@@ -50,6 +50,11 @@ def main() -> int:
     failures.extend(_validate_executable_price_below_minimum_skip())
     failures.extend(_validate_executable_price_above_maximum_skip())
     failures.extend(_validate_executable_price_above_premium_skip())
+    failures.extend(_validate_contextual_high_price_sustained_itm_allows())
+    failures.extend(_validate_contextual_high_price_needs_cross_blocks())
+    failures.extend(_validate_extreme_high_price_blocks())
+    failures.extend(_validate_contextual_high_price_premium_blocks())
+    failures.extend(_validate_zero_visible_liquidity_blocks())
     failures.extend(_validate_midpoint_fallback_price_below_minimum_skip())
     failures.extend(_validate_midpoint_fallback_price_above_maximum_skip())
     failures.extend(_validate_end_window_blocks_early_contract())
@@ -59,6 +64,8 @@ def main() -> int:
     failures.extend(_validate_flip_persistence_allows_same_direction())
     failures.extend(_validate_flip_persistence_blocks_recent_opposite_direction())
     failures.extend(_validate_flip_persistence_allows_itm_persistent_opposite_direction())
+    failures.extend(_validate_same_side_retry_blocks_without_improvement())
+    failures.extend(_validate_same_side_retry_allows_improved_feasibility())
 
     if failures:
         for failure in failures:
@@ -316,7 +323,7 @@ def _validate_executable_price_above_maximum_skip() -> list[str]:
         midpoint=Decimal("0.75"),
         yes_bid=Decimal("0.79"),
         yes_ask=Decimal("0.81"),
-        expected_reason="executable_price_above_maximum",
+        expected_reason="contextual_high_price_requires_sustained_itm",
         expected_count=3,
         expected_intent_side="yes",
         expected_executable_side_ask="0.81",
@@ -333,6 +340,161 @@ def _validate_executable_price_above_premium_skip() -> list[str]:
         expected_count=7,
         expected_intent_side="yes",
         expected_executable_side_ask="0.41",
+    )
+
+
+def _validate_contextual_high_price_sustained_itm_allows() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        market_snapshot = _market_snapshot(
+            market_ticker="KXBTC15M-HIGH-ALLOW",
+            yes_bid=Decimal("0.82"),
+            yes_ask=Decimal("0.85"),
+            yes_bid_size=Decimal("10"),
+            yes_ask_size=Decimal("10"),
+            orderbook_seq=124,
+        )
+        contract = _contract(
+            market_ticker="KXBTC15M-HIGH-ALLOW",
+            midpoint=Decimal("0.83"),
+            distance_to_target_bps=Decimal("-25.000"),
+            required_bps_per_minute=Decimal("0.000"),
+            side_currently_itm=True,
+            side_needs_cross=False,
+        )
+        first = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(contract),
+            cycle_number=60,
+            market_snapshot=market_snapshot,
+        )
+        second = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(contract),
+            cycle_number=61,
+            market_snapshot=market_snapshot,
+        )
+        failures: list[str] = []
+        if first:
+            failures.append(f"first high-price intents={first} expected empty")
+        if len(second) != 1:
+            failures.append(f"second high-price intents={len(second)} expected=1")
+            return failures
+        if second[0].price_dollars != Decimal("0.85"):
+            failures.append(f"high-price intent price={second[0].price_dollars}")
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_intent_created",
+        )
+        if payload is None:
+            failures.append("high-price allow intent log missing")
+            return failures
+        expected = {
+            "contextual_high_price_status": "allowed_contextual_itm_high_price",
+            "itm_persistence_status": "sustained_itm",
+            "available_count_at_intent_price": "10",
+            "spread_dollars": "0.03",
+            "execution_premium_over_midpoint_dollars": "0.02",
+        }
+        for key, value in expected.items():
+            if payload.get(key) != value:
+                failures.append(f"high-price allow {key}={payload.get(key)} expected={value}")
+        return failures
+
+
+def _validate_contextual_high_price_needs_cross_blocks() -> list[str]:
+    return _validate_execution_price_safety_skip(
+        market_ticker="KXBTC15M-HIGH-NEEDS-CROSS",
+        midpoint=Decimal("0.83"),
+        yes_bid=Decimal("0.82"),
+        yes_ask=Decimal("0.85"),
+        expected_reason="contextual_high_price_needs_cross_blocked",
+        expected_count=3,
+        expected_intent_side="yes",
+        expected_executable_side_ask="0.85",
+        contract=_contract(
+            market_ticker="KXBTC15M-HIGH-NEEDS-CROSS",
+            midpoint=Decimal("0.83"),
+            side_currently_itm=False,
+            side_needs_cross=True,
+            distance_to_target_bps=Decimal("4.000"),
+            required_bps_per_minute=Decimal("0.800"),
+            feasibility_status="needs_cross",
+        ),
+    )
+
+
+def _validate_extreme_high_price_blocks() -> list[str]:
+    return _validate_execution_price_safety_skip(
+        market_ticker="KXBTC15M-EXTREME",
+        midpoint=Decimal("0.94"),
+        yes_bid=Decimal("0.94"),
+        yes_ask=Decimal("0.95"),
+        expected_reason="executable_price_extreme_asymmetry",
+        expected_count=3,
+        expected_intent_side="yes",
+        expected_executable_side_ask="0.95",
+    )
+
+
+def _validate_contextual_high_price_premium_blocks() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        market_snapshot = _market_snapshot(
+            market_ticker="KXBTC15M-HIGH-PREMIUM",
+            yes_bid=Decimal("0.77"),
+            yes_ask=Decimal("0.85"),
+            yes_bid_size=Decimal("10"),
+            yes_ask_size=Decimal("10"),
+            orderbook_seq=125,
+        )
+        contract = _contract(
+            market_ticker="KXBTC15M-HIGH-PREMIUM",
+            midpoint=Decimal("0.79"),
+            distance_to_target_bps=Decimal("-25.000"),
+            required_bps_per_minute=Decimal("0.000"),
+        )
+        coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(contract),
+            cycle_number=62,
+            market_snapshot=market_snapshot,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(contract),
+            cycle_number=63,
+            market_snapshot=market_snapshot,
+        )
+        failures: list[str] = []
+        if intents:
+            failures.append(f"premium block intents={intents} expected empty")
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            failures.append("premium block skip log missing")
+        elif payload.get("reason") != "contextual_high_price_premium_too_high":
+            failures.append(f"premium block reason={payload.get('reason')}")
+        return failures
+
+
+def _validate_zero_visible_liquidity_blocks() -> list[str]:
+    return _validate_execution_price_safety_skip(
+        market_ticker="KXBTC15M-NO-LIQUIDITY",
+        midpoint=Decimal("0.40"),
+        yes_bid=Decimal("0.39"),
+        yes_ask=Decimal("0.40"),
+        yes_ask_size=Decimal("0"),
+        expected_reason="executable_price_no_visible_liquidity",
+        expected_count=7,
+        expected_intent_side="yes",
+        expected_executable_side_ask="0.40",
     )
 
 
@@ -370,6 +532,9 @@ def _validate_execution_price_safety_skip(
     expected_executable_side_ask: str | None,
     yes_bid: Decimal = Decimal("0.09"),
     yes_ask: Decimal = Decimal("0.10"),
+    yes_bid_size: Decimal = Decimal("50"),
+    yes_ask_size: Decimal = Decimal("10"),
+    contract: ScannedContract | None = None,
     market_snapshot: MarketStateSnapshot | None | bool = True,
 ) -> list[str]:
     with TemporaryDirectory() as temp_dir:
@@ -383,8 +548,8 @@ def _validate_execution_price_safety_skip(
                 market_ticker=market_ticker,
                 yes_bid=yes_bid,
                 yes_ask=yes_ask,
-                yes_bid_size=Decimal("50"),
-                yes_ask_size=Decimal("10"),
+                yes_bid_size=yes_bid_size,
+                yes_ask_size=yes_ask_size,
                 orderbook_seq=123,
             )
             if market_snapshot is True
@@ -392,7 +557,8 @@ def _validate_execution_price_safety_skip(
         )
         intents = coordinator.process_contract_scan_snapshot(
             _contract_snapshot(
-                _contract(
+                contract
+                or _contract(
                     market_ticker=market_ticker,
                     midpoint=midpoint,
                 )
@@ -591,7 +757,7 @@ def _validate_flip_persistence_allows_same_direction() -> list[str]:
             cycle_number=49,
         )
         second = coordinator.process_contract_scan_snapshot(
-            _contract_snapshot(_contract(market_ticker="KXBTC15M-FLIP-2")),
+            _contract_snapshot(_contract(market_ticker="KXBTC15M-FLIP-1")),
             cycle_number=50,
         )
         failures: list[str] = []
@@ -701,6 +867,109 @@ def _validate_flip_persistence_allows_itm_persistent_opposite_direction() -> lis
         return failures
 
 
+def _validate_same_side_retry_blocks_without_improvement() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        first_contract = _contract(
+            market_ticker="KXBTC15M-RETRY-BLOCK-1",
+            side_currently_itm=False,
+            side_needs_cross=True,
+            distance_to_target_bps=Decimal("4.000"),
+            required_bps_per_minute=Decimal("0.800"),
+            feasibility_status="needs_cross",
+        )
+        second_contract = _contract(
+            market_ticker="KXBTC15M-RETRY-BLOCK-2",
+            side_currently_itm=False,
+            side_needs_cross=True,
+            distance_to_target_bps=Decimal("4.000"),
+            required_bps_per_minute=Decimal("0.800"),
+            feasibility_status="needs_cross",
+        )
+        coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(first_contract),
+            cycle_number=55,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(second_contract),
+            cycle_number=56,
+        )
+        failures: list[str] = []
+        if intents:
+            failures.append(f"retry block intents={intents} expected empty")
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            failures.append("retry block skip log missing")
+            return failures
+        if payload.get("reason") != "retry_persistence_blocked":
+            failures.append(f"retry block reason={payload.get('reason')}")
+        expected_status = "blocked_same_direction_feasibility_not_improved"
+        if payload.get("retry_persistence_status") != expected_status:
+            failures.append(
+                "retry block status="
+                f"{payload.get('retry_persistence_status')} expected={expected_status}"
+            )
+        return failures
+
+
+def _validate_same_side_retry_allows_improved_feasibility() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        first_contract = _contract(
+            market_ticker="KXBTC15M-RETRY-ALLOW-1",
+            side_currently_itm=False,
+            side_needs_cross=True,
+            distance_to_target_bps=Decimal("4.000"),
+            required_bps_per_minute=Decimal("0.800"),
+            feasibility_status="needs_cross",
+        )
+        second_contract = _contract(
+            market_ticker="KXBTC15M-RETRY-ALLOW-2",
+            side_currently_itm=False,
+            side_needs_cross=True,
+            distance_to_target_bps=Decimal("2.000"),
+            required_bps_per_minute=Decimal("0.400"),
+            feasibility_status="needs_cross",
+        )
+        coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(first_contract),
+            cycle_number=57,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(second_contract),
+            cycle_number=58,
+        )
+        failures: list[str] = []
+        if len(intents) != 1:
+            failures.append(f"retry allow intents={len(intents)} expected=1")
+            return failures
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_intent_created",
+        )
+        if payload is None:
+            failures.append("retry allow intent log missing")
+            return failures
+        expected_status = "same_direction_allowed_feasibility_improved"
+        if payload.get("retry_persistence_status") != expected_status:
+            failures.append(
+                "retry allow status="
+                f"{payload.get('retry_persistence_status')} expected={expected_status}"
+            )
+        return failures
+
+
 def _coordinator(
     temp_path: Path,
     settings: "_Settings | None" = None,
@@ -733,6 +1002,9 @@ def _contract(
     contract_close_time: str | None = None,
     side_currently_itm: bool = True,
     side_needs_cross: bool = False,
+    distance_to_target_bps: Decimal = Decimal("-100.000"),
+    required_bps_per_minute: Decimal = Decimal("0.000"),
+    feasibility_status: str = "currently_itm",
     recent_return_bps: Decimal = Decimal("20.000"),
     lookback_return_bps: Decimal = Decimal("25.000"),
     impulse_direction: str | None = "up",
@@ -770,11 +1042,11 @@ def _contract(
         target_price=Decimal("99.00"),
         target_price_source="target_price",
         distance_to_target=Decimal("-1.00"),
-        distance_to_target_bps=Decimal("-100.000"),
-        required_bps_per_minute=Decimal("0.000"),
+        distance_to_target_bps=distance_to_target_bps,
+        required_bps_per_minute=required_bps_per_minute,
         side_currently_itm=side_currently_itm,
         side_needs_cross=side_needs_cross,
-        feasibility_status="currently_itm",
+        feasibility_status=feasibility_status,
         reversal_confirmation_status="not_reversal",
         trend_confirmation_status="confirmed",
         signal_conflict_flags=(("impulse_direction_conflict", False),),

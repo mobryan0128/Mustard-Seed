@@ -91,6 +91,7 @@ def _run_fixtures(scanner: ContractScanner) -> list[str]:
     failures.extend(_validate_needs_cross_soft_distance_downgrades())
     failures.extend(_validate_needs_cross_hard_distance_skips())
     failures.extend(_validate_required_bps_per_minute_skips())
+    failures.extend(_validate_tight_required_bps_per_minute_skips())
     failures.extend(_validate_currently_itm_not_feasibility_downgraded())
     failures.extend(_validate_trend_confirmation_downgrades_without_reclassification())
     failures.extend(_validate_confirmed_trend_keeps_score_confidence())
@@ -606,6 +607,42 @@ def _validate_required_bps_per_minute_skips() -> list[str]:
     reasons = {(item.market_ticker, item.reason) for item in snapshot.skipped_contracts}
     if ("KXBTC-1", "target_feasibility_required_move_too_fast") not in reasons:
         return [f"required move skip mismatch: {reasons}"]
+    return []
+
+
+def _validate_tight_required_bps_per_minute_skips() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=2),
+                "target_price": Decimal("100.03"),
+                "target_price_source": "target_price",
+            }
+        },
+    )
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        latest_price=Decimal("100"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    reasons = {(item.market_ticker, item.reason) for item in snapshot.skipped_contracts}
+    expected = ("KXBTC-1", "target_feasibility_required_move_too_fast_tight")
+    if expected not in reasons:
+        return [f"tight required move skip mismatch: {reasons}"]
+    skipped = snapshot.skipped_contracts[0]
+    if (
+        skipped.required_bps_per_minute is None
+        or skipped.required_bps_per_minute <= Decimal("1.000")
+        or skipped.required_bps_per_minute > Decimal("2.000")
+    ):
+        return [f"tight required bps/min={skipped.required_bps_per_minute}"]
+    if skipped.distance_to_target_bps != Decimal("3.000"):
+        return [f"tight distance bps={skipped.distance_to_target_bps}"]
     return []
 
 

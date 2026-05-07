@@ -36,6 +36,11 @@ LIVE_RUNNER_REALIZED_DAILY_PNL_DOLLARS = Decimal("0")
 MIN_LIVE_EXECUTION_PRICE_DOLLARS = Decimal("0.10")
 MAX_LIVE_EXECUTION_PRICE_DOLLARS = Decimal("0.80")
 MAX_EXECUTION_PREMIUM_OVER_SCANNER_DOLLARS = Decimal("0.10")
+MAX_CONTEXTUAL_ITM_EXECUTION_PRICE_DOLLARS = Decimal("0.90")
+EXTREME_EXECUTION_PRICE_DOLLARS = Decimal("0.95")
+MAX_CONTEXTUAL_PREMIUM_OVER_MIDPOINT_DOLLARS = Decimal("0.05")
+MAX_CONTEXTUAL_SPREAD_DOLLARS = Decimal("0.15")
+MIN_CONTEXTUAL_LIQUIDITY_COUNT = Decimal("1")
 FLIP_PERSISTENCE_WINDOW_SECONDS = 180
 FLIP_PERSISTENCE_MIN_RECENT_RETURN_BPS = Decimal("15.000")
 FLIP_PERSISTENCE_IMPULSE_CONFIRMATION_RETURN_BPS = Decimal("3.000")
@@ -54,6 +59,16 @@ class ExecutionPricing:
     available_count_at_intent_price: Decimal | None
     orderbook_present: bool
     orderbook_seq: int | None
+    spread_dollars: Decimal | None
+    execution_premium_over_midpoint_dollars: Decimal
+
+
+@dataclass(frozen=True)
+class ExecutionSafetyStatus:
+    allowed: bool
+    reason: str | None
+    contextual_high_price_status: str
+    candidate_count: int
 
 
 @dataclass(frozen=True)
@@ -69,6 +84,21 @@ class FlipPersistenceStatus:
     status: str
     previous_direction: str | None
     previous_entry_age_seconds: Decimal | None
+
+
+@dataclass(frozen=True)
+class ItmPersistenceStatus:
+    status: str
+    consecutive_itm_observations: int
+    previous_side_currently_itm: bool | None
+
+
+@dataclass(frozen=True)
+class RetryPersistenceStatus:
+    allowed: bool
+    status: str
+    previous_distance_to_target_bps: Decimal | None
+    previous_required_bps_per_minute: Decimal | None
 
 
 @dataclass(frozen=True)
@@ -124,8 +154,18 @@ class LiveEntryMemory:
     product_id: str
     direction: str
     market_ticker: str
+    distance_to_target_bps: Decimal | None
+    required_bps_per_minute: Decimal | None
+    side_currently_itm: bool | None
+    side_needs_cross: bool | None
     recorded_at_monotonic: float
     recorded_at: str
+
+
+@dataclass(frozen=True)
+class ItmPersistenceMemory:
+    side_currently_itm: bool | None
+    consecutive_itm_observations: int
 
 
 class LiveExecutionCoordinator:
@@ -156,6 +196,10 @@ class LiveExecutionCoordinator:
         self._reconciled_live_exposure_by_key: dict[str, Decimal] = {}
         self._live_positions_reconciled = False
         self._last_live_entry_by_product: dict[str, LiveEntryMemory] = {}
+        self._itm_persistence_by_market_side: dict[
+            tuple[str, str],
+            ItmPersistenceMemory,
+        ] = {}
 
     @property
     def live_position_ledger(self) -> dict[str, LivePositionRecord]:
@@ -257,6 +301,7 @@ class LiveExecutionCoordinator:
                     scan_source=scan_source,
                 )
                 continue
+            itm_persistence = self._itm_persistence_status(contract)
             end_window = _entry_end_window_status(contract, settings=self._settings)
             if end_window.reason is not None and not end_window.allowed:
                 self._log_contract_intent_skipped(
@@ -275,6 +320,22 @@ class LiveExecutionCoordinator:
                     cycle_number=cycle_number,
                     scan_source=scan_source,
                     details=_flip_persistence_payload(flip_persistence),
+                )
+                continue
+            retry_persistence = self._retry_persistence_status(
+                contract,
+                itm_persistence=itm_persistence,
+            )
+            if not retry_persistence.allowed:
+                self._log_contract_intent_skipped(
+                    reason="retry_persistence_blocked",
+                    contract=contract,
+                    cycle_number=cycle_number,
+                    scan_source=scan_source,
+                    details={
+                        **_itm_persistence_payload(itm_persistence),
+                        **_retry_persistence_payload(retry_persistence),
+                    },
                 )
                 continue
             current_exposure_dollars = self._live_current_exposure_dollars()
@@ -314,33 +375,51 @@ class LiveExecutionCoordinator:
                 contract=contract,
                 market_snapshot=market_snapshot,
             )
-            execution_safety_reason = _execution_safety_rejection_reason(pricing)
-            if execution_safety_reason is not None:
+            safety = _execution_safety_status(
+                contract=contract,
+                pricing=pricing,
+                candidate_count=_candidate_count(
+                    stake_dollars=stake_dollars,
+                    price_dollars=pricing.intent_price_dollars,
+                ),
+                itm_persistence=itm_persistence,
+            )
+            if not safety.allowed:
                 self._log_contract_intent_skipped(
-                    reason=execution_safety_reason,
+                    reason=safety.reason or "execution_safety_blocked",
                     contract=contract,
                     cycle_number=cycle_number,
                     scan_source=scan_source,
                     details={
                         "ticker": contract.market_ticker,
                         "stake_dollars": stake_dollars,
-                        "count": _candidate_count(
-                            stake_dollars=stake_dollars,
-                            price_dollars=pricing.intent_price_dollars,
-                        ),
+                        "count": safety.candidate_count,
+                        **_itm_persistence_payload(itm_persistence),
+                        **_retry_persistence_payload(retry_persistence),
                         **_execution_pricing_payload(pricing),
+                        **_execution_safety_payload(safety),
                     },
                 )
                 continue
-            if contract.midpoint > MAX_ENTRY_PRICE:
+            if (
+                contract.midpoint > MAX_ENTRY_PRICE
+                and safety.contextual_high_price_status
+                != "allowed_contextual_itm_high_price"
+            ):
                 self._log_contract_intent_skipped(
                     reason="entry_price_too_high",
                     contract=contract,
                     cycle_number=cycle_number,
                     scan_source=scan_source,
+                    details={
+                        **_itm_persistence_payload(itm_persistence),
+                        **_retry_persistence_payload(retry_persistence),
+                        **_execution_pricing_payload(pricing),
+                        **_execution_safety_payload(safety),
+                    },
                 )
                 continue
-            if int(stake_dollars // pricing.intent_price_dollars) < 1:
+            if safety.candidate_count < 1:
                 self._log_contract_intent_skipped(
                     reason="count_below_one",
                     contract=contract,
@@ -348,7 +427,10 @@ class LiveExecutionCoordinator:
                     scan_source=scan_source,
                     details={
                         "stake_dollars": stake_dollars,
+                        **_itm_persistence_payload(itm_persistence),
+                        **_retry_persistence_payload(retry_persistence),
                         **_execution_pricing_payload(pricing),
+                        **_execution_safety_payload(safety),
                     },
                 )
                 continue
@@ -406,8 +488,11 @@ class LiveExecutionCoordinator:
                     "contract_open_time": getattr(contract, "contract_open_time", None),
                     "contract_close_time": getattr(contract, "contract_close_time", None),
                     **_end_window_payload(end_window),
+                    **_itm_persistence_payload(itm_persistence),
                     **_flip_persistence_payload(flip_persistence),
+                    **_retry_persistence_payload(retry_persistence),
                     **_execution_pricing_payload(pricing),
+                    **_execution_safety_payload(safety),
                     "intent_count": intent.count,
                 },
             )
@@ -1249,11 +1334,101 @@ class LiveExecutionCoordinator:
             previous_entry_age_seconds=age_seconds,
         )
 
+    def _itm_persistence_status(self, contract: ScannedContract) -> ItmPersistenceStatus:
+        intent_side = _intent_side_from_direction(contract.direction)
+        key = (contract.market_ticker, intent_side)
+        previous = self._itm_persistence_by_market_side.get(key)
+        side_currently_itm = getattr(contract, "side_currently_itm", None)
+        side_needs_cross = getattr(contract, "side_needs_cross", None)
+        if side_currently_itm is None:
+            status = "missing_feasibility"
+            observations = 0
+        elif bool(side_needs_cross):
+            status = "needs_cross"
+            observations = 0
+        elif side_currently_itm:
+            previous_observations = (
+                previous.consecutive_itm_observations
+                if previous is not None and previous.side_currently_itm
+                else 0
+            )
+            observations = previous_observations + 1
+            status = "sustained_itm" if observations >= 2 else "newly_itm"
+        else:
+            status = "not_itm"
+            observations = 0
+
+        self._itm_persistence_by_market_side[key] = ItmPersistenceMemory(
+            side_currently_itm=side_currently_itm,
+            consecutive_itm_observations=observations,
+        )
+        return ItmPersistenceStatus(
+            status=status,
+            consecutive_itm_observations=observations,
+            previous_side_currently_itm=(
+                previous.side_currently_itm if previous is not None else None
+            ),
+        )
+
+    def _retry_persistence_status(
+        self,
+        contract: ScannedContract,
+        *,
+        itm_persistence: ItmPersistenceStatus,
+    ) -> RetryPersistenceStatus:
+        previous = self._last_live_entry_by_product.get(contract.product_id)
+        if previous is None:
+            return RetryPersistenceStatus(
+                allowed=True,
+                status="no_recent_entry",
+                previous_distance_to_target_bps=None,
+                previous_required_bps_per_minute=None,
+            )
+        age_seconds = int(time.monotonic() - previous.recorded_at_monotonic)
+        if age_seconds >= FLIP_PERSISTENCE_WINDOW_SECONDS:
+            return RetryPersistenceStatus(
+                allowed=True,
+                status="previous_entry_expired",
+                previous_distance_to_target_bps=previous.distance_to_target_bps,
+                previous_required_bps_per_minute=previous.required_bps_per_minute,
+            )
+        if previous.direction != contract.direction:
+            return RetryPersistenceStatus(
+                allowed=True,
+                status="opposite_direction_not_same_side_retry",
+                previous_distance_to_target_bps=previous.distance_to_target_bps,
+                previous_required_bps_per_minute=previous.required_bps_per_minute,
+            )
+        if itm_persistence.status == "sustained_itm":
+            return RetryPersistenceStatus(
+                allowed=True,
+                status="same_direction_allowed_sustained_itm",
+                previous_distance_to_target_bps=previous.distance_to_target_bps,
+                previous_required_bps_per_minute=previous.required_bps_per_minute,
+            )
+        if _contract_feasibility_improved(previous, contract):
+            return RetryPersistenceStatus(
+                allowed=True,
+                status="same_direction_allowed_feasibility_improved",
+                previous_distance_to_target_bps=previous.distance_to_target_bps,
+                previous_required_bps_per_minute=previous.required_bps_per_minute,
+            )
+        return RetryPersistenceStatus(
+            allowed=False,
+            status="blocked_same_direction_feasibility_not_improved",
+            previous_distance_to_target_bps=previous.distance_to_target_bps,
+            previous_required_bps_per_minute=previous.required_bps_per_minute,
+        )
+
     def _record_live_entry_memory(self, contract: ScannedContract) -> None:
         self._last_live_entry_by_product[contract.product_id] = LiveEntryMemory(
             product_id=contract.product_id,
             direction=contract.direction,
             market_ticker=contract.market_ticker,
+            distance_to_target_bps=getattr(contract, "distance_to_target_bps", None),
+            required_bps_per_minute=getattr(contract, "required_bps_per_minute", None),
+            side_currently_itm=getattr(contract, "side_currently_itm", None),
+            side_needs_cross=getattr(contract, "side_needs_cross", None),
             recorded_at_monotonic=time.monotonic(),
             recorded_at=datetime.now(timezone.utc).isoformat(),
         )
@@ -1572,6 +1747,11 @@ def _execution_pricing(
         executable_side_ask = Decimal("1") - yes_bid
         executable_side_ask_size_fp = ticker_state.yes_bid_size_fp
 
+    spread_dollars = (
+        yes_ask - yes_bid
+        if yes_bid is not None and yes_ask is not None
+        else None
+    )
     intent_price_dollars = (
         executable_side_ask
         if executable_side_ask is not None
@@ -1597,6 +1777,10 @@ def _execution_pricing(
         ),
         orderbook_present=orderbook is not None,
         orderbook_seq=orderbook.seq if orderbook is not None else None,
+        spread_dollars=spread_dollars,
+        execution_premium_over_midpoint_dollars=(
+            intent_price_dollars - contract.midpoint
+        ),
     )
 
 
@@ -1668,18 +1852,127 @@ def _end_window_payload(status: EntryEndWindowStatus) -> dict[str, object]:
     }
 
 
-def _execution_safety_rejection_reason(pricing: ExecutionPricing) -> str | None:
+def _execution_safety_status(
+    *,
+    contract: ScannedContract,
+    pricing: ExecutionPricing,
+    candidate_count: int,
+    itm_persistence: ItmPersistenceStatus,
+) -> ExecutionSafetyStatus:
     if pricing.intent_price_dollars < MIN_LIVE_EXECUTION_PRICE_DOLLARS:
-        return "executable_price_below_minimum"
+        return ExecutionSafetyStatus(
+            allowed=False,
+            reason="executable_price_below_minimum",
+            contextual_high_price_status="not_high_price",
+            candidate_count=candidate_count,
+        )
+    if pricing.intent_price_dollars >= EXTREME_EXECUTION_PRICE_DOLLARS:
+        return ExecutionSafetyStatus(
+            allowed=False,
+            reason="executable_price_extreme_asymmetry",
+            contextual_high_price_status="extreme_price_blocked",
+            candidate_count=candidate_count,
+        )
     if pricing.intent_price_dollars > MAX_LIVE_EXECUTION_PRICE_DOLLARS:
-        return "executable_price_above_maximum"
+        if pricing.pricing_source != "executable_side_ask":
+            return ExecutionSafetyStatus(
+                allowed=False,
+                reason="executable_price_above_maximum",
+                contextual_high_price_status=(
+                    "contextual_high_price_requires_executable_ask"
+                ),
+                candidate_count=candidate_count,
+            )
+        contextual_reason = _contextual_high_price_rejection_reason(
+            contract=contract,
+            pricing=pricing,
+            candidate_count=candidate_count,
+            itm_persistence=itm_persistence,
+        )
+        if contextual_reason is not None:
+            return ExecutionSafetyStatus(
+                allowed=False,
+                reason=contextual_reason,
+                contextual_high_price_status=contextual_reason,
+                candidate_count=candidate_count,
+            )
+        return ExecutionSafetyStatus(
+            allowed=True,
+            reason=None,
+            contextual_high_price_status="allowed_contextual_itm_high_price",
+            candidate_count=candidate_count,
+        )
     if (
         pricing.pricing_source == "executable_side_ask"
         and pricing.executable_side_ask is not None
         and pricing.executable_side_ask
         > pricing.scanner_midpoint + MAX_EXECUTION_PREMIUM_OVER_SCANNER_DOLLARS
     ):
-        return "executable_price_above_scanner_premium"
+        return ExecutionSafetyStatus(
+            allowed=False,
+            reason="executable_price_above_scanner_premium",
+            contextual_high_price_status="not_high_price",
+            candidate_count=candidate_count,
+        )
+    if (
+        pricing.orderbook_present
+        and pricing.available_count_at_intent_price is not None
+        and pricing.available_count_at_intent_price <= Decimal("0")
+    ):
+        return ExecutionSafetyStatus(
+            allowed=False,
+            reason="executable_price_no_visible_liquidity",
+            contextual_high_price_status="not_high_price",
+            candidate_count=candidate_count,
+        )
+    return ExecutionSafetyStatus(
+        allowed=True,
+        reason=None,
+        contextual_high_price_status="not_high_price",
+        candidate_count=candidate_count,
+    )
+
+
+def _contextual_high_price_rejection_reason(
+    *,
+    contract: ScannedContract,
+    pricing: ExecutionPricing,
+    candidate_count: int,
+    itm_persistence: ItmPersistenceStatus,
+) -> str | None:
+    if pricing.intent_price_dollars > MAX_CONTEXTUAL_ITM_EXECUTION_PRICE_DOLLARS:
+        return "contextual_high_price_above_ceiling"
+    if bool(getattr(contract, "side_needs_cross", False)):
+        return "contextual_high_price_needs_cross_blocked"
+    if not bool(getattr(contract, "side_currently_itm", False)):
+        return "contextual_high_price_requires_currently_itm"
+    required_bps_per_minute = getattr(contract, "required_bps_per_minute", None)
+    if (
+        required_bps_per_minute is None
+        or Decimal(str(required_bps_per_minute)) > Decimal("0")
+    ):
+        return "contextual_high_price_requires_zero_required_move"
+    distance_to_target_bps = getattr(contract, "distance_to_target_bps", None)
+    if distance_to_target_bps is None or Decimal(str(distance_to_target_bps)) > Decimal("0"):
+        return "contextual_high_price_requires_itm_distance"
+    if getattr(contract, "trend_confirmation_status", None) == "large_cross_required":
+        return "contextual_high_price_large_cross_required"
+    if itm_persistence.status != "sustained_itm":
+        return "contextual_high_price_requires_sustained_itm"
+    if pricing.spread_dollars is None:
+        return "contextual_high_price_spread_unavailable"
+    if pricing.spread_dollars > MAX_CONTEXTUAL_SPREAD_DOLLARS:
+        return "contextual_high_price_spread_too_wide"
+    if (
+        pricing.execution_premium_over_midpoint_dollars
+        > MAX_CONTEXTUAL_PREMIUM_OVER_MIDPOINT_DOLLARS
+    ):
+        return "contextual_high_price_premium_too_high"
+    if pricing.available_count_at_intent_price is None:
+        return "contextual_high_price_liquidity_unavailable"
+    required_liquidity = max(Decimal(candidate_count), MIN_CONTEXTUAL_LIQUIDITY_COUNT)
+    if pricing.available_count_at_intent_price < required_liquidity:
+        return "contextual_high_price_insufficient_liquidity"
     return None
 
 
@@ -1731,6 +2024,28 @@ def _execution_pricing_payload(pricing: ExecutionPricing) -> dict[str, object]:
         "available_count_at_intent_price": pricing.available_count_at_intent_price,
         "orderbook_present": pricing.orderbook_present,
         "orderbook_seq": pricing.orderbook_seq,
+        "spread_dollars": pricing.spread_dollars,
+        "execution_premium_over_midpoint_dollars": (
+            pricing.execution_premium_over_midpoint_dollars
+        ),
+    }
+
+
+def _execution_safety_payload(status: ExecutionSafetyStatus) -> dict[str, object]:
+    return {
+        "execution_safety_reason": status.reason,
+        "contextual_high_price_status": status.contextual_high_price_status,
+        "candidate_count": status.candidate_count,
+        "min_live_execution_price_dollars": MIN_LIVE_EXECUTION_PRICE_DOLLARS,
+        "max_live_execution_price_dollars": MAX_LIVE_EXECUTION_PRICE_DOLLARS,
+        "max_contextual_itm_execution_price_dollars": (
+            MAX_CONTEXTUAL_ITM_EXECUTION_PRICE_DOLLARS
+        ),
+        "extreme_execution_price_dollars": EXTREME_EXECUTION_PRICE_DOLLARS,
+        "max_contextual_premium_over_midpoint_dollars": (
+            MAX_CONTEXTUAL_PREMIUM_OVER_MIDPOINT_DOLLARS
+        ),
+        "max_contextual_spread_dollars": MAX_CONTEXTUAL_SPREAD_DOLLARS,
     }
 
 
@@ -1791,8 +2106,49 @@ def _flip_persistence_payload(status: FlipPersistenceStatus) -> dict[str, object
     }
 
 
+def _itm_persistence_payload(status: ItmPersistenceStatus) -> dict[str, object]:
+    return {
+        "itm_persistence_status": status.status,
+        "consecutive_itm_observations": status.consecutive_itm_observations,
+        "previous_side_currently_itm": status.previous_side_currently_itm,
+        "sustained_itm_min_observations": 2,
+    }
+
+
+def _retry_persistence_payload(status: RetryPersistenceStatus) -> dict[str, object]:
+    return {
+        "retry_persistence_status": status.status,
+        "previous_distance_to_target_bps": status.previous_distance_to_target_bps,
+        "previous_required_bps_per_minute": status.previous_required_bps_per_minute,
+        "retry_persistence_window_seconds": FLIP_PERSISTENCE_WINDOW_SECONDS,
+    }
+
+
 def _contract_side_currently_itm(contract: ScannedContract) -> bool:
     return bool(getattr(contract, "side_currently_itm", False))
+
+
+def _contract_feasibility_improved(
+    previous: LiveEntryMemory,
+    contract: ScannedContract,
+) -> bool:
+    if bool(getattr(contract, "side_currently_itm", False)) and not bool(
+        previous.side_currently_itm
+    ):
+        return True
+    previous_distance = previous.distance_to_target_bps
+    current_distance = getattr(contract, "distance_to_target_bps", None)
+    if previous_distance is not None and current_distance is not None:
+        if Decimal(str(current_distance)) < Decimal(str(previous_distance)):
+            return True
+    previous_required = previous.required_bps_per_minute
+    current_required = getattr(contract, "required_bps_per_minute", None)
+    if previous_required is not None and current_required is not None:
+        if Decimal(str(current_required)) < Decimal(str(previous_required)):
+            return True
+    if previous_distance is None and previous_required is None:
+        return True
+    return False
 
 
 def _contract_momentum_persists(contract: ScannedContract) -> bool:

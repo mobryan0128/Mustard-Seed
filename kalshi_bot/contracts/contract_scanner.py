@@ -24,6 +24,7 @@ UNREALISTIC_LATE_CROSS_SECONDS = 60
 UNREALISTIC_LATE_CROSS_DISTANCE_BPS = Decimal("15.000")
 NEEDS_CROSS_SOFT_DISTANCE_BPS = Decimal("5.000")
 NEEDS_CROSS_HARD_DISTANCE_BPS = Decimal("10.000")
+NEEDS_CROSS_TIGHT_REQUIRED_BPS_PER_MINUTE = Decimal("1.000")
 NEEDS_CROSS_HARD_REQUIRED_BPS_PER_MINUTE = Decimal("2.000")
 SCORE_DOWNGRADE_CONFLICT_CONFIDENCE = 30
 SCORE_DOWNGRADE_NEEDS_CROSS_CONFIDENCE = 40
@@ -616,6 +617,14 @@ def _feasibility_skip_reason(
         > NEEDS_CROSS_HARD_REQUIRED_BPS_PER_MINUTE
     ):
         return "target_feasibility_required_move_too_fast"
+    if (
+        feasibility.distance_to_target_bps is not None
+        and feasibility.distance_to_target_bps > Decimal("0")
+        and feasibility.required_bps_per_minute is not None
+        and feasibility.required_bps_per_minute
+        > NEEDS_CROSS_TIGHT_REQUIRED_BPS_PER_MINUTE
+    ):
+        return "target_feasibility_required_move_too_fast_tight"
     return None
 
 
