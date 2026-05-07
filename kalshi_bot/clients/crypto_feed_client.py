@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -12,6 +13,7 @@ import websockets
 from websockets.exceptions import ConnectionClosed, WebSocketException
 
 from kalshi_bot.config.settings import KalshiSettings
+from kalshi_bot.observability.latency_diagnostics import LatencyDiagnostics
 
 
 TICKER_CHANNEL = "ticker"
@@ -100,6 +102,7 @@ class CryptoFeedClient:
         max_reconnect_attempts: int,
         reconnect_initial_delay_seconds: float,
         reconnect_max_delay_seconds: float,
+        latency_diagnostics: LatencyDiagnostics | None = None,
     ) -> None:
         normalized_products = tuple(
             dict.fromkeys(product.strip() for product in products if product.strip())
@@ -114,6 +117,7 @@ class CryptoFeedClient:
         self._max_reconnect_attempts = max_reconnect_attempts
         self._reconnect_initial_delay_seconds = reconnect_initial_delay_seconds
         self._reconnect_max_delay_seconds = reconnect_max_delay_seconds
+        self._latency_diagnostics = latency_diagnostics
         self._connection: Any = None
         self._states: Dict[str, CryptoPriceState] = {}
         self._last_heartbeat_time: Optional[str] = None
@@ -121,7 +125,11 @@ class CryptoFeedClient:
         self._subscribed_channels: Tuple[str, ...] = ()
 
     @classmethod
-    def from_settings(cls, settings: KalshiSettings) -> "CryptoFeedClient":
+    def from_settings(
+        cls,
+        settings: KalshiSettings,
+        latency_diagnostics: LatencyDiagnostics | None = None,
+    ) -> "CryptoFeedClient":
         return cls(
             ws_url=settings.crypto_feed_ws_url,
             products=settings.crypto_feed_products,
@@ -130,6 +138,7 @@ class CryptoFeedClient:
             max_reconnect_attempts=settings.crypto_feed_max_reconnect_attempts,
             reconnect_initial_delay_seconds=settings.crypto_feed_reconnect_initial_delay_seconds,
             reconnect_max_delay_seconds=settings.crypto_feed_reconnect_max_delay_seconds,
+            latency_diagnostics=latency_diagnostics,
         )
 
     @property
@@ -210,6 +219,7 @@ class CryptoFeedClient:
                     self._connection.recv(),
                     timeout=self._receive_timeout_seconds,
                 )
+                local_receive_timestamp = datetime.now(timezone.utc)
             except asyncio.TimeoutError as exc:
                 raise CryptoFeedClientError(
                     "Timed out waiting for external crypto feed data."
@@ -219,6 +229,10 @@ class CryptoFeedClient:
             result = _increment_run_result(result, messages_received=1)
             for parsed_message in parsed_messages:
                 self._apply_message(parsed_message)
+                self._record_latency_diagnostics(
+                    parsed_message,
+                    local_receive_timestamp=local_receive_timestamp,
+                )
                 result = _count_parsed_message(result, parsed_message)
 
         return result
@@ -271,6 +285,26 @@ class CryptoFeedClient:
                         current.last_heartbeat_counter,
                     ),
                 )
+
+    def _record_latency_diagnostics(
+        self,
+        message: ParsedCryptoFeedMessage,
+        *,
+        local_receive_timestamp: datetime,
+    ) -> None:
+        if self._latency_diagnostics is None or not isinstance(message, CryptoTickerUpdate):
+            return
+        self._latency_diagnostics.record_spot_update(
+            product_id=message.product_id,
+            price=message.price,
+            best_bid=message.best_bid,
+            best_ask=message.best_ask,
+            best_bid_quantity=message.best_bid_quantity,
+            best_ask_quantity=message.best_ask_quantity,
+            source_timestamp=message.source_timestamp,
+            sequence_num=message.sequence_num,
+            local_receive_timestamp=local_receive_timestamp,
+        )
 
 
 def parse_crypto_feed_message(raw_message: Union[str, bytes]) -> Tuple[ParsedCryptoFeedMessage, ...]:

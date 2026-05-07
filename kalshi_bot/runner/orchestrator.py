@@ -32,6 +32,7 @@ from kalshi_bot.market.crypto_market_discovery import (
     CryptoMarketDiscoverySnapshot,
 )
 from kalshi_bot.market.market_state_cache import MarketStateCache, MarketStateSnapshot
+from kalshi_bot.observability.latency_diagnostics import LatencyDiagnostics
 from kalshi_bot.observability.logger import StructuredLogger
 from kalshi_bot.observability.replay_engine import ReplayEngine
 from kalshi_bot.risk.risk_manager import RiskManager
@@ -207,12 +208,23 @@ class KalshiBotRunner:
             replay_directory=settings.replay_directory,
             enabled=settings.replay_write_enabled,
         )
+        latency_diagnostics = LatencyDiagnostics.from_settings(
+            settings,
+            logger=logger,
+            replay_engine=replay_engine,
+        )
+        if not latency_diagnostics.enabled:
+            latency_diagnostics = None
         try:
             kalshi_ws_client = KalshiWebSocketClient.from_settings(
                 settings,
                 market_state_cache=market_state_cache,
+                latency_diagnostics=latency_diagnostics,
             )
-            crypto_feed_client = CryptoFeedClient.from_settings(settings)
+            crypto_feed_client = CryptoFeedClient.from_settings(
+                settings,
+                latency_diagnostics=latency_diagnostics,
+            )
             bias_engine = BiasEngine.from_settings(settings)
             if settings.auto_market_discovery_enabled:
                 kalshi_client = KalshiClient.from_settings(settings, logger=logger)

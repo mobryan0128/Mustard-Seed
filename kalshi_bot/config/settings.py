@@ -37,6 +37,10 @@ DEFAULT_CRYPTO_FEED_RECONNECT_MAX_DELAY_SECONDS = 30.0
 DEFAULT_LOG_DIRECTORY = Path("logs")
 DEFAULT_REPLAY_DIRECTORY = Path("replay")
 DEFAULT_TIME_SYNC_MAX_DRIFT_MS = 1500
+DEFAULT_LATENCY_DIAGNOSTICS_ENABLED = False
+DEFAULT_LATENCY_DIAGNOSTICS_SAMPLE_INTERVAL_MS = 1000
+DEFAULT_LATENCY_DIAGNOSTICS_MIN_SPOT_MOVE_BPS = Decimal("5")
+DEFAULT_LATENCY_DIAGNOSTICS_MAX_DEPTH_LEVELS = 3
 DEFAULT_BIAS_LOOKBACK_SECONDS = 1800
 DEFAULT_BIAS_RECENT_WINDOW_SECONDS = 60
 DEFAULT_BIAS_MIN_SAMPLES = 20
@@ -129,6 +133,10 @@ class KalshiSettings:
     replay_write_enabled: bool
     time_sync_max_drift_ms: int
     time_sync_log_results: bool
+    latency_diagnostics_enabled: bool
+    latency_diagnostics_sample_interval_ms: int
+    latency_diagnostics_min_spot_move_bps: Decimal
+    latency_diagnostics_max_depth_levels: int
     bias_products: tuple[str, ...]
     bias_lookback_seconds: int
     bias_recent_window_seconds: int
@@ -608,6 +616,26 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
             values.get("TIME_SYNC_LOG_RESULTS"),
             True,
             "TIME_SYNC_LOG_RESULTS",
+        ),
+        latency_diagnostics_enabled=_parse_bool(
+            values.get("LATENCY_DIAGNOSTICS_ENABLED"),
+            DEFAULT_LATENCY_DIAGNOSTICS_ENABLED,
+            "LATENCY_DIAGNOSTICS_ENABLED",
+        ),
+        latency_diagnostics_sample_interval_ms=_parse_positive_int(
+            values.get("LATENCY_DIAGNOSTICS_SAMPLE_INTERVAL_MS"),
+            DEFAULT_LATENCY_DIAGNOSTICS_SAMPLE_INTERVAL_MS,
+            "LATENCY_DIAGNOSTICS_SAMPLE_INTERVAL_MS",
+        ),
+        latency_diagnostics_min_spot_move_bps=_parse_positive_decimal(
+            values.get("LATENCY_DIAGNOSTICS_MIN_SPOT_MOVE_BPS"),
+            DEFAULT_LATENCY_DIAGNOSTICS_MIN_SPOT_MOVE_BPS,
+            "LATENCY_DIAGNOSTICS_MIN_SPOT_MOVE_BPS",
+        ),
+        latency_diagnostics_max_depth_levels=_parse_positive_int(
+            values.get("LATENCY_DIAGNOSTICS_MAX_DEPTH_LEVELS"),
+            DEFAULT_LATENCY_DIAGNOSTICS_MAX_DEPTH_LEVELS,
+            "LATENCY_DIAGNOSTICS_MAX_DEPTH_LEVELS",
         ),
         bias_products=bias_products,
         bias_lookback_seconds=bias_lookback_seconds,

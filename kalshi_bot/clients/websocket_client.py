@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Union
 from urllib.parse import urlsplit
 
@@ -14,6 +15,7 @@ from websockets.exceptions import ConnectionClosed, WebSocketException
 from kalshi_bot.auth.auth_manager import AuthManagerError, KalshiAuthManager
 from kalshi_bot.config.settings import KalshiSettings
 from kalshi_bot.market.market_state_cache import MarketStateCache, MarketStateCacheError
+from kalshi_bot.observability.latency_diagnostics import LatencyDiagnostics
 
 
 WS_AUTH_PATH = "/trade-api/ws/v2"
@@ -128,6 +130,7 @@ class KalshiWebSocketClient:
         max_reconnect_attempts: int,
         reconnect_initial_delay_seconds: float,
         reconnect_max_delay_seconds: float,
+        latency_diagnostics: LatencyDiagnostics | None = None,
     ) -> None:
         self._ws_url = ws_url
         self._auth_manager = auth_manager
@@ -137,6 +140,7 @@ class KalshiWebSocketClient:
         self._max_reconnect_attempts = max_reconnect_attempts
         self._reconnect_initial_delay_seconds = reconnect_initial_delay_seconds
         self._reconnect_max_delay_seconds = reconnect_max_delay_seconds
+        self._latency_diagnostics = latency_diagnostics
         self._connection: Any | None = None
         self._next_command_id = 1
 
@@ -145,6 +149,7 @@ class KalshiWebSocketClient:
         cls,
         settings: KalshiSettings,
         market_state_cache: MarketStateCache | None = None,
+        latency_diagnostics: LatencyDiagnostics | None = None,
     ) -> "KalshiWebSocketClient":
         try:
             if settings.private_key_pem is not None:
@@ -175,6 +180,7 @@ class KalshiWebSocketClient:
             max_reconnect_attempts=settings.ws_max_reconnect_attempts,
             reconnect_initial_delay_seconds=settings.ws_reconnect_initial_delay_seconds,
             reconnect_max_delay_seconds=settings.ws_reconnect_max_delay_seconds,
+            latency_diagnostics=latency_diagnostics,
         )
 
     @property
@@ -271,6 +277,7 @@ class KalshiWebSocketClient:
                     self._connection.recv(),
                     timeout=self._receive_timeout_seconds,
                 )
+                local_receive_timestamp = datetime.now(timezone.utc)
             except asyncio.TimeoutError as exc:
                 if result.messages_received > 0:
                     return _increment_result(result, timed_out=True)
@@ -283,6 +290,10 @@ class KalshiWebSocketClient:
                 )
 
             self._apply_message(parsed)
+            self._record_latency_diagnostics(
+                parsed,
+                local_receive_timestamp=local_receive_timestamp,
+            )
             result = _count_message(result, parsed)
 
         return result
@@ -335,6 +346,53 @@ class KalshiWebSocketClient:
                 )
         except MarketStateCacheError as exc:
             raise KalshiWebSocketError(str(exc)) from exc
+
+    def _record_latency_diagnostics(
+        self,
+        message: ParsedMessage,
+        *,
+        local_receive_timestamp: datetime,
+    ) -> None:
+        if self._latency_diagnostics is None:
+            return
+        if isinstance(message, TickerMessage):
+            self._latency_diagnostics.record_kalshi_market_update(
+                message_type="ticker",
+                market_ticker=message.market_ticker,
+                market_id=message.market_id,
+                sid=message.sid,
+                seq=message.seq,
+                local_receive_timestamp=local_receive_timestamp,
+                ticker_state=self._cache.ticker(message.market_ticker),
+                orderbook=self._cache.orderbook(message.market_ticker),
+                exchange_time=message.exchange_time,
+                exchange_ts=message.exchange_ts,
+            )
+            return
+        if isinstance(message, OrderbookSnapshotMessage):
+            self._latency_diagnostics.record_kalshi_market_update(
+                message_type="orderbook_snapshot",
+                market_ticker=message.market_ticker,
+                market_id=message.market_id,
+                sid=message.sid,
+                seq=message.seq,
+                local_receive_timestamp=local_receive_timestamp,
+                ticker_state=self._cache.ticker(message.market_ticker),
+                orderbook=self._cache.orderbook(message.market_ticker),
+            )
+            return
+        if isinstance(message, OrderbookDeltaMessage):
+            self._latency_diagnostics.record_kalshi_market_update(
+                message_type="orderbook_delta",
+                market_ticker=message.market_ticker,
+                market_id=message.market_id,
+                sid=message.sid,
+                seq=message.seq,
+                local_receive_timestamp=local_receive_timestamp,
+                ticker_state=self._cache.ticker(message.market_ticker),
+                orderbook=self._cache.orderbook(message.market_ticker),
+                message_ts=message.ts,
+            )
 
 
 def parse_ws_message(raw_message: str | bytes) -> ParsedMessage:
