@@ -36,6 +36,9 @@ LIVE_RUNNER_REALIZED_DAILY_PNL_DOLLARS = Decimal("0")
 MIN_LIVE_EXECUTION_PRICE_DOLLARS = Decimal("0.10")
 MAX_LIVE_EXECUTION_PRICE_DOLLARS = Decimal("0.80")
 MAX_EXECUTION_PREMIUM_OVER_SCANNER_DOLLARS = Decimal("0.10")
+FLIP_PERSISTENCE_WINDOW_SECONDS = 180
+FLIP_PERSISTENCE_MIN_RECENT_RETURN_BPS = Decimal("15.000")
+FLIP_PERSISTENCE_IMPULSE_CONFIRMATION_RETURN_BPS = Decimal("3.000")
 
 
 @dataclass(frozen=True)
@@ -58,6 +61,14 @@ class EntryEndWindowStatus:
     allowed: bool | None
     reason: str | None
     remaining_seconds: int | None
+
+
+@dataclass(frozen=True)
+class FlipPersistenceStatus:
+    allowed: bool
+    status: str
+    previous_direction: str | None
+    previous_entry_age_seconds: Decimal | None
 
 
 @dataclass(frozen=True)
@@ -108,6 +119,15 @@ class LiveTrailingStopState:
     exit_pending: bool
 
 
+@dataclass(frozen=True)
+class LiveEntryMemory:
+    product_id: str
+    direction: str
+    market_ticker: str
+    recorded_at_monotonic: float
+    recorded_at: str
+
+
 class LiveExecutionCoordinator:
     """Convert simulated entries into intents and optionally submit guarded live orders."""
 
@@ -135,6 +155,7 @@ class LiveExecutionCoordinator:
         self._trailing_stop_states: dict[str, LiveTrailingStopState] = {}
         self._reconciled_live_exposure_by_key: dict[str, Decimal] = {}
         self._live_positions_reconciled = False
+        self._last_live_entry_by_product: dict[str, LiveEntryMemory] = {}
 
     @property
     def live_position_ledger(self) -> dict[str, LivePositionRecord]:
@@ -244,6 +265,16 @@ class LiveExecutionCoordinator:
                     cycle_number=cycle_number,
                     scan_source=scan_source,
                     details=_end_window_payload(end_window),
+                )
+                continue
+            flip_persistence = self._flip_persistence_status(contract)
+            if not flip_persistence.allowed:
+                self._log_contract_intent_skipped(
+                    reason="flip_persistence_blocked",
+                    contract=contract,
+                    cycle_number=cycle_number,
+                    scan_source=scan_source,
+                    details=_flip_persistence_payload(flip_persistence),
                 )
                 continue
             current_exposure_dollars = self._live_current_exposure_dollars()
@@ -375,10 +406,12 @@ class LiveExecutionCoordinator:
                     "contract_open_time": getattr(contract, "contract_open_time", None),
                     "contract_close_time": getattr(contract, "contract_close_time", None),
                     **_end_window_payload(end_window),
+                    **_flip_persistence_payload(flip_persistence),
                     **_execution_pricing_payload(pricing),
                     "intent_count": intent.count,
                 },
             )
+            self._record_live_entry_memory(contract)
         return tuple(intents)
 
     def reconcile_live_positions(
@@ -1170,6 +1203,59 @@ class LiveExecutionCoordinator:
             for record in self._live_position_ledger.values()
         )
 
+    def _flip_persistence_status(self, contract: ScannedContract) -> FlipPersistenceStatus:
+        previous = self._last_live_entry_by_product.get(contract.product_id)
+        if previous is None:
+            return FlipPersistenceStatus(
+                allowed=True,
+                status="no_recent_entry",
+                previous_direction=None,
+                previous_entry_age_seconds=None,
+            )
+        age_seconds = Decimal(str(time.monotonic() - previous.recorded_at_monotonic)).quantize(
+            Decimal("0.001")
+        )
+        if int(age_seconds) >= FLIP_PERSISTENCE_WINDOW_SECONDS:
+            return FlipPersistenceStatus(
+                allowed=True,
+                status="previous_entry_expired",
+                previous_direction=previous.direction,
+                previous_entry_age_seconds=age_seconds,
+            )
+        if previous.direction == contract.direction:
+            return FlipPersistenceStatus(
+                allowed=True,
+                status="same_direction",
+                previous_direction=previous.direction,
+                previous_entry_age_seconds=age_seconds,
+            )
+        if _contract_side_currently_itm(contract) and _contract_momentum_persists(contract):
+            return FlipPersistenceStatus(
+                allowed=True,
+                status="opposite_direction_allowed_crossed_and_persistent",
+                previous_direction=previous.direction,
+                previous_entry_age_seconds=age_seconds,
+            )
+        if not _contract_side_currently_itm(contract):
+            status = "blocked_recent_flip_not_itm"
+        else:
+            status = "blocked_recent_flip_momentum_not_persistent"
+        return FlipPersistenceStatus(
+            allowed=False,
+            status=status,
+            previous_direction=previous.direction,
+            previous_entry_age_seconds=age_seconds,
+        )
+
+    def _record_live_entry_memory(self, contract: ScannedContract) -> None:
+        self._last_live_entry_by_product[contract.product_id] = LiveEntryMemory(
+            product_id=contract.product_id,
+            direction=contract.direction,
+            market_ticker=contract.market_ticker,
+            recorded_at_monotonic=time.monotonic(),
+            recorded_at=datetime.now(timezone.utc).isoformat(),
+        )
+
     def _poll_order(
         self,
         order_id: str,
@@ -1662,6 +1748,11 @@ def _signal_diagnostic_payload(contract: ScannedContract) -> dict[str, object]:
             "reversal_confirmation_status",
             None,
         ),
+        "trend_confirmation_status": getattr(
+            contract,
+            "trend_confirmation_status",
+            None,
+        ),
         "signal_conflict_flags": dict(
             getattr(contract, "signal_conflict_flags", ()) or ()
         ),
@@ -1670,7 +1761,59 @@ def _signal_diagnostic_payload(contract: ScannedContract) -> dict[str, object]:
             "scanner_score_confidence",
             None,
         ),
+        "scanner_score_downgrade_reasons": list(
+            getattr(contract, "scanner_score_downgrade_reasons", ()) or ()
+        ),
     }
+
+
+def _flip_persistence_payload(status: FlipPersistenceStatus) -> dict[str, object]:
+    return {
+        "flip_persistence_status": status.status,
+        "previous_entry_direction": status.previous_direction,
+        "previous_entry_age_seconds": status.previous_entry_age_seconds,
+    }
+
+
+def _contract_side_currently_itm(contract: ScannedContract) -> bool:
+    return bool(getattr(contract, "side_currently_itm", False))
+
+
+def _contract_momentum_persists(contract: ScannedContract) -> bool:
+    direction_sign = _direction_sign(contract.direction)
+    if direction_sign == 0:
+        return False
+    recent_return_bps = getattr(contract, "recent_return_bps", None)
+    if recent_return_bps is None:
+        return False
+    recent_return = Decimal(str(recent_return_bps))
+    if _sign(recent_return) != direction_sign:
+        return False
+    if abs(recent_return) < FLIP_PERSISTENCE_MIN_RECENT_RETURN_BPS:
+        return False
+    impulse_return_bps = getattr(contract, "impulse_return_bps", None)
+    if impulse_return_bps is None:
+        return True
+    impulse_return = Decimal(str(impulse_return_bps))
+    if abs(impulse_return) < FLIP_PERSISTENCE_IMPULSE_CONFIRMATION_RETURN_BPS:
+        return True
+    return _sign(impulse_return) == direction_sign
+
+
+def _direction_sign(direction: str) -> int:
+    if direction == "up":
+        return 1
+    if direction == "down":
+        return -1
+    return 0
+
+
+def _sign(value: Decimal) -> int:
+    if value > 0:
+        return 1
+    if value < 0:
+        return -1
+    return 0
 
 
 def _live_intent_source_id(

@@ -53,6 +53,25 @@ class SkipReasonDiagnostic:
 
 
 @dataclass(frozen=True)
+class SkippedContractDiagnostic:
+    """Sampled skipped-contract details for settlement audit diagnostics."""
+
+    product_id: str
+    market_ticker: str
+    reason: str
+    target_price: Decimal | None
+    time_remaining_seconds: int | None
+    feasibility_status: str | None
+    distance_to_target_bps: Decimal | None
+    required_bps_per_minute: Decimal | None
+    side_currently_itm: bool | None
+    side_needs_cross: bool | None
+    trend_confirmation_status: str | None
+    reversal_confirmation_status: str | None
+    scanner_score_downgrade_reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class BiasDiagnostic:
     """Per-product bias visibility for runner diagnostics."""
 
@@ -107,6 +126,7 @@ class RunnerStatus:
     kalshi_feed_timed_out: bool
     skipped_contract_count: int
     top_skip_reasons: tuple[SkipReasonDiagnostic, ...]
+    skipped_contract_diagnostics: tuple[SkippedContractDiagnostic, ...]
     bias_diagnostics: tuple[BiasDiagnostic, ...]
     mapped_market_diagnostics: tuple[MappedMarketDiagnostic, ...]
     open_position_count: int
@@ -479,6 +499,11 @@ class KalshiBotRunner:
                     "kalshi_feed_timed_out": status.kalshi_feed_timed_out,
                     "skipped_contract_count": status.skipped_contract_count,
                     "top_skip_reasons": _skip_reason_payloads(status.top_skip_reasons),
+                    "skipped_contract_diagnostics": (
+                        _skipped_contract_diagnostic_payloads(
+                            status.skipped_contract_diagnostics
+                        )
+                    ),
                     "bias_diagnostics": _bias_diagnostic_payloads(status.bias_diagnostics),
                     "mapped_market_diagnostics": _mapped_market_diagnostic_payloads(
                         status.mapped_market_diagnostics
@@ -725,6 +750,9 @@ class KalshiBotRunner:
                 else 0
             ),
             top_skip_reasons=_top_skip_reasons(contract_scan_snapshot),
+            skipped_contract_diagnostics=_skipped_contract_diagnostics(
+                contract_scan_snapshot,
+            ),
             bias_diagnostics=_bias_diagnostics(
                 bias_snapshot,
                 product_ids=self._settings.bias_products,
@@ -819,6 +847,11 @@ class KalshiBotRunner:
                 "kalshi_feed_timed_out": result.status.kalshi_feed_timed_out,
                 "skipped_contract_count": result.status.skipped_contract_count,
                 "top_skip_reasons": _skip_reason_payloads(result.status.top_skip_reasons),
+                "skipped_contract_diagnostics": (
+                    _skipped_contract_diagnostic_payloads(
+                        result.status.skipped_contract_diagnostics
+                    )
+                ),
                 "bias_diagnostics": _bias_diagnostic_payloads(result.status.bias_diagnostics),
                 "mapped_market_diagnostics": _mapped_market_diagnostic_payloads(
                     result.status.mapped_market_diagnostics
@@ -1059,6 +1092,31 @@ def _top_skip_reasons(
     )
 
 
+def _skipped_contract_diagnostics(
+    contract_scan_snapshot: ContractScanSnapshot | None,
+) -> tuple[SkippedContractDiagnostic, ...]:
+    if contract_scan_snapshot is None:
+        return ()
+    return tuple(
+        SkippedContractDiagnostic(
+            product_id=contract.product_id,
+            market_ticker=contract.market_ticker,
+            reason=contract.reason,
+            target_price=contract.target_price,
+            time_remaining_seconds=contract.time_remaining_seconds,
+            feasibility_status=contract.feasibility_status,
+            distance_to_target_bps=contract.distance_to_target_bps,
+            required_bps_per_minute=contract.required_bps_per_minute,
+            side_currently_itm=contract.side_currently_itm,
+            side_needs_cross=contract.side_needs_cross,
+            trend_confirmation_status=contract.trend_confirmation_status,
+            reversal_confirmation_status=contract.reversal_confirmation_status,
+            scanner_score_downgrade_reasons=contract.scanner_score_downgrade_reasons,
+        )
+        for contract in contract_scan_snapshot.skipped_contracts[:10]
+    )
+
+
 def _bias_diagnostics(
     bias_snapshot: BiasSnapshot,
     *,
@@ -1159,6 +1217,31 @@ def _skip_reason_payloads(
     diagnostics: tuple[SkipReasonDiagnostic, ...],
 ) -> tuple[dict[str, object], ...]:
     return tuple({"reason": item.reason, "count": item.count} for item in diagnostics)
+
+
+def _skipped_contract_diagnostic_payloads(
+    diagnostics: tuple[SkippedContractDiagnostic, ...],
+) -> tuple[dict[str, object], ...]:
+    return tuple(
+        {
+            "product_id": item.product_id,
+            "market_ticker": item.market_ticker,
+            "reason": item.reason,
+            "target_price": item.target_price,
+            "time_remaining_seconds": item.time_remaining_seconds,
+            "feasibility_status": item.feasibility_status,
+            "distance_to_target_bps": item.distance_to_target_bps,
+            "required_bps_per_minute": item.required_bps_per_minute,
+            "side_currently_itm": item.side_currently_itm,
+            "side_needs_cross": item.side_needs_cross,
+            "trend_confirmation_status": item.trend_confirmation_status,
+            "reversal_confirmation_status": item.reversal_confirmation_status,
+            "scanner_score_downgrade_reasons": list(
+                item.scanner_score_downgrade_reasons
+            ),
+        }
+        for item in diagnostics
+    )
 
 
 def _bias_diagnostic_payloads(

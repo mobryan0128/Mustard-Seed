@@ -19,10 +19,15 @@ SECONDS_PER_MINUTE = Decimal("60")
 LATE_EXPANSION_IMPULSE_RETURN_BPS = Decimal("6.000")
 IMPULSE_CONFIRMATION_RETURN_BPS = Decimal("3.000")
 REVERSAL_MIN_RECENT_RETURN_BPS = Decimal("15.000")
+TREND_MIN_RECENT_RETURN_BPS = Decimal("15.000")
 UNREALISTIC_LATE_CROSS_SECONDS = 60
 UNREALISTIC_LATE_CROSS_DISTANCE_BPS = Decimal("15.000")
+NEEDS_CROSS_SOFT_DISTANCE_BPS = Decimal("5.000")
+NEEDS_CROSS_HARD_DISTANCE_BPS = Decimal("10.000")
+NEEDS_CROSS_HARD_REQUIRED_BPS_PER_MINUTE = Decimal("2.000")
 SCORE_DOWNGRADE_CONFLICT_CONFIDENCE = 30
 SCORE_DOWNGRADE_NEEDS_CROSS_CONFIDENCE = 40
+SCORE_DOWNGRADE_SOFT_NEEDS_CROSS_CONFIDENCE = 30
 
 
 class ContractScannerError(ValueError):
@@ -75,8 +80,10 @@ class ScannedContract:
     side_needs_cross: bool | None = None
     feasibility_status: str | None = None
     reversal_confirmation_status: str | None = None
+    trend_confirmation_status: str | None = None
     signal_conflict_flags: tuple[tuple[str, bool], ...] = ()
     scanner_score_confidence: int | None = None
+    scanner_score_downgrade_reasons: tuple[str, ...] = ()
     contract_open_time: str | None = None
     contract_close_time: str | None = None
     contract_time_remaining_seconds: int | None = None
@@ -101,7 +108,9 @@ class SkippedContract:
     side_needs_cross: bool | None = None
     feasibility_status: str | None = None
     reversal_confirmation_status: str | None = None
+    trend_confirmation_status: str | None = None
     signal_conflict_flags: tuple[tuple[str, bool], ...] = ()
+    scanner_score_downgrade_reasons: tuple[str, ...] = ()
     contract_open_time: str | None = None
     contract_time_remaining_seconds: int | None = None
     end_window_allowed: bool | None = None
@@ -195,6 +204,10 @@ class ContractScanner:
                     bias_state=bias_state,
                     signal_conflict_flags=signal_conflict_flags,
                 )
+                trend_confirmation_status = _trend_confirmation_status(
+                    bias_state=bias_state,
+                    feasibility=feasibility,
+                )
                 feasibility_skip_reason = _feasibility_skip_reason(
                     bias_state=bias_state,
                     feasibility=feasibility,
@@ -217,17 +230,21 @@ class ContractScanner:
                             side_needs_cross=feasibility.side_needs_cross,
                             feasibility_status=feasibility.feasibility_status,
                             reversal_confirmation_status=reversal_confirmation_status,
+                            trend_confirmation_status=trend_confirmation_status,
                             signal_conflict_flags=signal_conflict_flags,
+                            scanner_score_downgrade_reasons=(),
                         )
                     )
                     continue
                 midpoint = ((ticker_state.yes_bid_dollars + ticker_state.yes_ask_dollars) / TWO_DECIMAL).quantize(
                     Decimal("0.001")
                 )
-                score_confidence = _scanner_score_confidence(
+                score_confidence, score_downgrade_reasons = _scanner_score_confidence(
+                    product_id=product_id,
                     bias_state=bias_state,
                     feasibility=feasibility,
                     reversal_confirmation_status=reversal_confirmation_status,
+                    trend_confirmation_status=trend_confirmation_status,
                     signal_conflict_flags=signal_conflict_flags,
                 )
                 score = score_contract(
@@ -268,8 +285,10 @@ class ContractScanner:
                         side_needs_cross=feasibility.side_needs_cross,
                         feasibility_status=feasibility.feasibility_status,
                         reversal_confirmation_status=reversal_confirmation_status,
+                        trend_confirmation_status=trend_confirmation_status,
                         signal_conflict_flags=signal_conflict_flags,
                         scanner_score_confidence=score_confidence,
+                        scanner_score_downgrade_reasons=score_downgrade_reasons,
                         contract_open_time=_optional_str_metadata(metadata, "open_time"),
                         contract_close_time=_optional_str_metadata(metadata, "close_time"),
                         contract_time_remaining_seconds=feasibility.time_remaining_seconds,
@@ -540,36 +559,96 @@ def _reversal_confirmation_status(
     return "confirmed"
 
 
+def _trend_confirmation_status(
+    *,
+    bias_state,
+    feasibility: TargetFeasibility,
+) -> str:
+    if bias_state.structure != "trend":
+        return "not_trend"
+    recent_return_bps = getattr(bias_state, "recent_return_bps", None)
+    if recent_return_bps is None:
+        return "recent_return_missing"
+    lookback_return_bps = getattr(bias_state, "lookback_return_bps", None)
+    if lookback_return_bps is None:
+        return "lookback_return_missing"
+    recent_return = Decimal(str(recent_return_bps))
+    lookback_return = Decimal(str(lookback_return_bps))
+    direction_sign = _direction_sign(bias_state.direction)
+    if _sign(recent_return) != direction_sign:
+        return "recent_direction_mismatch"
+    if _sign(lookback_return) != direction_sign:
+        return "lookback_direction_mismatch"
+    if abs(recent_return) < TREND_MIN_RECENT_RETURN_BPS:
+        return "weak_recent_return"
+    if (
+        feasibility.side_needs_cross
+        and feasibility.distance_to_target_bps is not None
+        and feasibility.distance_to_target_bps > NEEDS_CROSS_SOFT_DISTANCE_BPS
+    ):
+        return "large_cross_required"
+    return "confirmed"
+
+
 def _feasibility_skip_reason(
     *,
     bias_state,
     feasibility: TargetFeasibility,
     signal_conflict_flags: tuple[tuple[str, bool], ...],
 ) -> str | None:
-    if feasibility.feasibility_status != "unrealistic_late_cross":
+    if not feasibility.side_needs_cross:
         return None
+    if feasibility.feasibility_status == "unrealistic_late_cross":
+        if (
+            bias_state.structure == "reversal"
+            and dict(signal_conflict_flags).get("impulse_direction_conflict")
+        ):
+            return "signal_conflict_unrealistic_reversal"
+        return "target_feasibility_unrealistic_late_cross"
     if (
-        bias_state.structure == "reversal"
-        and dict(signal_conflict_flags).get("impulse_direction_conflict")
+        feasibility.distance_to_target_bps is not None
+        and feasibility.distance_to_target_bps > NEEDS_CROSS_HARD_DISTANCE_BPS
     ):
-        return "signal_conflict_unrealistic_reversal"
-    return "target_feasibility_unrealistic_late_cross"
+        return "target_feasibility_distance_too_far"
+    if (
+        feasibility.required_bps_per_minute is not None
+        and feasibility.required_bps_per_minute
+        > NEEDS_CROSS_HARD_REQUIRED_BPS_PER_MINUTE
+    ):
+        return "target_feasibility_required_move_too_fast"
+    return None
 
 
 def _scanner_score_confidence(
     *,
+    product_id: str,
     bias_state,
     feasibility: TargetFeasibility,
     reversal_confirmation_status: str,
+    trend_confirmation_status: str,
     signal_conflict_flags: tuple[tuple[str, bool], ...],
-) -> int:
+) -> tuple[int, tuple[str, ...]]:
     confidence = int(bias_state.confidence)
+    downgrade_reasons: list[str] = []
     if dict(signal_conflict_flags).get("impulse_direction_conflict"):
         confidence = min(confidence, SCORE_DOWNGRADE_NEEDS_CROSS_CONFIDENCE)
-    if feasibility.side_needs_cross:
+        downgrade_reasons.append("impulse_direction_conflict")
+    if (
+        feasibility.side_needs_cross
+        and feasibility.distance_to_target_bps is not None
+        and feasibility.distance_to_target_bps > NEEDS_CROSS_SOFT_DISTANCE_BPS
+    ):
+        confidence = min(confidence, SCORE_DOWNGRADE_SOFT_NEEDS_CROSS_CONFIDENCE)
+        downgrade_reasons.append("needs_cross_distance_over_soft_limit")
+    elif feasibility.side_needs_cross:
         confidence = min(confidence, SCORE_DOWNGRADE_NEEDS_CROSS_CONFIDENCE)
+        downgrade_reasons.append("needs_cross")
+    if product_id == "HYPE-USD" and feasibility.side_needs_cross:
+        confidence = min(confidence, SCORE_DOWNGRADE_SOFT_NEEDS_CROSS_CONFIDENCE)
+        downgrade_reasons.append("hype_needs_cross_caution")
     if bias_state.structure == "reversal" and feasibility.feasibility_status == "target_price_missing":
         confidence = min(confidence, SCORE_DOWNGRADE_NEEDS_CROSS_CONFIDENCE)
+        downgrade_reasons.append("reversal_target_price_missing")
     if reversal_confirmation_status in {
         "recent_return_missing",
         "recent_direction_mismatch",
@@ -577,7 +656,18 @@ def _scanner_score_confidence(
         "impulse_direction_conflict",
     }:
         confidence = min(confidence, SCORE_DOWNGRADE_CONFLICT_CONFIDENCE)
-    return confidence
+        downgrade_reasons.append(f"reversal_{reversal_confirmation_status}")
+    if trend_confirmation_status in {
+        "recent_return_missing",
+        "lookback_return_missing",
+        "recent_direction_mismatch",
+        "lookback_direction_mismatch",
+        "weak_recent_return",
+        "large_cross_required",
+    }:
+        confidence = min(confidence, SCORE_DOWNGRADE_CONFLICT_CONFIDENCE)
+        downgrade_reasons.append(f"trend_{trend_confirmation_status}")
+    return confidence, tuple(dict.fromkeys(downgrade_reasons))
 
 
 def _direction_sign(direction: str) -> int:

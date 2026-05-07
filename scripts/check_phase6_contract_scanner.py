@@ -88,6 +88,13 @@ def _run_fixtures(scanner: ContractScanner) -> list[str]:
     failures.extend(_validate_exhaustion_impulse_unchanged(scanner))
     failures.extend(_validate_target_feasibility_diagnostics())
     failures.extend(_validate_unrealistic_late_cross_skips())
+    failures.extend(_validate_needs_cross_soft_distance_downgrades())
+    failures.extend(_validate_needs_cross_hard_distance_skips())
+    failures.extend(_validate_required_bps_per_minute_skips())
+    failures.extend(_validate_currently_itm_not_feasibility_downgraded())
+    failures.extend(_validate_trend_confirmation_downgrades_without_reclassification())
+    failures.extend(_validate_confirmed_trend_keeps_score_confidence())
+    failures.extend(_validate_hype_needs_cross_caution_downgrades())
     failures.extend(_validate_weak_reversal_score_downgrade(scanner))
     failures.extend(_validate_impulse_direction_conflict_downgrade(scanner))
     return failures
@@ -508,6 +515,244 @@ def _validate_unrealistic_late_cross_skips() -> list[str]:
     if ("KXBTC-1", "target_feasibility_unrealistic_late_cross") not in reasons:
         return [f"unrealistic late cross skip mismatch: {reasons}"]
     return []
+
+
+def _validate_needs_cross_soft_distance_downgrades() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=10),
+                "target_price": Decimal("100.06"),
+                "target_price_source": "target_price",
+            }
+        },
+    )
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        latest_price=Decimal("100"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    failures: list[str] = []
+    if snapshot.skipped_contracts:
+        failures.append(f"soft needs-cross skipped={snapshot.skipped_contracts}")
+        return failures
+    contract = snapshot.ranked_contracts[0]
+    if contract.distance_to_target_bps != Decimal("6.000"):
+        failures.append(f"soft needs-cross distance={contract.distance_to_target_bps}")
+    if contract.score.confidence != 30:
+        failures.append(f"soft needs-cross score={contract.score.confidence}")
+    if "needs_cross_distance_over_soft_limit" not in contract.scanner_score_downgrade_reasons:
+        failures.append(
+            "soft needs-cross reasons="
+            f"{contract.scanner_score_downgrade_reasons}"
+        )
+    return failures
+
+
+def _validate_needs_cross_hard_distance_skips() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=20),
+                "target_price": Decimal("100.11"),
+                "target_price_source": "target_price",
+            }
+        },
+    )
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        latest_price=Decimal("100"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    reasons = {(item.market_ticker, item.reason) for item in snapshot.skipped_contracts}
+    if ("KXBTC-1", "target_feasibility_distance_too_far") not in reasons:
+        return [f"hard distance skip mismatch: {reasons}"]
+    skipped = snapshot.skipped_contracts[0]
+    if skipped.distance_to_target_bps != Decimal("11.000"):
+        return [f"hard distance bps={skipped.distance_to_target_bps}"]
+    return []
+
+
+def _validate_required_bps_per_minute_skips() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=2),
+                "target_price": Decimal("100.05"),
+                "target_price_source": "target_price",
+            }
+        },
+    )
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        latest_price=Decimal("100"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    reasons = {(item.market_ticker, item.reason) for item in snapshot.skipped_contracts}
+    if ("KXBTC-1", "target_feasibility_required_move_too_fast") not in reasons:
+        return [f"required move skip mismatch: {reasons}"]
+    return []
+
+
+def _validate_currently_itm_not_feasibility_downgraded() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=5),
+                "target_price": Decimal("99"),
+                "target_price_source": "target_price",
+            }
+        },
+    )
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        confidence=70,
+        latest_price=Decimal("100"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    contract = snapshot.ranked_contracts[0]
+    if contract.score.confidence != 70:
+        return [f"currently-itm score={contract.score.confidence}"]
+    if contract.scanner_score_downgrade_reasons:
+        return [f"currently-itm downgrade reasons={contract.scanner_score_downgrade_reasons}"]
+    return []
+
+
+def _validate_trend_confirmation_downgrades_without_reclassification() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=5),
+                "target_price": Decimal("99"),
+                "target_price_source": "target_price",
+            }
+        },
+    )
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        confidence=70,
+        structure="trend",
+        recent_return_bps=Decimal("8.000"),
+        lookback_return_bps=Decimal("60.000"),
+        latest_price=Decimal("100"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    contract = snapshot.ranked_contracts[0]
+    failures: list[str] = []
+    if contract.structure != "trend":
+        failures.append(f"weak trend structure={contract.structure}")
+    if contract.confidence != 70:
+        failures.append(f"weak trend raw confidence={contract.confidence}")
+    if contract.trend_confirmation_status != "weak_recent_return":
+        failures.append(f"weak trend status={contract.trend_confirmation_status}")
+    if contract.score.confidence != 30:
+        failures.append(f"weak trend score={contract.score.confidence}")
+    return failures
+
+
+def _validate_confirmed_trend_keeps_score_confidence() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=5),
+                "target_price": Decimal("99"),
+                "target_price_source": "target_price",
+            }
+        },
+    )
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        confidence=70,
+        structure="trend",
+        recent_return_bps=Decimal("20.000"),
+        lookback_return_bps=Decimal("60.000"),
+        latest_price=Decimal("100"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    contract = snapshot.ranked_contracts[0]
+    if contract.trend_confirmation_status != "confirmed":
+        return [f"confirmed trend status={contract.trend_confirmation_status}"]
+    if contract.score.confidence != 70:
+        return [f"confirmed trend score={contract.score.confidence}"]
+    return []
+
+
+def _validate_hype_needs_cross_caution_downgrades() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"HYPE-USD": ("KXHYPE-1",)},
+        market_metadata_by_ticker={
+            "KXHYPE-1": {
+                "close_time": _future_iso(minutes=10),
+                "target_price": Decimal("100.04"),
+                "target_price_source": "target_price",
+            }
+        },
+    )
+    bias_snapshot = BiasSnapshot(
+        products={
+            "HYPE-USD": replace(
+                _base_bias_snapshot().products["BTC-USD"],
+                product_id="HYPE-USD",
+                latest_price=Decimal("100"),
+            )
+        }
+    )
+    market_snapshot = MarketStateSnapshot(
+        tickers={
+            "KXHYPE-1": replace(
+                _base_market_snapshot().tickers["KXBTC-1"],
+                market_ticker="KXHYPE-1",
+            )
+        },
+        orderbooks={},
+        last_sequence_by_sid={},
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=market_snapshot,
+    )
+    if snapshot.skipped_contracts:
+        return [f"HYPE needs-cross skipped={snapshot.skipped_contracts}"]
+    contract = snapshot.ranked_contracts[0]
+    failures: list[str] = []
+    if contract.score.confidence != 30:
+        failures.append(f"HYPE needs-cross score={contract.score.confidence}")
+    if "hype_needs_cross_caution" not in contract.scanner_score_downgrade_reasons:
+        failures.append(
+            "HYPE downgrade reasons="
+            f"{contract.scanner_score_downgrade_reasons}"
+        )
+    return failures
 
 
 def _validate_weak_reversal_score_downgrade(scanner: ContractScanner) -> list[str]:

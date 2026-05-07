@@ -56,6 +56,9 @@ def main() -> int:
     failures.extend(_validate_end_window_allows_late_contract())
     failures.extend(_validate_end_window_skips_missing_close_time())
     failures.extend(_validate_direct_contract_scan_count_below_one_skip())
+    failures.extend(_validate_flip_persistence_allows_same_direction())
+    failures.extend(_validate_flip_persistence_blocks_recent_opposite_direction())
+    failures.extend(_validate_flip_persistence_allows_itm_persistent_opposite_direction())
 
     if failures:
         for failure in failures:
@@ -238,8 +241,11 @@ def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
                 "side_needs_cross": False,
                 "feasibility_status": "currently_itm",
                 "reversal_confirmation_status": "not_reversal",
+                "trend_confirmation_status": "confirmed",
                 "signal_conflict_flags": {"impulse_direction_conflict": False},
                 "scanner_score_confidence": 70,
+                "scanner_score_downgrade_reasons": [],
+                "flip_persistence_status": "no_recent_entry",
                 "contract_open_time": "2026-04-23T11:45:00+00:00",
                 "yes_bid": "0.09",
                 "yes_ask": "0.10",
@@ -574,6 +580,127 @@ def _validate_end_window_skips_missing_close_time() -> list[str]:
         return failures
 
 
+def _validate_flip_persistence_allows_same_direction() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        coordinator = _coordinator(
+            Path(temp_dir),
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        first = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(_contract(market_ticker="KXBTC15M-FLIP-1")),
+            cycle_number=49,
+        )
+        second = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(_contract(market_ticker="KXBTC15M-FLIP-2")),
+            cycle_number=50,
+        )
+        failures: list[str] = []
+        if len(first) != 1 or len(second) != 1:
+            failures.append(f"same-direction intent counts={len(first)}/{len(second)}")
+        payloads = _event_payloads(
+            _jsonl_records(Path(temp_dir) / "runtime.jsonl"),
+            event_type="live_intent_created",
+        )
+        if len(payloads) < 2:
+            failures.append("same-direction intent logs missing")
+        elif payloads[-1].get("flip_persistence_status") != "same_direction":
+            failures.append(
+                "same-direction flip status="
+                f"{payloads[-1].get('flip_persistence_status')}"
+            )
+        return failures
+
+
+def _validate_flip_persistence_blocks_recent_opposite_direction() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(_contract(market_ticker="KXBTC15M-FLIP-UP")),
+            cycle_number=51,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    market_ticker="KXBTC15M-FLIP-DOWN",
+                    direction="down",
+                    side_currently_itm=False,
+                    side_needs_cross=True,
+                    recent_return_bps=Decimal("-20.000"),
+                    impulse_return_bps=Decimal("-18.000"),
+                )
+            ),
+            cycle_number=52,
+        )
+        failures: list[str] = []
+        if intents:
+            failures.append(f"opposite blocked intents={intents} expected empty")
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            failures.append("opposite blocked skip log missing")
+            return failures
+        if payload.get("reason") != "flip_persistence_blocked":
+            failures.append(f"opposite blocked reason={payload.get('reason')}")
+        if payload.get("flip_persistence_status") != "blocked_recent_flip_not_itm":
+            failures.append(
+                "opposite blocked status="
+                f"{payload.get('flip_persistence_status')}"
+            )
+        return failures
+
+
+def _validate_flip_persistence_allows_itm_persistent_opposite_direction() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(_contract(market_ticker="KXBTC15M-FLIP-UP-ALLOW")),
+            cycle_number=53,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    market_ticker="KXBTC15M-FLIP-DOWN-ALLOW",
+                    direction="down",
+                    side_currently_itm=True,
+                    side_needs_cross=False,
+                    recent_return_bps=Decimal("-20.000"),
+                    lookback_return_bps=Decimal("-25.000"),
+                    impulse_direction="down",
+                    impulse_return_bps=Decimal("-18.000"),
+                )
+            ),
+            cycle_number=54,
+        )
+        failures: list[str] = []
+        if len(intents) != 1:
+            failures.append(f"opposite allow intents={len(intents)} expected=1")
+            return failures
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_intent_created",
+        )
+        if payload is None:
+            failures.append("opposite allow intent log missing")
+            return failures
+        expected_status = "opposite_direction_allowed_crossed_and_persistent"
+        if payload.get("flip_persistence_status") != expected_status:
+            failures.append(
+                "opposite allow status="
+                f"{payload.get('flip_persistence_status')} expected={expected_status}"
+            )
+        return failures
+
+
 def _coordinator(
     temp_path: Path,
     settings: "_Settings | None" = None,
@@ -604,6 +731,12 @@ def _contract(
     confidence: int = 70,
     midpoint: Decimal = Decimal("0.10"),
     contract_close_time: str | None = None,
+    side_currently_itm: bool = True,
+    side_needs_cross: bool = False,
+    recent_return_bps: Decimal = Decimal("20.000"),
+    lookback_return_bps: Decimal = Decimal("25.000"),
+    impulse_direction: str | None = "up",
+    impulse_return_bps: Decimal | None = Decimal("18.000"),
 ) -> ScannedContract:
     return ScannedContract(
         product_id=product_id,
@@ -624,10 +757,10 @@ def _contract(
         ),
         latest_price=Decimal("100.00"),
         observation_count=25,
-        recent_return_bps=Decimal("20.000"),
-        lookback_return_bps=Decimal("25.000"),
-        impulse_direction="up",
-        impulse_return_bps=Decimal("18.000"),
+        recent_return_bps=recent_return_bps,
+        lookback_return_bps=lookback_return_bps,
+        impulse_direction=impulse_direction,
+        impulse_return_bps=impulse_return_bps,
         impulse_detected=True,
         risk_flags=(
             ("insufficient_history", False),
@@ -639,12 +772,14 @@ def _contract(
         distance_to_target=Decimal("-1.00"),
         distance_to_target_bps=Decimal("-100.000"),
         required_bps_per_minute=Decimal("0.000"),
-        side_currently_itm=True,
-        side_needs_cross=False,
+        side_currently_itm=side_currently_itm,
+        side_needs_cross=side_needs_cross,
         feasibility_status="currently_itm",
         reversal_confirmation_status="not_reversal",
+        trend_confirmation_status="confirmed",
         signal_conflict_flags=(("impulse_direction_conflict", False),),
         scanner_score_confidence=confidence,
+        scanner_score_downgrade_reasons=(),
         contract_open_time="2026-04-23T11:45:00+00:00",
         contract_close_time=contract_close_time,
         contract_time_remaining_seconds=120,
@@ -752,6 +887,35 @@ def _first_event_payload(
         if isinstance(payload, dict):
             return payload
     return None
+
+
+def _last_event_payload(
+    records: tuple[dict[str, object], ...],
+    *,
+    event_type: str,
+) -> dict[str, object] | None:
+    for record in reversed(records):
+        if record.get("event_type") != event_type:
+            continue
+        payload = record.get("payload")
+        if isinstance(payload, dict):
+            return payload
+    return None
+
+
+def _event_payloads(
+    records: tuple[dict[str, object], ...],
+    *,
+    event_type: str,
+) -> tuple[dict[str, object], ...]:
+    payloads: list[dict[str, object]] = []
+    for record in records:
+        if record.get("event_type") != event_type:
+            continue
+        payload = record.get("payload")
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return tuple(payloads)
 
 
 def _future_time(*, minutes: int) -> str:
