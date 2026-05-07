@@ -664,7 +664,7 @@ class LiveExecutionSmokeTester:
             order=order,
             poll_attempts=settings.live_validation_poll_attempts,
             poll_interval_seconds=settings.live_validation_poll_interval_seconds,
-            risk_manager=RiskManager.from_settings(settings),
+            risk_manager=RiskManager.from_live_settings(settings),
         )
 
     def run(self) -> LiveValidationSnapshot:

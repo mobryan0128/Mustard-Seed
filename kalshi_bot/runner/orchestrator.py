@@ -1010,23 +1010,10 @@ def _empty_simulation_snapshot() -> SimulationSnapshot:
 
 
 def _live_runner_risk_manager_from_settings(settings: KalshiSettings) -> RiskManager:
-    return RiskManager(
+    return RiskManager.from_live_settings(
+        settings,
         live_validation_enabled=True,
-        live_trading_enabled=settings.live_trading_enabled,
-        live_kill_switch_active=settings.live_kill_switch_active,
-        env=settings.env,
         live_validation_env="prod",
-        max_live_order_count=1000,
-        required_time_in_force=settings.live_validation_time_in_force,
-        account_balance_dollars=settings.risk_account_balance_dollars,
-        min_percent_per_trade=settings.risk_min_percent_per_trade,
-        max_percent_per_trade=settings.risk_max_percent_per_trade,
-        min_stake_dollars=settings.risk_min_stake_dollars,
-        max_stake_dollars=settings.risk_max_stake_dollars,
-        max_open_positions=settings.risk_max_open_positions,
-        max_total_exposure_dollars=settings.risk_max_total_exposure_dollars,
-        daily_loss_limit_dollars=settings.risk_daily_loss_limit_dollars,
-        risk_kill_switch_active=settings.risk_kill_switch_active,
     )
 
 

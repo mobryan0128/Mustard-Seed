@@ -1187,11 +1187,13 @@ class LiveExecutionCoordinator:
     ) -> bool:
         if not self._has_live_position_exposure_state():
             return False
-        if self._live_open_position_count() >= self._settings.risk_max_open_positions:
+        if self._live_open_position_count() >= _live_max_open_positions_from_settings(
+            self._settings
+        ):
             return True
         if (
             self._live_current_exposure_dollars()
-            >= self._settings.risk_max_total_exposure_dollars
+            >= _live_max_exposure_dollars_from_settings(self._settings)
         ):
             return True
         if market_snapshot is None:
@@ -1383,7 +1385,7 @@ class LiveExecutionCoordinator:
 
 def _risk_manager_from_settings(settings: KalshiSettings) -> RiskManager:
     if hasattr(settings, "live_validation_enabled"):
-        return RiskManager.from_settings(settings)
+        return RiskManager.from_live_settings(settings)
     return RiskManager(
         live_validation_enabled=False,
         live_trading_enabled=False,
@@ -1391,6 +1393,20 @@ def _risk_manager_from_settings(settings: KalshiSettings) -> RiskManager:
         env="demo",
         live_validation_env="demo",
     )
+
+
+def _live_max_exposure_dollars_from_settings(settings: KalshiSettings) -> Decimal:
+    live_value = getattr(settings, "live_max_exposure_dollars", None)
+    if live_value is not None:
+        return Decimal(str(live_value))
+    return Decimal(str(getattr(settings, "risk_max_total_exposure_dollars")))
+
+
+def _live_max_open_positions_from_settings(settings: KalshiSettings) -> int:
+    live_value = getattr(settings, "live_max_open_positions", None)
+    if live_value is not None:
+        return int(live_value)
+    return int(getattr(settings, "risk_max_open_positions"))
 
 
 def _replay_engine_from_settings(settings: KalshiSettings) -> ReplayEngine | None:

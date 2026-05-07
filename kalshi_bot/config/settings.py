@@ -67,6 +67,7 @@ DEFAULT_LIVE_VALIDATION_CLIENT_ORDER_ID_PREFIX = "live-smoke"
 DEFAULT_LIVE_TRADING_ENABLED = False
 DEFAULT_LIVE_KILL_SWITCH_ACTIVE = False
 DEFAULT_LIVE_RUNNER_EXECUTION_ENABLED = False
+DEFAULT_LIVE_MAX_CONTRACT_COUNT = 1000
 DEFAULT_LIVE_PROFIT_CAPTURE_ENABLED = False
 DEFAULT_LIVE_PROFIT_CAPTURE_PRICE = Decimal("0.99")
 DEFAULT_LIVE_TRAILING_STOP_ENABLED = False
@@ -167,6 +168,11 @@ class KalshiSettings:
     live_trading_enabled: bool
     live_kill_switch_active: bool
     live_runner_execution_enabled: bool
+    live_max_exposure_dollars: Decimal
+    live_min_stake_dollars: Decimal
+    live_max_stake_dollars: Decimal
+    live_max_open_positions: int
+    live_max_contract_count: int
     live_profit_capture_enabled: bool
     live_profit_capture_price: Decimal
     live_trailing_stop_enabled: bool
@@ -409,6 +415,36 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         DEFAULT_LIVE_RUNNER_EXECUTION_ENABLED,
         "LIVE_RUNNER_EXECUTION_ENABLED",
     )
+    live_max_exposure_dollars = _parse_positive_decimal(
+        values.get("LIVE_MAX_EXPOSURE_DOLLARS"),
+        risk_max_total_exposure_dollars,
+        "LIVE_MAX_EXPOSURE_DOLLARS",
+    )
+    live_min_stake_dollars = _parse_positive_decimal(
+        values.get("LIVE_MIN_STAKE_DOLLARS"),
+        risk_min_stake_dollars,
+        "LIVE_MIN_STAKE_DOLLARS",
+    )
+    live_max_stake_dollars = _parse_positive_decimal(
+        values.get("LIVE_MAX_STAKE_DOLLARS"),
+        risk_max_stake_dollars,
+        "LIVE_MAX_STAKE_DOLLARS",
+    )
+    if live_min_stake_dollars > live_max_stake_dollars:
+        raise SettingsError(
+            "LIVE_MIN_STAKE_DOLLARS must be less than or equal to "
+            "LIVE_MAX_STAKE_DOLLARS."
+        )
+    live_max_open_positions = _parse_positive_int(
+        values.get("LIVE_MAX_OPEN_POSITIONS"),
+        risk_max_open_positions,
+        "LIVE_MAX_OPEN_POSITIONS",
+    )
+    live_max_contract_count = _parse_positive_int(
+        values.get("LIVE_MAX_CONTRACT_COUNT"),
+        DEFAULT_LIVE_MAX_CONTRACT_COUNT,
+        "LIVE_MAX_CONTRACT_COUNT",
+    )
     live_profit_capture_enabled = _parse_bool(
         values.get("LIVE_PROFIT_CAPTURE_ENABLED"),
         DEFAULT_LIVE_PROFIT_CAPTURE_ENABLED,
@@ -640,6 +676,11 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_trading_enabled=live_trading_enabled,
         live_kill_switch_active=live_kill_switch_active,
         live_runner_execution_enabled=live_runner_execution_enabled,
+        live_max_exposure_dollars=live_max_exposure_dollars,
+        live_min_stake_dollars=live_min_stake_dollars,
+        live_max_stake_dollars=live_max_stake_dollars,
+        live_max_open_positions=live_max_open_positions,
+        live_max_contract_count=live_max_contract_count,
         live_profit_capture_enabled=live_profit_capture_enabled,
         live_profit_capture_price=live_profit_capture_price,
         live_trailing_stop_enabled=live_trailing_stop_enabled,
@@ -763,6 +804,11 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_TRADING_ENABLED",
         "LIVE_KILL_SWITCH_ACTIVE",
         "LIVE_RUNNER_EXECUTION_ENABLED",
+        "LIVE_MAX_EXPOSURE_DOLLARS",
+        "LIVE_MIN_STAKE_DOLLARS",
+        "LIVE_MAX_STAKE_DOLLARS",
+        "LIVE_MAX_OPEN_POSITIONS",
+        "LIVE_MAX_CONTRACT_COUNT",
         "LIVE_PROFIT_CAPTURE_ENABLED",
         "LIVE_PROFIT_CAPTURE_PRICE",
         "LIVE_TRAILING_STOP_ENABLED",

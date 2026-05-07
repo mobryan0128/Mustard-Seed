@@ -69,6 +69,7 @@ def main() -> int:
     failures.extend(_validate_live_runner_blocked_submission_logged())
     failures.extend(_validate_live_runner_starts_without_simulation())
     failures.extend(_validate_live_runner_risk_does_not_require_live_validation())
+    failures.extend(_validate_live_runner_uses_live_risk_overrides())
 
     if failures:
         for failure in failures:
@@ -786,6 +787,65 @@ def _validate_live_runner_risk_does_not_require_live_validation() -> list[str]:
     return []
 
 
+def _validate_live_runner_uses_live_risk_overrides() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        settings = replace(
+            _settings(
+                Path(temp_dir),
+                live_flags_present=False,
+                live_runner_execution_enabled=True,
+                simulation_enabled=False,
+                fail_fast_on_startup=True,
+            ),
+            env="prod",
+            live_validation_enabled=False,
+            live_trading_enabled=True,
+            live_kill_switch_active=False,
+            live_min_stake_dollars=Decimal("2"),
+            live_max_stake_dollars=Decimal("4"),
+            live_max_exposure_dollars=Decimal("2.50"),
+            live_max_open_positions=1,
+            live_max_contract_count=2,
+        )
+        risk_manager = _live_runner_risk_manager_from_settings(settings)
+        entry_decision = risk_manager.evaluate_entry_risk(
+            product_id="BTC-USD",
+            confidence=40,
+            open_position_count=0,
+            current_exposure_dollars=Decimal("1"),
+            realized_daily_pnl_dollars=Decimal("0"),
+        )
+        count_decision = risk_manager.evaluate_live_order(
+            KalshiOrderRequest(
+                ticker="KXBTC15M-TEST",
+                action="buy",
+                side="yes",
+                count=3,
+                price_dollars=Decimal("0.50"),
+                time_in_force="immediate_or_cancel",
+                client_order_id="live-runner-count-cap",
+            )
+        )
+        open_position_decision = risk_manager.evaluate_entry_risk(
+            product_id="BTC-USD",
+            confidence=40,
+            open_position_count=1,
+            current_exposure_dollars=Decimal("0"),
+            realized_daily_pnl_dollars=Decimal("0"),
+        )
+    failures: list[str] = []
+    if entry_decision.allowed or entry_decision.reason != "risk_max_total_exposure":
+        failures.append(f"live override entry decision={entry_decision}")
+    if (
+        open_position_decision.allowed
+        or open_position_decision.reason != "risk_max_open_positions"
+    ):
+        failures.append(f"live override max open decision={open_position_decision}")
+    if count_decision.allow or count_decision.reason != "order_count_exceeds_phase10_cap":
+        failures.append(f"live override count decision={count_decision}")
+    return failures
+
+
 def _build_runner(
     *,
     stop_after_first_cycle: bool = False,
@@ -941,6 +1001,11 @@ def _settings(
         live_trading_enabled=live_flags_present,
         live_kill_switch_active=False,
         live_runner_execution_enabled=live_runner_execution_enabled,
+        live_max_exposure_dollars=Decimal("10"),
+        live_min_stake_dollars=Decimal("0.10"),
+        live_max_stake_dollars=Decimal("3"),
+        live_max_open_positions=2,
+        live_max_contract_count=1000,
         live_profit_capture_enabled=False,
         live_profit_capture_price=Decimal("0.99"),
         live_trailing_stop_enabled=False,

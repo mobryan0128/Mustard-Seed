@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from decimal import Decimal
 from pathlib import Path
@@ -49,6 +50,10 @@ def _run_offline() -> int:
     failures.extend(_validate_count_cap_denial())
     failures.extend(_validate_ioc_denial())
     failures.extend(_validate_allowed_flow())
+    failures.extend(_validate_live_risk_settings_fallback_to_risk_defaults())
+    failures.extend(_validate_live_risk_settings_parse())
+    failures.extend(_validate_invalid_live_stake_bounds())
+    failures.extend(_validate_live_contract_count_cap_from_settings())
 
     if failures:
         for failure in failures:
@@ -159,6 +164,134 @@ def _validate_allowed_flow() -> list[str]:
     if not state.log_written or not state.replay_written:
         failures.append("allowed flow did not write log/replay artifacts")
     return failures
+
+
+def _validate_live_risk_settings_fallback_to_risk_defaults() -> list[str]:
+    settings = _load_settings_from_text(
+        """
+KALSHI_ENV=demo
+KALSHI_API_KEY_ID=demo-key
+KALSHI_PRIVATE_KEY_PEM=pem
+RISK_MIN_STAKE_DOLLARS=0.10
+RISK_MAX_STAKE_DOLLARS=3
+RISK_MAX_TOTAL_EXPOSURE_DOLLARS=10
+"""
+    )
+    failures: list[str] = []
+    if settings.live_min_stake_dollars != settings.risk_min_stake_dollars:
+        failures.append(
+            "live min fallback="
+            f"{settings.live_min_stake_dollars}/{settings.risk_min_stake_dollars}"
+        )
+    if settings.live_max_stake_dollars != settings.risk_max_stake_dollars:
+        failures.append(
+            "live max fallback="
+            f"{settings.live_max_stake_dollars}/{settings.risk_max_stake_dollars}"
+        )
+    if settings.live_max_exposure_dollars != settings.risk_max_total_exposure_dollars:
+        failures.append(
+            "live exposure fallback="
+            f"{settings.live_max_exposure_dollars}/"
+            f"{settings.risk_max_total_exposure_dollars}"
+        )
+    if settings.live_max_open_positions != settings.risk_max_open_positions:
+        failures.append(
+            "live max open fallback="
+            f"{settings.live_max_open_positions}/{settings.risk_max_open_positions}"
+        )
+    if settings.live_max_contract_count != 1000:
+        failures.append(f"live count fallback={settings.live_max_contract_count}")
+    return failures
+
+
+def _validate_live_risk_settings_parse() -> list[str]:
+    settings = _load_settings_from_text(
+        """
+KALSHI_ENV=demo
+KALSHI_API_KEY_ID=demo-key
+KALSHI_PRIVATE_KEY_PEM=pem
+RISK_ACCOUNT_BALANCE_DOLLARS=10
+RISK_MIN_PERCENT_PER_TRADE=0.01
+RISK_MAX_PERCENT_PER_TRADE=0.03
+RISK_MIN_STAKE_DOLLARS=0.10
+RISK_MAX_STAKE_DOLLARS=3
+RISK_MAX_TOTAL_EXPOSURE_DOLLARS=10
+LIVE_MIN_STAKE_DOLLARS=2
+LIVE_MAX_STAKE_DOLLARS=4
+LIVE_MAX_EXPOSURE_DOLLARS=8
+LIVE_MAX_OPEN_POSITIONS=1
+LIVE_MAX_CONTRACT_COUNT=2
+"""
+    )
+    failures: list[str] = []
+    if settings.risk_min_stake_dollars != Decimal("0.10"):
+        failures.append(f"generic min stake changed={settings.risk_min_stake_dollars}")
+    if settings.live_min_stake_dollars != Decimal("2"):
+        failures.append(f"live min stake={settings.live_min_stake_dollars}")
+    if settings.live_max_stake_dollars != Decimal("4"):
+        failures.append(f"live max stake={settings.live_max_stake_dollars}")
+    if settings.live_max_exposure_dollars != Decimal("8"):
+        failures.append(f"live max exposure={settings.live_max_exposure_dollars}")
+    if settings.live_max_open_positions != 1:
+        failures.append(f"live max open={settings.live_max_open_positions}")
+    if settings.live_max_contract_count != 2:
+        failures.append(f"live max count={settings.live_max_contract_count}")
+
+    generic_manager = RiskManager.from_settings(settings)
+    live_manager = RiskManager.from_live_settings(settings)
+    if generic_manager.compute_stake_from_confidence(40) != Decimal("0.10"):
+        failures.append("generic manager did not preserve RISK min stake")
+    if live_manager.compute_stake_from_confidence(40) != Decimal("2"):
+        failures.append("live manager did not use LIVE min stake")
+    open_position_decision = live_manager.evaluate_entry_risk(
+        product_id="BTC-USD",
+        confidence=40,
+        open_position_count=1,
+        current_exposure_dollars=Decimal("0"),
+        realized_daily_pnl_dollars=Decimal("0"),
+    )
+    if open_position_decision.allowed or open_position_decision.reason != "risk_max_open_positions":
+        failures.append(f"live max open decision={open_position_decision}")
+    return failures
+
+
+def _validate_invalid_live_stake_bounds() -> list[str]:
+    from kalshi_bot.config.settings import SettingsError
+
+    try:
+        _load_settings_from_text(
+            """
+KALSHI_ENV=demo
+KALSHI_API_KEY_ID=demo-key
+KALSHI_PRIVATE_KEY_PEM=pem
+LIVE_MIN_STAKE_DOLLARS=5
+LIVE_MAX_STAKE_DOLLARS=4
+"""
+        )
+    except SettingsError:
+        return []
+    return ["invalid live stake bounds did not raise SettingsError"]
+
+
+def _validate_live_contract_count_cap_from_settings() -> list[str]:
+    settings = _load_settings_from_text(
+        """
+KALSHI_ENV=prod
+KALSHI_API_KEY_ID=prod-key
+KALSHI_PRIVATE_KEY_PEM=pem
+LIVE_TRADING_ENABLED=true
+LIVE_MAX_CONTRACT_COUNT=2
+"""
+    )
+    manager = RiskManager.from_live_settings(
+        settings,
+        live_validation_enabled=True,
+        live_validation_env="prod",
+    )
+    decision = manager.evaluate_live_order(_order(count=3))
+    if decision.allow or decision.reason != "order_count_exceeds_phase10_cap":
+        return [f"live count cap decision={decision}"]
+    return []
 
 
 def _assert_denied(*, snapshot, state, expected_reason: str) -> list[str]:
@@ -297,6 +430,43 @@ def _run_live(env_file: str) -> int:
     print(f"order_placed={snapshot.result.order_placed}")
     print(f"balance_fetched={snapshot.result.balance_fetched}")
     return 0
+
+
+def _load_settings_from_text(text: str):
+    from kalshi_bot.config.settings import load_settings
+
+    keys = {
+        "KALSHI_ENV",
+        "KALSHI_API_KEY_ID",
+        "KALSHI_PRIVATE_KEY_PEM",
+        "KALSHI_PRIVATE_KEY_PATH",
+        "RISK_ACCOUNT_BALANCE_DOLLARS",
+        "RISK_MIN_PERCENT_PER_TRADE",
+        "RISK_MAX_PERCENT_PER_TRADE",
+        "RISK_MIN_STAKE_DOLLARS",
+        "RISK_MAX_STAKE_DOLLARS",
+        "RISK_MAX_TOTAL_EXPOSURE_DOLLARS",
+        "LIVE_TRADING_ENABLED",
+        "LIVE_MAX_EXPOSURE_DOLLARS",
+        "LIVE_MIN_STAKE_DOLLARS",
+        "LIVE_MAX_STAKE_DOLLARS",
+        "LIVE_MAX_OPEN_POSITIONS",
+        "LIVE_MAX_CONTRACT_COUNT",
+    }
+    previous = {key: os.environ.get(key) for key in keys}
+    for key in keys:
+        os.environ.pop(key, None)
+    try:
+        with TemporaryDirectory() as temp_dir:
+            env_path = Path(temp_dir) / ".env"
+            env_path.write_text(text.strip() + "\n", encoding="utf-8")
+            return load_settings(env_path)
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 class _FakeKalshiClient:

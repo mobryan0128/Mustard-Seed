@@ -16,6 +16,11 @@ from kalshi_bot.risk.risk_manager import (  # noqa: E402
     compute_stake_from_confidence,
 )
 
+FIXTURE_MIN_STAKE_DOLLARS = Decimal("0.10")
+FIXTURE_MAX_STAKE_DOLLARS = Decimal("3")
+FIXTURE_MIN_PERCENT_PER_TRADE = Decimal("0.01")
+FIXTURE_MAX_PERCENT_PER_TRADE = Decimal("0.03")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="Validate Phase E1 risk model behavior.")
@@ -49,7 +54,7 @@ def _validate_stake_calculation() -> list[str]:
         (80, Decimal("0.30")),
     )
     for confidence, expected in expectations:
-        actual = compute_stake_from_confidence(confidence, Decimal("10"))
+        actual = _fixture_stake_from_confidence(confidence, Decimal("10"))
         if actual != expected:
             failures.append(f"confidence {confidence} stake={actual} expected={expected}")
     return failures
@@ -57,14 +62,25 @@ def _validate_stake_calculation() -> list[str]:
 
 def _validate_stake_clamps() -> list[str]:
     failures: list[str] = []
-    min_clamped = compute_stake_from_confidence(40, Decimal("1"))
+    min_clamped = _fixture_stake_from_confidence(40, Decimal("1"))
     if min_clamped != Decimal("0.10"):
         failures.append(f"min clamp stake={min_clamped} expected=0.10")
 
-    max_clamped = compute_stake_from_confidence(80, Decimal("1000"))
+    max_clamped = _fixture_stake_from_confidence(80, Decimal("1000"))
     if max_clamped != Decimal("3"):
         failures.append(f"max clamp stake={max_clamped} expected=3")
     return failures
+
+
+def _fixture_stake_from_confidence(confidence: int, account_balance: Decimal) -> Decimal:
+    return compute_stake_from_confidence(
+        confidence,
+        account_balance,
+        min_percent_per_trade=FIXTURE_MIN_PERCENT_PER_TRADE,
+        max_percent_per_trade=FIXTURE_MAX_PERCENT_PER_TRADE,
+        min_stake_dollars=FIXTURE_MIN_STAKE_DOLLARS,
+        max_stake_dollars=FIXTURE_MAX_STAKE_DOLLARS,
+    )
 
 
 def _validate_kill_switch_denial() -> list[str]:
@@ -149,10 +165,10 @@ def _risk_manager(
         env="demo",
         live_validation_env="prod",
         account_balance_dollars=Decimal("10"),
-        min_percent_per_trade=Decimal("0.01"),
-        max_percent_per_trade=Decimal("0.03"),
-        min_stake_dollars=Decimal("0.10"),
-        max_stake_dollars=Decimal("3"),
+        min_percent_per_trade=FIXTURE_MIN_PERCENT_PER_TRADE,
+        max_percent_per_trade=FIXTURE_MAX_PERCENT_PER_TRADE,
+        min_stake_dollars=FIXTURE_MIN_STAKE_DOLLARS,
+        max_stake_dollars=FIXTURE_MAX_STAKE_DOLLARS,
         max_open_positions=max_open_positions,
         max_total_exposure_dollars=Decimal("10"),
         daily_loss_limit_dollars=Decimal("5"),
