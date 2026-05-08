@@ -180,6 +180,24 @@ class ContractScanner:
                 if ticker_state is None:
                     continue
                 metadata = self._market_metadata_by_ticker.get(market_ticker, {})
+                stale_skip_reason = _stale_ticker_skip_reason(metadata)
+                if stale_skip_reason is not None:
+                    skipped_contracts.append(
+                        SkippedContract(
+                            product_id=product_id,
+                            market_ticker=market_ticker,
+                            reason=stale_skip_reason,
+                            contract_open_time=_optional_str_metadata(metadata, "open_time"),
+                            contract_close_time=_optional_str_metadata(metadata, "close_time"),
+                            time_remaining_seconds=_market_time_remaining_seconds(
+                                metadata
+                            ),
+                            feasibility_status="time_remaining_elapsed",
+                            end_window_allowed=False,
+                            end_window_reason=stale_skip_reason,
+                        )
+                    )
+                    continue
                 skip_reason = _skip_reason(bias_state, ticker_state)
                 if skip_reason is not None:
                     skipped_contracts.append(
@@ -329,6 +347,47 @@ def _skip_reason(bias_state, ticker_state: TickerState) -> str | None:
     if ticker_state.yes_bid_dollars is None or ticker_state.yes_ask_dollars is None:
         return "missing_best_quote"
     return None
+
+
+def _stale_ticker_skip_reason(metadata: Mapping[str, object]) -> str | None:
+    elapsed_at = _market_elapsed_at(metadata)
+    if elapsed_at is None:
+        return None
+    if elapsed_at <= datetime.now(timezone.utc):
+        return "stale_ticker_blocked"
+    return None
+
+
+def _market_time_remaining_seconds(metadata: Mapping[str, object]) -> int | None:
+    elapsed_at = _market_elapsed_at(metadata)
+    if elapsed_at is None:
+        return None
+    return int((elapsed_at - datetime.now(timezone.utc)).total_seconds())
+
+
+def _market_elapsed_at(metadata: Mapping[str, object]) -> datetime | None:
+    candidates = (
+        _optional_str_metadata(metadata, "close_time"),
+        _optional_str_metadata(metadata, "expiration_time"),
+    )
+    parsed = tuple(
+        parsed_at
+        for value in candidates
+        for parsed_at in (_try_parse_iso_datetime(value),)
+        if parsed_at is not None
+    )
+    if not parsed:
+        return None
+    return min(parsed)
+
+
+def _try_parse_iso_datetime(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        return _parse_iso_datetime(value)
+    except ValueError:
+        return None
 
 
 def _is_late_expansion_bias(bias_state) -> bool:  # noqa: ANN001

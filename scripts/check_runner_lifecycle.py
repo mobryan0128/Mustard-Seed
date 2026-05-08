@@ -57,6 +57,7 @@ def main() -> int:
     failures.extend(_validate_startup_fail_closed())
     failures.extend(_validate_market_discovery_tradable_filter())
     failures.extend(_validate_subscription_ack_without_market_data_is_not_connected())
+    failures.extend(_validate_expired_market_forces_rollover_discovery())
     failures.extend(_validate_feed_timeout_forces_market_discovery_resubscribe())
     failures.extend(_validate_simulation_trade_events_persisted())
     failures.extend(_validate_simulation_risk_denied_event_persisted())
@@ -282,6 +283,47 @@ def _validate_subscription_ack_without_market_data_is_not_connected() -> list[st
         )
     if state.subscribed_tickers_by_call != (("KXBTC15M-OLD",),):
         failures.append(f"ack-only subscriptions={state.subscribed_tickers_by_call}")
+    return failures
+
+
+def _validate_expired_market_forces_rollover_discovery() -> list[str]:
+    runner, state = _build_runner(expired_initial_market=True)
+    results = runner.run_cycles(2)
+    failures: list[str] = []
+    if len(results) != 2:
+        failures.append(f"rollover recovery count={len(results)}")
+        return failures
+    if state.discovery_calls != 2:
+        failures.append(f"rollover recovery discovery calls={state.discovery_calls}")
+    if state.subscribed_tickers_by_call != (
+        ("KXBTC15M-OLD",),
+        ("KXBTC15M-NEW", "KXETH15M-NEW"),
+    ):
+        failures.append(f"rollover recovery subscriptions={state.subscribed_tickers_by_call}")
+    if results[-1].status.active_market_tickers != ("KXBTC15M-NEW", "KXETH15M-NEW"):
+        failures.append(f"rollover recovery active={results[-1].status.active_market_tickers}")
+    if "KXBTC15M-OLD" in state.cache.snapshot().tickers:
+        failures.append("rollover recovery stale ticker was not pruned")
+    if state.log_written_ref is None:
+        return failures + ["rollover recovery missing runtime path"]
+    records = _jsonl_records(state.log_written_ref)
+    for event_type in (
+        "market_rollover_detected",
+        "market_discovery_forced",
+        "old_ticker_expired",
+        "new_ticker_selected",
+    ):
+        if _first_event_payload(records, key="event_type", value=event_type) is None:
+            failures.append(f"rollover recovery {event_type} log missing")
+    forced = _first_event_payload(records, key="event_type", value="market_discovery_forced")
+    if (
+        forced is not None
+        and forced.get("subscription_refresh_reason") != "market_rollover_expired_ticker"
+    ):
+        failures.append(
+            "rollover recovery reason="
+            f"{forced.get('subscription_refresh_reason')}"
+        )
     return failures
 
 
@@ -862,11 +904,16 @@ def _build_runner(
     live_fast_scan_enabled: bool = False,
     time_fn=None,  # noqa: ANN001
     live_execution_coordinator=None,  # noqa: ANN001
+    expired_initial_market: bool = False,
 ):
     temp_dir = TemporaryDirectory()
     tmp_path = Path(temp_dir.name)
     cache = MarketStateCache()
-    state = _FixtureState(temp_dir=temp_dir, cache=cache)
+    state = _FixtureState(
+        temp_dir=temp_dir,
+        cache=cache,
+        expired_initial_market=expired_initial_market,
+    )
     logger = StructuredLogger(log_directory=tmp_path / "logs", enabled=True)
     replay_engine = ReplayEngine(replay_directory=tmp_path / "replay", enabled=True)
     runner = KalshiBotRunner(
@@ -1143,17 +1190,23 @@ class _FakeMarketDiscovery:
 
     def discover(self) -> CryptoMarketDiscoverySnapshot:
         self._state.discovery_calls += 1
+        now = datetime.now(timezone.utc)
+        first_close_time = (
+            _iso(now - timedelta(minutes=1))
+            if self._state.expired_initial_market
+            else _iso(now + timedelta(minutes=5))
+        )
         if self._state.discovery_calls == 1:
             return _discovery_snapshot(
                 {"BTC-USD": ("KXBTC15M-OLD",)},
-                close_time="2026-04-23T12:15:00+00:00",
+                close_time=first_close_time,
             )
         return _discovery_snapshot(
             {
                 "BTC-USD": ("KXBTC15M-NEW",),
                 "ETH-USD": ("KXETH15M-NEW",),
             },
-            close_time="2026-04-23T12:30:00+00:00",
+            close_time=_iso(now + timedelta(minutes=10)),
         )
 
 
@@ -1487,9 +1540,16 @@ class _FakeCryptoSnapshot:
 
 
 class _FixtureState:
-    def __init__(self, *, temp_dir: TemporaryDirectory, cache: MarketStateCache) -> None:
+    def __init__(
+        self,
+        *,
+        temp_dir: TemporaryDirectory,
+        cache: MarketStateCache,
+        expired_initial_market: bool = False,
+    ) -> None:
         self._temp_dir = temp_dir
         self.cache = cache
+        self.expired_initial_market = expired_initial_market
         self.kalshi_run_calls = 0
         self.crypto_run_calls = 0
         self.discovery_calls = 0

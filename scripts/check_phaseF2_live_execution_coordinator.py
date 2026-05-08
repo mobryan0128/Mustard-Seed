@@ -65,6 +65,7 @@ def main() -> int:
     failures.extend(_validate_end_window_blocks_early_contract())
     failures.extend(_validate_end_window_allows_late_contract())
     failures.extend(_validate_end_window_skips_missing_close_time())
+    failures.extend(_validate_stale_contract_close_time_blocks())
     failures.extend(_validate_direct_contract_scan_count_below_one_skip())
     failures.extend(_validate_flip_persistence_allows_same_direction())
     failures.extend(_validate_flip_persistence_blocks_recent_opposite_direction())
@@ -798,6 +799,37 @@ def _validate_direct_contract_scan_count_below_one_skip() -> list[str]:
         return []
 
 
+def _validate_stale_contract_close_time_blocks() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(contract_close_time=_past_time(minutes=1))
+            ),
+            cycle_number=45,
+        )
+        if intents:
+            return [f"stale contract intents={intents} expected empty"]
+        payload = _first_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            return ["stale contract skip log missing"]
+        if payload.get("reason") != "stale_ticker_blocked":
+            return [f"stale contract reason={payload.get('reason')}"]
+        if payload.get("stale_ticker_block_reason") != "close_time_elapsed":
+            return [
+                "stale contract block reason="
+                f"{payload.get('stale_ticker_block_reason')}"
+            ]
+        return []
+
+
 def _validate_end_window_blocks_early_contract() -> list[str]:
     with TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
@@ -1467,6 +1499,10 @@ def _event_payloads(
 
 def _future_time(*, minutes: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
+
+
+def _past_time(*, minutes: int) -> str:
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
 
 
 @dataclass(frozen=True)

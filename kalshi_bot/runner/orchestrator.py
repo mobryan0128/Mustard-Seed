@@ -43,6 +43,10 @@ class RunnerError(RuntimeError):
 
 
 KALSHI_FEED_TIMEOUT_RECOVERY_THRESHOLD = 2
+MARKET_ROLLOVER_REFRESH_REASON = "market_rollover_expired_ticker"
+FEED_TIMEOUT_REFRESH_REASON = "kalshi_feed_timeout"
+INITIAL_DISCOVERY_REFRESH_REASON = "initial_discovery"
+SCHEDULED_DISCOVERY_REFRESH_REASON = "scheduled_refresh"
 
 
 @dataclass(frozen=True)
@@ -188,8 +192,10 @@ class KalshiBotRunner:
         self._last_error: str | None = None
         self._latest_result: RunnerCycleResult | None = None
         self._last_market_discovery_cycle: int | None = None
+        self._last_market_discovery_at: datetime | None = None
         self._consecutive_kalshi_feed_timeouts = 0
         self._force_market_discovery_next_cycle = False
+        self._market_discovery_force_reason: str | None = None
         self._last_fast_scan_submission_at: float | None = None
         self._active_product_markets = (
             {}
@@ -197,6 +203,7 @@ class KalshiBotRunner:
             else dict(settings.contract_scanner_product_markets)
         )
         self._market_tickers = _flatten_product_markets(self._active_product_markets)
+        self._market_metadata_by_ticker: dict[str, dict[str, object]] = {}
 
     @classmethod
     def from_settings(cls, settings: KalshiSettings) -> "KalshiBotRunner":
@@ -415,6 +422,7 @@ class KalshiBotRunner:
         self._cycle_count += 1
         cycle_number = self._cycle_count
         self._log_cycle_event("cycle_start", {"cycle_number": cycle_number})
+        self._force_market_discovery_for_rollover_if_needed(cycle_number)
         self._refresh_market_discovery_if_due(cycle_number)
 
         kalshi_result, crypto_result = asyncio.run(self._run_ingestion_cycle())
@@ -504,6 +512,12 @@ class KalshiBotRunner:
                     "active_market_tickers": list(status.active_market_tickers),
                     "market_discovery_enabled": status.market_discovery_enabled,
                     "last_market_discovery_cycle": status.last_market_discovery_cycle,
+                    "seconds_since_last_market_discovery": (
+                        self._seconds_since_last_market_discovery()
+                    ),
+                    "active_market_lifecycle": (
+                        self._active_market_lifecycle_payloads()
+                    ),
                     "kalshi_market_data_message_count": status.kalshi_market_data_message_count,
                     "kalshi_subscription_message_count": status.kalshi_subscription_message_count,
                     "kalshi_subscribed_market_tickers": list(
@@ -571,6 +585,7 @@ class KalshiBotRunner:
                 recovery_result = "market_discovery_unavailable"
             else:
                 self._force_market_discovery_next_cycle = True
+                self._market_discovery_force_reason = FEED_TIMEOUT_REFRESH_REASON
                 recovery_result = "market_discovery_forced"
 
         self._log_cycle_event(
@@ -580,6 +595,9 @@ class KalshiBotRunner:
                 "kalshi_feed_timeout_count": self._consecutive_kalshi_feed_timeouts,
                 "kalshi_feed_recovery_attempted": recovery_attempted,
                 "kalshi_feed_recovery_result": recovery_result,
+                "subscription_refresh_reason": (
+                    FEED_TIMEOUT_REFRESH_REASON if recovery_attempted else None
+                ),
                 "active_market_tickers": list(self._market_tickers),
                 "kalshi_subscribed_market_tickers": list(
                     _subscribed_market_tickers(kalshi_result)
@@ -591,10 +609,54 @@ class KalshiBotRunner:
             },
         )
 
+    def _force_market_discovery_for_rollover_if_needed(self, cycle_number: int) -> None:
+        if self._market_discovery is None or not self._market_tickers:
+            return
+        expired_markets = _expired_market_payloads(
+            market_tickers=self._market_tickers,
+            market_metadata_by_ticker=self._market_metadata_by_ticker,
+        )
+        if not expired_markets:
+            return
+        self._force_market_discovery_next_cycle = True
+        self._market_discovery_force_reason = MARKET_ROLLOVER_REFRESH_REASON
+        payload = {
+            "cycle_number": cycle_number,
+            "subscription_refresh_reason": MARKET_ROLLOVER_REFRESH_REASON,
+            "seconds_since_last_market_discovery": (
+                self._seconds_since_last_market_discovery()
+            ),
+            "expired_markets": expired_markets,
+            "active_market_tickers": list(self._market_tickers),
+        }
+        self._log_cycle_event("market_rollover_detected", payload)
+        self._log_cycle_event("old_ticker_expired", payload)
+
     def _refresh_market_discovery_if_due(self, cycle_number: int) -> None:
         if self._market_discovery is None:
             return
         force_refresh = self._force_market_discovery_next_cycle
+        subscription_refresh_reason = (
+            self._market_discovery_force_reason or "forced_refresh"
+            if force_refresh
+            else (
+                INITIAL_DISCOVERY_REFRESH_REASON
+                if self._last_market_discovery_cycle is None
+                else SCHEDULED_DISCOVERY_REFRESH_REASON
+            )
+        )
+        if force_refresh:
+            self._log_cycle_event(
+                "market_discovery_forced",
+                {
+                    "cycle_number": cycle_number,
+                    "subscription_refresh_reason": subscription_refresh_reason,
+                    "seconds_since_last_market_discovery": (
+                        self._seconds_since_last_market_discovery()
+                    ),
+                    "active_market_tickers": list(self._market_tickers),
+                },
+            )
         if (
             not force_refresh
             and self._last_market_discovery_cycle is not None
@@ -605,9 +667,15 @@ class KalshiBotRunner:
 
         snapshot = self._market_discovery.discover()
         self._last_market_discovery_cycle = cycle_number
-        self._apply_market_discovery(snapshot, force_refresh=force_refresh)
+        self._last_market_discovery_at = datetime.now(timezone.utc)
+        self._apply_market_discovery(
+            snapshot,
+            force_refresh=force_refresh,
+            subscription_refresh_reason=subscription_refresh_reason,
+        )
         if force_refresh:
             self._force_market_discovery_next_cycle = False
+            self._market_discovery_force_reason = None
             self._consecutive_kalshi_feed_timeouts = 0
 
     def _apply_market_discovery(
@@ -615,6 +683,7 @@ class KalshiBotRunner:
         snapshot: CryptoMarketDiscoverySnapshot,
         *,
         force_refresh: bool = False,
+        subscription_refresh_reason: str,
     ) -> None:
         previous_ticker_list = self._market_tickers
         previous_tickers = set(previous_ticker_list)
@@ -630,6 +699,10 @@ class KalshiBotRunner:
                 {
                     "cycle_number": self._cycle_count,
                     "force_refresh": force_refresh,
+                    "subscription_refresh_reason": subscription_refresh_reason,
+                    "seconds_since_last_market_discovery": (
+                        self._seconds_since_last_market_discovery()
+                    ),
                     "previous_active_market_tickers": list(previous_ticker_list),
                     "next_active_market_tickers": list(next_tickers),
                     "added_market_tickers": added_tickers,
@@ -642,12 +715,13 @@ class KalshiBotRunner:
 
         self._active_product_markets = next_product_markets
         self._market_tickers = next_tickers
+        self._market_metadata_by_ticker = _market_metadata_by_ticker(
+            snapshot.discovered_markets
+        )
         self._contract_scanner = (
             ContractScanner(
                 product_markets=next_product_markets,
-                market_metadata_by_ticker=_market_metadata_by_ticker(
-                    snapshot.discovered_markets
-                ),
+                market_metadata_by_ticker=self._market_metadata_by_ticker,
             )
             if next_product_markets
             else None
@@ -667,6 +741,7 @@ class KalshiBotRunner:
                 {
                     "cycle_number": self._cycle_count,
                     "force_refresh": force_refresh,
+                    "subscription_refresh_reason": subscription_refresh_reason,
                     "previous_active_market_tickers": list(previous_ticker_list),
                     "active_market_tickers": list(next_tickers),
                     "added_market_tickers": added_tickers,
@@ -676,10 +751,39 @@ class KalshiBotRunner:
                     "kalshi_feed_recovery_result": "resubscribe_completed",
                 },
             )
+        if added_tickers:
+            self._log_cycle_event(
+                "new_ticker_selected",
+                {
+                    "cycle_number": self._cycle_count,
+                    "subscription_refresh_reason": subscription_refresh_reason,
+                    "new_market_tickers": added_tickers,
+                    "active_market_tickers": list(next_tickers),
+                },
+            )
+        if (
+            force_refresh
+            and subscription_refresh_reason == MARKET_ROLLOVER_REFRESH_REASON
+            and not next_tickers
+        ):
+            self._log_cycle_event(
+                "next_market_not_available_yet",
+                {
+                    "cycle_number": self._cycle_count,
+                    "subscription_refresh_reason": subscription_refresh_reason,
+                    "previous_active_market_tickers": list(previous_ticker_list),
+                    "dropped_market_tickers": dropped_tickers,
+                },
+            )
 
         payload = {
             "cycle_number": self._cycle_count,
             "force_refresh": force_refresh,
+            "subscription_refresh_reason": subscription_refresh_reason,
+            "seconds_since_last_market_discovery": (
+                self._seconds_since_last_market_discovery()
+            ),
+            "active_market_lifecycle": self._active_market_lifecycle_payloads(),
             "added_market_tickers": added_tickers,
             "dropped_market_tickers": dropped_tickers,
             "active_product_markets": _product_markets_payload(next_product_markets),
@@ -702,6 +806,20 @@ class KalshiBotRunner:
             source="runner",
             snapshot_name="market_discovery",
             snapshot=payload,
+        )
+
+    def _seconds_since_last_market_discovery(self) -> int | None:
+        if self._last_market_discovery_at is None:
+            return None
+        return max(
+            int((datetime.now(timezone.utc) - self._last_market_discovery_at).total_seconds()),
+            0,
+        )
+
+    def _active_market_lifecycle_payloads(self) -> tuple[dict[str, object], ...]:
+        return _active_market_lifecycle_payloads(
+            market_tickers=self._market_tickers,
+            market_metadata_by_ticker=self._market_metadata_by_ticker,
         )
 
     def _scan_contracts(
@@ -1078,6 +1196,97 @@ def _market_metadata_by_ticker(markets) -> dict[str, dict[str, object]]:  # noqa
         }
         for market in markets
     }
+
+
+def _expired_market_payloads(
+    *,
+    market_tickers: tuple[str, ...],
+    market_metadata_by_ticker: dict[str, dict[str, object]],
+) -> tuple[dict[str, object], ...]:
+    now = datetime.now(timezone.utc)
+    expired: list[dict[str, object]] = []
+    for market_ticker in market_tickers:
+        metadata = market_metadata_by_ticker.get(market_ticker, {})
+        elapsed_at = _market_elapsed_at(metadata)
+        if elapsed_at is None or elapsed_at > now:
+            continue
+        expired.append(
+            {
+                "market_ticker": market_ticker,
+                "open_time": metadata.get("open_time"),
+                "close_time": metadata.get("close_time"),
+                "expiration_time": metadata.get("expiration_time"),
+                "elapsed_at": elapsed_at.isoformat(),
+                "seconds_since_elapsed": max(int((now - elapsed_at).total_seconds()), 0),
+                "active_market_age_seconds": _active_market_age_seconds(metadata, now),
+            }
+        )
+    return tuple(expired)
+
+
+def _active_market_lifecycle_payloads(
+    *,
+    market_tickers: tuple[str, ...],
+    market_metadata_by_ticker: dict[str, dict[str, object]],
+) -> tuple[dict[str, object], ...]:
+    now = datetime.now(timezone.utc)
+    payloads: list[dict[str, object]] = []
+    for market_ticker in market_tickers:
+        metadata = market_metadata_by_ticker.get(market_ticker, {})
+        elapsed_at = _market_elapsed_at(metadata)
+        seconds_to_elapsed = (
+            int((elapsed_at - now).total_seconds()) if elapsed_at is not None else None
+        )
+        payloads.append(
+            {
+                "market_ticker": market_ticker,
+                "open_time": metadata.get("open_time"),
+                "close_time": metadata.get("close_time"),
+                "expiration_time": metadata.get("expiration_time"),
+                "active_market_age_seconds": _active_market_age_seconds(metadata, now),
+                "seconds_to_elapsed": seconds_to_elapsed,
+                "market_elapsed": (
+                    seconds_to_elapsed is not None and seconds_to_elapsed <= 0
+                ),
+            }
+        )
+    return tuple(payloads)
+
+
+def _market_elapsed_at(metadata: dict[str, object]) -> datetime | None:
+    candidates = (
+        _parse_aware_timestamp(metadata.get("close_time")),
+        _parse_aware_timestamp(metadata.get("expiration_time")),
+    )
+    parsed = tuple(value for value in candidates if value is not None)
+    if not parsed:
+        return None
+    return min(parsed)
+
+
+def _active_market_age_seconds(
+    metadata: dict[str, object],
+    now: datetime,
+) -> int | None:
+    open_at = _parse_aware_timestamp(metadata.get("open_time"))
+    if open_at is None:
+        return None
+    return max(int((now - open_at).total_seconds()), 0)
+
+
+def _parse_aware_timestamp(value: object) -> datetime | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
 
 
 def _top_skip_reasons(

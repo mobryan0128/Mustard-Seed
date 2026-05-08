@@ -100,6 +100,7 @@ def _run_fixtures(scanner: ContractScanner) -> list[str]:
     failures.extend(_validate_weak_reversal_score_downgrade(scanner))
     failures.extend(_validate_reversal_near_target_downgrades(scanner))
     failures.extend(_validate_impulse_direction_conflict_downgrade(scanner))
+    failures.extend(_validate_stale_ticker_blocked())
     return failures
 
 
@@ -948,6 +949,34 @@ def _validate_impulse_direction_conflict_downgrade(scanner: ContractScanner) -> 
     return []
 
 
+def _validate_stale_ticker_blocked() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "open_time": _past_iso(minutes=20),
+                "close_time": _past_iso(minutes=1),
+                "expiration_time": _past_iso(minutes=1),
+                "target_price": Decimal("70000"),
+                "target_price_source": "target_price",
+            }
+        },
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=_base_bias_snapshot(),
+        market_snapshot=_base_market_snapshot(),
+    )
+    if snapshot.ranked_contracts:
+        return [f"stale ticker ranked={snapshot.ranked_contracts}"]
+    reasons = {(item.market_ticker, item.reason) for item in snapshot.skipped_contracts}
+    if ("KXBTC-1", "stale_ticker_blocked") not in reasons:
+        return [f"stale ticker skip mismatch={reasons}"]
+    skipped = snapshot.skipped_contracts[0]
+    if skipped.feasibility_status != "time_remaining_elapsed":
+        return [f"stale ticker feasibility={skipped.feasibility_status}"]
+    return []
+
+
 def _base_bias_snapshot() -> BiasSnapshot:
     return BiasSnapshot(
         products={
@@ -1025,6 +1054,10 @@ def _base_market_snapshot() -> MarketStateSnapshot:
 
 def _future_iso(*, minutes: int = 0, seconds: int = 0) -> str:
     return (datetime.now(timezone.utc) + timedelta(minutes=minutes, seconds=seconds)).isoformat()
+
+
+def _past_iso(*, minutes: int = 0, seconds: int = 0) -> str:
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes, seconds=seconds)).isoformat()
 
 
 async def _run_live_scan(settings, message_limit: int | None) -> int:

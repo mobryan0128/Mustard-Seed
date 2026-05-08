@@ -349,6 +349,16 @@ class LiveExecutionCoordinator:
                     scan_source=scan_source,
                 )
                 continue
+            stale_contract = _stale_contract_status(contract)
+            if stale_contract is not None:
+                self._log_contract_intent_skipped(
+                    reason="stale_ticker_blocked",
+                    contract=contract,
+                    cycle_number=cycle_number,
+                    scan_source=scan_source,
+                    details=stale_contract,
+                )
+                continue
             itm_persistence = self._itm_persistence_status(contract)
             reversal_cross_hold = _reversal_cross_hold_status(
                 contract=contract,
@@ -2096,6 +2106,33 @@ def _entry_end_window_status(
         reason="end_window_not_open",
         remaining_seconds=remaining_seconds,
     )
+
+
+def _stale_contract_status(contract: ScannedContract) -> dict[str, object] | None:
+    close_time = getattr(contract, "contract_close_time", None)
+    if not close_time:
+        remaining_seconds = getattr(contract, "contract_time_remaining_seconds", None)
+        if remaining_seconds is not None and int(remaining_seconds) <= 0:
+            return {
+                "contract_time_remaining_seconds": int(remaining_seconds),
+                "contract_close_time": None,
+                "stale_ticker_blocked": True,
+                "stale_ticker_block_reason": "time_remaining_elapsed",
+            }
+        return None
+    try:
+        close_at = _parse_iso_datetime(close_time)
+    except ValueError:
+        return None
+    remaining_seconds = int((close_at - datetime.now(timezone.utc)).total_seconds())
+    if remaining_seconds > 0:
+        return None
+    return {
+        "contract_time_remaining_seconds": remaining_seconds,
+        "contract_close_time": close_time,
+        "stale_ticker_blocked": True,
+        "stale_ticker_block_reason": "close_time_elapsed",
+    }
 
 
 def _parse_iso_datetime(value: str) -> datetime:
