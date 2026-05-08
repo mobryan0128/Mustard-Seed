@@ -78,9 +78,22 @@ DEFAULT_LIVE_TRAILING_STOP_ENABLED = False
 DEFAULT_LIVE_TRAILING_STOP_DISTANCE = Decimal("0.05")
 DEFAULT_LIVE_ENTRY_END_WINDOW_ONLY = False
 DEFAULT_LIVE_ENTRY_END_WINDOW_MINUTES = 5
+DEFAULT_LIVE_ENTRY_MIN_REMAINING_SECONDS = 0
+DEFAULT_LIVE_ENTRY_SEGMENT_PACING_ENABLED = False
+DEFAULT_LIVE_ENTRY_SEGMENT_MAX_10_TO_5 = 1
+DEFAULT_LIVE_ENTRY_SEGMENT_MAX_5_TO_3 = 1
+DEFAULT_LIVE_ENTRY_SEGMENT_MAX_3_TO_1 = 1
+DEFAULT_LIVE_ENTRY_SEGMENT_MAX_FINAL_1 = 1
 DEFAULT_LIVE_FAST_SCAN_ENABLED = False
 DEFAULT_LIVE_FAST_SCAN_INTERVAL_SECONDS = 2.0
 DEFAULT_LIVE_FAST_SCAN_COOLDOWN_SECONDS = 5.0
+DEFAULT_LIVE_REVERSAL_CROSS_HOLD_ENABLED = True
+DEFAULT_LIVE_REVERSAL_CROSS_HOLD_SECONDS = 60
+DEFAULT_LIVE_MID_PRICE_TIGHTENING_ENABLED = True
+DEFAULT_LIVE_MID_PRICE_MIN = Decimal("0.50")
+DEFAULT_LIVE_MID_PRICE_MAX = Decimal("0.70")
+DEFAULT_LIVE_MAX_OPEN_POSITIONS_PER_PRODUCT = 2
+DEFAULT_LIVE_MAX_ENTRIES_PER_PRODUCT_PER_SESSION = 2
 DEFAULT_RUNNER_ENABLED = True
 DEFAULT_RUNNER_LOOP_INTERVAL_SECONDS = 5.0
 DEFAULT_RUNNER_STATUS_LOG_EVERY_N_CYCLES = 1
@@ -187,9 +200,22 @@ class KalshiSettings:
     live_trailing_stop_distance: Decimal
     live_entry_end_window_only: bool
     live_entry_end_window_minutes: int
+    live_entry_min_remaining_seconds: int
+    live_entry_segment_pacing_enabled: bool
+    live_entry_segment_max_10_to_5: int
+    live_entry_segment_max_5_to_3: int
+    live_entry_segment_max_3_to_1: int
+    live_entry_segment_max_final_1: int
     live_fast_scan_enabled: bool
     live_fast_scan_interval_seconds: float
     live_fast_scan_cooldown_seconds: float
+    live_reversal_cross_hold_enabled: bool
+    live_reversal_cross_hold_seconds: int
+    live_mid_price_tightening_enabled: bool
+    live_mid_price_min: Decimal
+    live_mid_price_max: Decimal
+    live_max_open_positions_per_product: int
+    live_max_entries_per_product_per_session: int
     runner_enabled: bool
     runner_loop_interval_seconds: float
     runner_status_log_every_n_cycles: int
@@ -481,6 +507,36 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         DEFAULT_LIVE_ENTRY_END_WINDOW_MINUTES,
         "LIVE_ENTRY_END_WINDOW_MINUTES",
     )
+    live_entry_min_remaining_seconds = _parse_non_negative_int(
+        values.get("LIVE_ENTRY_MIN_REMAINING_SECONDS"),
+        DEFAULT_LIVE_ENTRY_MIN_REMAINING_SECONDS,
+        "LIVE_ENTRY_MIN_REMAINING_SECONDS",
+    )
+    live_entry_segment_pacing_enabled = _parse_bool(
+        values.get("LIVE_ENTRY_SEGMENT_PACING_ENABLED"),
+        DEFAULT_LIVE_ENTRY_SEGMENT_PACING_ENABLED,
+        "LIVE_ENTRY_SEGMENT_PACING_ENABLED",
+    )
+    live_entry_segment_max_10_to_5 = _parse_non_negative_int(
+        values.get("LIVE_ENTRY_SEGMENT_MAX_10_TO_5"),
+        DEFAULT_LIVE_ENTRY_SEGMENT_MAX_10_TO_5,
+        "LIVE_ENTRY_SEGMENT_MAX_10_TO_5",
+    )
+    live_entry_segment_max_5_to_3 = _parse_non_negative_int(
+        values.get("LIVE_ENTRY_SEGMENT_MAX_5_TO_3"),
+        DEFAULT_LIVE_ENTRY_SEGMENT_MAX_5_TO_3,
+        "LIVE_ENTRY_SEGMENT_MAX_5_TO_3",
+    )
+    live_entry_segment_max_3_to_1 = _parse_non_negative_int(
+        values.get("LIVE_ENTRY_SEGMENT_MAX_3_TO_1"),
+        DEFAULT_LIVE_ENTRY_SEGMENT_MAX_3_TO_1,
+        "LIVE_ENTRY_SEGMENT_MAX_3_TO_1",
+    )
+    live_entry_segment_max_final_1 = _parse_non_negative_int(
+        values.get("LIVE_ENTRY_SEGMENT_MAX_FINAL_1"),
+        DEFAULT_LIVE_ENTRY_SEGMENT_MAX_FINAL_1,
+        "LIVE_ENTRY_SEGMENT_MAX_FINAL_1",
+    )
     live_fast_scan_enabled = _parse_bool(
         values.get("LIVE_FAST_SCAN_ENABLED"),
         DEFAULT_LIVE_FAST_SCAN_ENABLED,
@@ -495,6 +551,43 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         values.get("LIVE_FAST_SCAN_COOLDOWN_SECONDS"),
         DEFAULT_LIVE_FAST_SCAN_COOLDOWN_SECONDS,
         "LIVE_FAST_SCAN_COOLDOWN_SECONDS",
+    )
+    live_reversal_cross_hold_enabled = _parse_bool(
+        values.get("LIVE_REVERSAL_CROSS_HOLD_ENABLED"),
+        DEFAULT_LIVE_REVERSAL_CROSS_HOLD_ENABLED,
+        "LIVE_REVERSAL_CROSS_HOLD_ENABLED",
+    )
+    live_reversal_cross_hold_seconds = _parse_positive_int(
+        values.get("LIVE_REVERSAL_CROSS_HOLD_SECONDS"),
+        DEFAULT_LIVE_REVERSAL_CROSS_HOLD_SECONDS,
+        "LIVE_REVERSAL_CROSS_HOLD_SECONDS",
+    )
+    live_mid_price_tightening_enabled = _parse_bool(
+        values.get("LIVE_MID_PRICE_TIGHTENING_ENABLED"),
+        DEFAULT_LIVE_MID_PRICE_TIGHTENING_ENABLED,
+        "LIVE_MID_PRICE_TIGHTENING_ENABLED",
+    )
+    live_mid_price_min = _parse_price_dollars(
+        values.get("LIVE_MID_PRICE_MIN"),
+        "LIVE_MID_PRICE_MIN",
+    ) or DEFAULT_LIVE_MID_PRICE_MIN
+    live_mid_price_max = _parse_price_dollars(
+        values.get("LIVE_MID_PRICE_MAX"),
+        "LIVE_MID_PRICE_MAX",
+    ) or DEFAULT_LIVE_MID_PRICE_MAX
+    if live_mid_price_min > live_mid_price_max:
+        raise SettingsError(
+            "LIVE_MID_PRICE_MIN must be less than or equal to LIVE_MID_PRICE_MAX."
+        )
+    live_max_open_positions_per_product = _parse_positive_int(
+        values.get("LIVE_MAX_OPEN_POSITIONS_PER_PRODUCT"),
+        DEFAULT_LIVE_MAX_OPEN_POSITIONS_PER_PRODUCT,
+        "LIVE_MAX_OPEN_POSITIONS_PER_PRODUCT",
+    )
+    live_max_entries_per_product_per_session = _parse_positive_int(
+        values.get("LIVE_MAX_ENTRIES_PER_PRODUCT_PER_SESSION"),
+        DEFAULT_LIVE_MAX_ENTRIES_PER_PRODUCT_PER_SESSION,
+        "LIVE_MAX_ENTRIES_PER_PRODUCT_PER_SESSION",
     )
     runner_enabled = _parse_bool(
         values.get("RUNNER_ENABLED"),
@@ -715,9 +808,24 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_trailing_stop_distance=live_trailing_stop_distance,
         live_entry_end_window_only=live_entry_end_window_only,
         live_entry_end_window_minutes=live_entry_end_window_minutes,
+        live_entry_min_remaining_seconds=live_entry_min_remaining_seconds,
+        live_entry_segment_pacing_enabled=live_entry_segment_pacing_enabled,
+        live_entry_segment_max_10_to_5=live_entry_segment_max_10_to_5,
+        live_entry_segment_max_5_to_3=live_entry_segment_max_5_to_3,
+        live_entry_segment_max_3_to_1=live_entry_segment_max_3_to_1,
+        live_entry_segment_max_final_1=live_entry_segment_max_final_1,
         live_fast_scan_enabled=live_fast_scan_enabled,
         live_fast_scan_interval_seconds=live_fast_scan_interval_seconds,
         live_fast_scan_cooldown_seconds=live_fast_scan_cooldown_seconds,
+        live_reversal_cross_hold_enabled=live_reversal_cross_hold_enabled,
+        live_reversal_cross_hold_seconds=live_reversal_cross_hold_seconds,
+        live_mid_price_tightening_enabled=live_mid_price_tightening_enabled,
+        live_mid_price_min=live_mid_price_min,
+        live_mid_price_max=live_mid_price_max,
+        live_max_open_positions_per_product=live_max_open_positions_per_product,
+        live_max_entries_per_product_per_session=(
+            live_max_entries_per_product_per_session
+        ),
         runner_enabled=runner_enabled,
         runner_loop_interval_seconds=runner_loop_interval_seconds,
         runner_status_log_every_n_cycles=runner_status_log_every_n_cycles,

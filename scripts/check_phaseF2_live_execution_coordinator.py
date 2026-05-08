@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -54,6 +55,10 @@ def main() -> int:
     failures.extend(_validate_contextual_high_price_needs_cross_blocks())
     failures.extend(_validate_extreme_high_price_blocks())
     failures.extend(_validate_contextual_high_price_premium_blocks())
+    failures.extend(_validate_reversal_cross_hold_blocks_fresh_cross())
+    failures.extend(_validate_reversal_cross_hold_allows_after_hold())
+    failures.extend(_validate_mid_price_weak_reversal_blocks())
+    failures.extend(_validate_mid_price_confirmed_trend_allows())
     failures.extend(_validate_zero_visible_liquidity_blocks())
     failures.extend(_validate_midpoint_fallback_price_below_minimum_skip())
     failures.extend(_validate_midpoint_fallback_price_above_maximum_skip())
@@ -66,6 +71,8 @@ def main() -> int:
     failures.extend(_validate_flip_persistence_allows_itm_persistent_opposite_direction())
     failures.extend(_validate_same_side_retry_blocks_without_improvement())
     failures.extend(_validate_same_side_retry_allows_improved_feasibility())
+    failures.extend(_validate_entry_segment_budget_blocks_overuse())
+    failures.extend(_validate_product_session_cap_blocks_overuse())
 
     if failures:
         for failure in failures:
@@ -496,6 +503,173 @@ def _validate_zero_visible_liquidity_blocks() -> list[str]:
         expected_intent_side="yes",
         expected_executable_side_ask="0.40",
     )
+
+
+def _validate_reversal_cross_hold_blocks_fresh_cross() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+            time_fn=lambda: 1000.0,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    market_ticker="KXBTC15M-REV-HOLD-BLOCK",
+                    structure="reversal",
+                    reversal_confirmation_status="confirmed",
+                    trend_confirmation_status="not_trend",
+                    side_currently_itm=True,
+                    side_needs_cross=False,
+                    distance_to_target_bps=Decimal("-2.000"),
+                    required_bps_per_minute=Decimal("0.000"),
+                    midpoint=Decimal("0.40"),
+                )
+            ),
+            cycle_number=64,
+        )
+        failures: list[str] = []
+        if intents:
+            failures.append(f"reversal hold block intents={len(intents)} expected=0")
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            failures.append("reversal hold block skip log missing")
+            return failures
+        if payload.get("reason") != "reversal_cross_hold_blocked":
+            failures.append(f"reversal hold block reason={payload.get('reason')}")
+        if payload.get("reversal_cross_hold_block_reason") != "reversal_cross_hold_waiting":
+            failures.append(
+                "reversal hold block detail="
+                f"{payload.get('reversal_cross_hold_block_reason')}"
+            )
+        return failures
+
+
+def _validate_reversal_cross_hold_allows_after_hold() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        now = {"value": 1000.0}
+        coordinator = _coordinator(
+            temp_path,
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+            time_fn=lambda: now["value"],
+        )
+        contract = _contract(
+            market_ticker="KXBTC15M-REV-HOLD-ALLOW",
+            structure="reversal",
+            reversal_confirmation_status="confirmed",
+            trend_confirmation_status="not_trend",
+            side_currently_itm=True,
+            side_needs_cross=False,
+            distance_to_target_bps=Decimal("-3.000"),
+            required_bps_per_minute=Decimal("0.000"),
+            midpoint=Decimal("0.40"),
+        )
+        coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(contract),
+            cycle_number=65,
+        )
+        now["value"] = 1061.0
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(contract),
+            cycle_number=66,
+        )
+        failures: list[str] = []
+        if len(intents) != 1:
+            failures.append(f"reversal hold allow intents={len(intents)} expected=1")
+            return failures
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_intent_created",
+        )
+        if payload is None:
+            failures.append("reversal hold allow intent log missing")
+            return failures
+        if payload.get("reversal_cross_hold_status") != "confirmed":
+            failures.append(
+                "reversal hold allow status="
+                f"{payload.get('reversal_cross_hold_status')}"
+            )
+        return failures
+
+
+def _validate_mid_price_weak_reversal_blocks() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_reversal_cross_hold_enabled=False,
+            ),
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    market_ticker="KXBTC15M-MID-REV-BLOCK",
+                    structure="reversal",
+                    reversal_confirmation_status="confirmed",
+                    trend_confirmation_status="not_trend",
+                    midpoint=Decimal("0.60"),
+                )
+            ),
+            cycle_number=67,
+            market_snapshot=None,
+        )
+        failures: list[str] = []
+        if intents:
+            failures.append(f"mid weak reversal intents={len(intents)} expected=0")
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            failures.append("mid weak reversal skip log missing")
+            return failures
+        if payload.get("reason") != "mid_price_confirmation_required":
+            failures.append(f"mid weak reversal reason={payload.get('reason')}")
+        return failures
+
+
+def _validate_mid_price_confirmed_trend_allows() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    market_ticker="KXBTC15M-MID-TREND-ALLOW",
+                    midpoint=Decimal("0.60"),
+                    structure="trend",
+                    trend_confirmation_status="confirmed",
+                )
+            ),
+            cycle_number=68,
+            market_snapshot=None,
+        )
+        if len(intents) != 1:
+            return [f"mid confirmed trend intents={len(intents)} expected=1"]
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_intent_created",
+        )
+        if payload is None:
+            return ["mid confirmed trend intent log missing"]
+        if payload.get("mid_price_confirmation_status") != "allowed_confirmed_trend":
+            return [
+                "mid confirmed trend status="
+                f"{payload.get('mid_price_confirmation_status')}"
+            ]
+        return []
 
 
 def _validate_midpoint_fallback_price_below_minimum_skip() -> list[str]:
@@ -970,10 +1144,107 @@ def _validate_same_side_retry_allows_improved_feasibility() -> list[str]:
         return failures
 
 
+def _validate_entry_segment_budget_blocks_overuse() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_entry_end_window_only=True,
+                live_entry_end_window_minutes=10,
+                live_entry_segment_pacing_enabled=True,
+                live_entry_segment_max_10_to_5=1,
+            ),
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        contract = _contract(
+            market_ticker="KXBTC15M-SEGMENT",
+            contract_close_time=_future_time(minutes=7),
+        )
+        first = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(contract),
+            cycle_number=70,
+        )
+        second = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(contract),
+            cycle_number=71,
+        )
+        failures: list[str] = []
+        if len(first) != 1:
+            failures.append(f"segment first intents={len(first)} expected=1")
+        if second:
+            failures.append(f"segment second intents={len(second)} expected=0")
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            failures.append("segment budget skip log missing")
+            return failures
+        if payload.get("reason") != "entry_segment_budget_exhausted":
+            failures.append(f"segment budget reason={payload.get('reason')}")
+        if payload.get("entry_segment") != "10_to_5":
+            failures.append(f"segment budget segment={payload.get('entry_segment')}")
+        return failures
+
+
+def _validate_product_session_cap_blocks_overuse() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_max_entries_per_product_per_session=2,
+            ),
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        contract = _contract(market_ticker="KXBTC15M-PRODUCT-CAP")
+        first = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(contract),
+            cycle_number=72,
+        )
+        second = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(contract),
+            cycle_number=73,
+        )
+        third = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(contract),
+            cycle_number=74,
+        )
+        failures: list[str] = []
+        if len(first) != 1:
+            failures.append(f"product cap first intents={len(first)} expected=1")
+        if len(second) != 1:
+            failures.append(f"product cap second intents={len(second)} expected=1")
+        if third:
+            failures.append(f"product cap third intents={len(third)} expected=0")
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            failures.append("product cap skip log missing")
+            return failures
+        if payload.get("reason") != "product_session_pacing_blocked":
+            failures.append(f"product cap reason={payload.get('reason')}")
+        expected_status = "max_entries_per_product_session_reached"
+        if payload.get("product_session_pacing_status") != expected_status:
+            failures.append(
+                "product cap status="
+                f"{payload.get('product_session_pacing_status')} expected={expected_status}"
+            )
+        return failures
+
+
 def _coordinator(
     temp_path: Path,
     settings: "_Settings | None" = None,
     risk_manager=None,  # noqa: ANN001
+    time_fn=None,  # noqa: ANN001
 ) -> LiveExecutionCoordinator:
     return LiveExecutionCoordinator(
         settings=settings
@@ -982,6 +1253,7 @@ def _coordinator(
             log_jsonl_enabled=True,
         ),
         risk_manager=risk_manager,
+        time_fn=time_fn or time.monotonic,
     )
 
 
@@ -1009,12 +1281,15 @@ def _contract(
     lookback_return_bps: Decimal = Decimal("25.000"),
     impulse_direction: str | None = "up",
     impulse_return_bps: Decimal | None = Decimal("18.000"),
+    structure: str = "trend",
+    reversal_confirmation_status: str = "not_reversal",
+    trend_confirmation_status: str = "confirmed",
 ) -> ScannedContract:
     return ScannedContract(
         product_id=product_id,
         market_ticker=market_ticker,
         direction=direction,
-        structure="trend",
+        structure=structure,
         confidence=confidence,
         best_bid=midpoint - Decimal("0.01"),
         best_ask=midpoint + Decimal("0.01"),
@@ -1047,8 +1322,8 @@ def _contract(
         side_currently_itm=side_currently_itm,
         side_needs_cross=side_needs_cross,
         feasibility_status=feasibility_status,
-        reversal_confirmation_status="not_reversal",
-        trend_confirmation_status="confirmed",
+        reversal_confirmation_status=reversal_confirmation_status,
+        trend_confirmation_status=trend_confirmation_status,
         signal_conflict_flags=(("impulse_direction_conflict", False),),
         scanner_score_confidence=confidence,
         scanner_score_downgrade_reasons=(),
@@ -1200,6 +1475,19 @@ class _Settings:
     log_jsonl_enabled: bool
     live_entry_end_window_only: bool = False
     live_entry_end_window_minutes: int = 5
+    live_entry_min_remaining_seconds: int = 0
+    live_entry_segment_pacing_enabled: bool = False
+    live_entry_segment_max_10_to_5: int = 1
+    live_entry_segment_max_5_to_3: int = 1
+    live_entry_segment_max_3_to_1: int = 1
+    live_entry_segment_max_final_1: int = 1
+    live_reversal_cross_hold_enabled: bool = True
+    live_reversal_cross_hold_seconds: int = 60
+    live_mid_price_tightening_enabled: bool = True
+    live_mid_price_min: Decimal = Decimal("0.50")
+    live_mid_price_max: Decimal = Decimal("0.70")
+    live_max_open_positions_per_product: int = 2
+    live_max_entries_per_product_per_session: int = 2
 
 
 class _FixedEntryRiskManager:

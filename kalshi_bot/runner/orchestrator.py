@@ -70,6 +70,7 @@ class SkippedContractDiagnostic:
     trend_confirmation_status: str | None
     reversal_confirmation_status: str | None
     scanner_score_downgrade_reasons: tuple[str, ...]
+    scanner_score_bonus_reasons: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -1111,6 +1112,7 @@ def _skipped_contract_diagnostics(
             trend_confirmation_status=contract.trend_confirmation_status,
             reversal_confirmation_status=contract.reversal_confirmation_status,
             scanner_score_downgrade_reasons=contract.scanner_score_downgrade_reasons,
+            scanner_score_bonus_reasons=contract.scanner_score_bonus_reasons,
         )
         for contract in contract_scan_snapshot.skipped_contracts[:10]
     )
@@ -1238,6 +1240,7 @@ def _skipped_contract_diagnostic_payloads(
             "scanner_score_downgrade_reasons": list(
                 item.scanner_score_downgrade_reasons
             ),
+            "scanner_score_bonus_reasons": list(item.scanner_score_bonus_reasons),
         }
         for item in diagnostics
     )

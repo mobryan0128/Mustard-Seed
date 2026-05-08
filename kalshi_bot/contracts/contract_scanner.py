@@ -29,6 +29,10 @@ NEEDS_CROSS_HARD_REQUIRED_BPS_PER_MINUTE = Decimal("2.000")
 SCORE_DOWNGRADE_CONFLICT_CONFIDENCE = 30
 SCORE_DOWNGRADE_NEEDS_CROSS_CONFIDENCE = 40
 SCORE_DOWNGRADE_SOFT_NEEDS_CROSS_CONFIDENCE = 30
+SCORE_DOWNGRADE_REVERSAL_NEAR_TARGET_CONFIDENCE = 30
+SCORE_BONUS_CONFIRMED_TREND_CONFIDENCE = 10
+SCORE_MAX_CONFIDENCE = 90
+REVERSAL_NOISE_ZONE_DISTANCE_BPS = Decimal("5.000")
 
 
 class ContractScannerError(ValueError):
@@ -85,6 +89,7 @@ class ScannedContract:
     signal_conflict_flags: tuple[tuple[str, bool], ...] = ()
     scanner_score_confidence: int | None = None
     scanner_score_downgrade_reasons: tuple[str, ...] = ()
+    scanner_score_bonus_reasons: tuple[str, ...] = ()
     contract_open_time: str | None = None
     contract_close_time: str | None = None
     contract_time_remaining_seconds: int | None = None
@@ -112,6 +117,7 @@ class SkippedContract:
     trend_confirmation_status: str | None = None
     signal_conflict_flags: tuple[tuple[str, bool], ...] = ()
     scanner_score_downgrade_reasons: tuple[str, ...] = ()
+    scanner_score_bonus_reasons: tuple[str, ...] = ()
     contract_open_time: str | None = None
     contract_time_remaining_seconds: int | None = None
     end_window_allowed: bool | None = None
@@ -240,7 +246,11 @@ class ContractScanner:
                 midpoint = ((ticker_state.yes_bid_dollars + ticker_state.yes_ask_dollars) / TWO_DECIMAL).quantize(
                     Decimal("0.001")
                 )
-                score_confidence, score_downgrade_reasons = _scanner_score_confidence(
+                (
+                    score_confidence,
+                    score_downgrade_reasons,
+                    score_bonus_reasons,
+                ) = _scanner_score_confidence(
                     product_id=product_id,
                     bias_state=bias_state,
                     feasibility=feasibility,
@@ -290,6 +300,7 @@ class ContractScanner:
                         signal_conflict_flags=signal_conflict_flags,
                         scanner_score_confidence=score_confidence,
                         scanner_score_downgrade_reasons=score_downgrade_reasons,
+                        scanner_score_bonus_reasons=score_bonus_reasons,
                         contract_open_time=_optional_str_metadata(metadata, "open_time"),
                         contract_close_time=_optional_str_metadata(metadata, "close_time"),
                         contract_time_remaining_seconds=feasibility.time_remaining_seconds,
@@ -636,9 +647,10 @@ def _scanner_score_confidence(
     reversal_confirmation_status: str,
     trend_confirmation_status: str,
     signal_conflict_flags: tuple[tuple[str, bool], ...],
-) -> tuple[int, tuple[str, ...]]:
+) -> tuple[int, tuple[str, ...], tuple[str, ...]]:
     confidence = int(bias_state.confidence)
     downgrade_reasons: list[str] = []
+    bonus_reasons: list[str] = []
     if dict(signal_conflict_flags).get("impulse_direction_conflict"):
         confidence = min(confidence, SCORE_DOWNGRADE_NEEDS_CROSS_CONFIDENCE)
         downgrade_reasons.append("impulse_direction_conflict")
@@ -658,6 +670,17 @@ def _scanner_score_confidence(
     if bias_state.structure == "reversal" and feasibility.feasibility_status == "target_price_missing":
         confidence = min(confidence, SCORE_DOWNGRADE_NEEDS_CROSS_CONFIDENCE)
         downgrade_reasons.append("reversal_target_price_missing")
+    if (
+        bias_state.structure == "reversal"
+        and feasibility.distance_to_target_bps is not None
+        and abs(Decimal(str(feasibility.distance_to_target_bps)))
+        <= REVERSAL_NOISE_ZONE_DISTANCE_BPS
+    ):
+        confidence = min(confidence, SCORE_DOWNGRADE_REVERSAL_NEAR_TARGET_CONFIDENCE)
+        if feasibility.side_currently_itm:
+            downgrade_reasons.append("reversal_fresh_cross_near_target")
+        else:
+            downgrade_reasons.append("reversal_noise_zone_near_target")
     if reversal_confirmation_status in {
         "recent_return_missing",
         "recent_direction_mismatch",
@@ -676,7 +699,17 @@ def _scanner_score_confidence(
     }:
         confidence = min(confidence, SCORE_DOWNGRADE_CONFLICT_CONFIDENCE)
         downgrade_reasons.append(f"trend_{trend_confirmation_status}")
-    return confidence, tuple(dict.fromkeys(downgrade_reasons))
+    if trend_confirmation_status == "confirmed" and not downgrade_reasons:
+        confidence = min(
+            SCORE_MAX_CONFIDENCE,
+            confidence + SCORE_BONUS_CONFIRMED_TREND_CONFIDENCE,
+        )
+        bonus_reasons.append("confirmed_trend")
+    return (
+        confidence,
+        tuple(dict.fromkeys(downgrade_reasons)),
+        tuple(dict.fromkeys(bonus_reasons)),
+    )
 
 
 def _direction_sign(direction: str) -> int:

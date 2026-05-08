@@ -95,8 +95,10 @@ def _run_fixtures(scanner: ContractScanner) -> list[str]:
     failures.extend(_validate_currently_itm_not_feasibility_downgraded())
     failures.extend(_validate_trend_confirmation_downgrades_without_reclassification())
     failures.extend(_validate_confirmed_trend_keeps_score_confidence())
+    failures.extend(_validate_confirmed_trend_bonus_ranks_above_reversal())
     failures.extend(_validate_hype_needs_cross_caution_downgrades())
     failures.extend(_validate_weak_reversal_score_downgrade(scanner))
+    failures.extend(_validate_reversal_near_target_downgrades(scanner))
     failures.extend(_validate_impulse_direction_conflict_downgrade(scanner))
     return failures
 
@@ -668,7 +670,7 @@ def _validate_currently_itm_not_feasibility_downgraded() -> list[str]:
         market_snapshot=_base_market_snapshot(),
     )
     contract = snapshot.ranked_contracts[0]
-    if contract.score.confidence != 70:
+    if contract.score.confidence != 80:
         return [f"currently-itm score={contract.score.confidence}"]
     if contract.scanner_score_downgrade_reasons:
         return [f"currently-itm downgrade reasons={contract.scanner_score_downgrade_reasons}"]
@@ -739,8 +741,60 @@ def _validate_confirmed_trend_keeps_score_confidence() -> list[str]:
     contract = snapshot.ranked_contracts[0]
     if contract.trend_confirmation_status != "confirmed":
         return [f"confirmed trend status={contract.trend_confirmation_status}"]
-    if contract.score.confidence != 70:
+    if contract.score.confidence != 80:
         return [f"confirmed trend score={contract.score.confidence}"]
+    if "confirmed_trend" not in contract.scanner_score_bonus_reasons:
+        return [f"confirmed trend bonus reasons={contract.scanner_score_bonus_reasons}"]
+    return []
+
+
+def _validate_confirmed_trend_bonus_ranks_above_reversal() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={
+            "BTC-USD": ("KXBTC-TREND",),
+            "ETH-USD": ("KXETH-REVERSAL",),
+        },
+        market_metadata_by_ticker={
+            "KXBTC-TREND": {
+                "close_time": _future_iso(minutes=5),
+                "target_price": Decimal("99"),
+                "target_price_source": "target_price",
+            },
+            "KXETH-REVERSAL": {
+                "close_time": _future_iso(minutes=5),
+                "target_price": Decimal("3199"),
+                "target_price_source": "target_price",
+            },
+        },
+    )
+    base = _base_bias_snapshot()
+    snapshot = scanner.scan(
+        bias_snapshot=base,
+        market_snapshot=MarketStateSnapshot(
+            tickers={
+                "KXBTC-TREND": replace(
+                    _base_market_snapshot().tickers["KXBTC-1"],
+                    market_ticker="KXBTC-TREND",
+                    yes_bid_dollars=Decimal("0.49"),
+                    yes_ask_dollars=Decimal("0.51"),
+                ),
+                "KXETH-REVERSAL": replace(
+                    _base_market_snapshot().tickers["KXBTC-1"],
+                    market_ticker="KXETH-REVERSAL",
+                    yes_bid_dollars=Decimal("0.49"),
+                    yes_ask_dollars=Decimal("0.51"),
+                ),
+            },
+            orderbooks={},
+            last_sequence_by_sid={},
+        ),
+    )
+    ranked = tuple(contract.market_ticker for contract in snapshot.ranked_contracts)
+    if ranked[:2] != ("KXBTC-TREND", "KXETH-REVERSAL"):
+        return [f"confirmed trend rank order={ranked}"]
+    trend = snapshot.ranked_contracts[0]
+    if "confirmed_trend" not in trend.scanner_score_bonus_reasons:
+        return [f"confirmed trend bonus missing={trend.scanner_score_bonus_reasons}"]
     return []
 
 
@@ -821,6 +875,48 @@ def _validate_weak_reversal_score_downgrade(scanner: ContractScanner) -> list[st
         failures.append(
             "weak reversal status="
             f"{contract.reversal_confirmation_status}"
+        )
+    return failures
+
+
+def _validate_reversal_near_target_downgrades(scanner: ContractScanner) -> list[str]:
+    bias_snapshot = _base_bias_snapshot()
+    bias_snapshot.products["BTC-USD"] = replace(
+        bias_snapshot.products["BTC-USD"],
+        direction="up",
+        confidence=70,
+        structure="reversal",
+        recent_return_bps=Decimal("20.000"),
+        lookback_return_bps=Decimal("-80.000"),
+        latest_price=Decimal("100"),
+        impulse_detected=False,
+        impulse_direction=None,
+        impulse_return_bps=Decimal("1.000"),
+    )
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=5),
+                "target_price": Decimal("99.98"),
+                "target_price_source": "target_price",
+            }
+        },
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=bias_snapshot,
+        market_snapshot=_base_market_snapshot(),
+    )
+    contract = snapshot.ranked_contracts[0]
+    failures: list[str] = []
+    if contract.reversal_confirmation_status != "confirmed":
+        failures.append(f"near-target reversal status={contract.reversal_confirmation_status}")
+    if contract.score.confidence != 30:
+        failures.append(f"near-target reversal score={contract.score.confidence}")
+    if "reversal_fresh_cross_near_target" not in contract.scanner_score_downgrade_reasons:
+        failures.append(
+            "near-target reversal downgrade reasons="
+            f"{contract.scanner_score_downgrade_reasons}"
         )
     return failures
 

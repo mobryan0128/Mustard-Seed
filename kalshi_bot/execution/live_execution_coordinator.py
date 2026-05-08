@@ -44,6 +44,10 @@ MIN_CONTEXTUAL_LIQUIDITY_COUNT = Decimal("1")
 FLIP_PERSISTENCE_WINDOW_SECONDS = 180
 FLIP_PERSISTENCE_MIN_RECENT_RETURN_BPS = Decimal("15.000")
 FLIP_PERSISTENCE_IMPULSE_CONFIRMATION_RETURN_BPS = Decimal("3.000")
+ENTRY_SEGMENT_10_TO_5 = "10_to_5"
+ENTRY_SEGMENT_5_TO_3 = "5_to_3"
+ENTRY_SEGMENT_3_TO_1 = "3_to_1"
+ENTRY_SEGMENT_FINAL_1 = "final_1"
 
 
 @dataclass(frozen=True)
@@ -91,6 +95,16 @@ class ItmPersistenceStatus:
     status: str
     consecutive_itm_observations: int
     previous_side_currently_itm: bool | None
+    itm_hold_seconds: Decimal
+
+
+@dataclass(frozen=True)
+class ReversalCrossHoldStatus:
+    allowed: bool
+    status: str
+    hold_seconds: Decimal
+    required_seconds: int
+    block_reason: str | None
 
 
 @dataclass(frozen=True)
@@ -99,6 +113,35 @@ class RetryPersistenceStatus:
     status: str
     previous_distance_to_target_bps: Decimal | None
     previous_required_bps_per_minute: Decimal | None
+
+
+@dataclass(frozen=True)
+class MidPriceConfirmationStatus:
+    allowed: bool
+    status: str
+    price_band_min: Decimal
+    price_band_max: Decimal
+    block_reason: str | None
+
+
+@dataclass(frozen=True)
+class EntrySegmentStatus:
+    allowed: bool
+    status: str
+    segment: str | None
+    current_count: int
+    max_count: int | None
+    remaining_seconds: int | None
+
+
+@dataclass(frozen=True)
+class ProductSessionPacingStatus:
+    allowed: bool
+    status: str
+    product_open_position_count: int
+    product_session_entry_count: int
+    max_open_positions_per_product: int
+    max_entries_per_product_per_session: int
 
 
 @dataclass(frozen=True)
@@ -166,6 +209,7 @@ class LiveEntryMemory:
 class ItmPersistenceMemory:
     side_currently_itm: bool | None
     consecutive_itm_observations: int
+    first_itm_recorded_at_monotonic: float | None
 
 
 class LiveExecutionCoordinator:
@@ -180,6 +224,7 @@ class LiveExecutionCoordinator:
         logger: StructuredLogger | None = None,
         replay_engine: ReplayEngine | None = None,
         sleep_fn=time.sleep,
+        time_fn=time.monotonic,
     ) -> None:
         self._settings = settings
         self._client = client
@@ -190,6 +235,7 @@ class LiveExecutionCoordinator:
         )
         self._replay_engine = replay_engine or _replay_engine_from_settings(settings)
         self._sleep_fn = sleep_fn
+        self._time_fn = time_fn
         self._live_position_ledger: dict[str, LivePositionRecord] = {}
         self._client_order_id_by_order_id: dict[str, str] = {}
         self._trailing_stop_states: dict[str, LiveTrailingStopState] = {}
@@ -200,6 +246,8 @@ class LiveExecutionCoordinator:
             tuple[str, str],
             ItmPersistenceMemory,
         ] = {}
+        self._entry_segment_counts: dict[tuple[str, str], int] = {}
+        self._entry_count_by_product_session: dict[tuple[str, str], int] = {}
 
     @property
     def live_position_ledger(self) -> dict[str, LivePositionRecord]:
@@ -302,6 +350,23 @@ class LiveExecutionCoordinator:
                 )
                 continue
             itm_persistence = self._itm_persistence_status(contract)
+            reversal_cross_hold = _reversal_cross_hold_status(
+                contract=contract,
+                itm_persistence=itm_persistence,
+                settings=self._settings,
+            )
+            if not reversal_cross_hold.allowed:
+                self._log_contract_intent_skipped(
+                    reason="reversal_cross_hold_blocked",
+                    contract=contract,
+                    cycle_number=cycle_number,
+                    scan_source=scan_source,
+                    details={
+                        **_itm_persistence_payload(itm_persistence),
+                        **_reversal_cross_hold_payload(reversal_cross_hold),
+                    },
+                )
+                continue
             end_window = _entry_end_window_status(contract, settings=self._settings)
             if end_window.reason is not None and not end_window.allowed:
                 self._log_contract_intent_skipped(
@@ -312,6 +377,19 @@ class LiveExecutionCoordinator:
                     details=_end_window_payload(end_window),
                 )
                 continue
+            entry_segment = self._entry_segment_status(contract, end_window=end_window)
+            if not entry_segment.allowed:
+                self._log_contract_intent_skipped(
+                    reason="entry_segment_budget_exhausted",
+                    contract=contract,
+                    cycle_number=cycle_number,
+                    scan_source=scan_source,
+                    details={
+                        **_end_window_payload(end_window),
+                        **_entry_segment_payload(entry_segment),
+                    },
+                )
+                continue
             flip_persistence = self._flip_persistence_status(contract)
             if not flip_persistence.allowed:
                 self._log_contract_intent_skipped(
@@ -319,7 +397,11 @@ class LiveExecutionCoordinator:
                     contract=contract,
                     cycle_number=cycle_number,
                     scan_source=scan_source,
-                    details=_flip_persistence_payload(flip_persistence),
+                    details={
+                        **_reversal_cross_hold_payload(reversal_cross_hold),
+                        **_entry_segment_payload(entry_segment),
+                        **_flip_persistence_payload(flip_persistence),
+                    },
                 )
                 continue
             retry_persistence = self._retry_persistence_status(
@@ -334,7 +416,22 @@ class LiveExecutionCoordinator:
                     scan_source=scan_source,
                     details={
                         **_itm_persistence_payload(itm_persistence),
+                        **_reversal_cross_hold_payload(reversal_cross_hold),
+                        **_entry_segment_payload(entry_segment),
                         **_retry_persistence_payload(retry_persistence),
+                    },
+                )
+                continue
+            product_session_pacing = self._product_session_pacing_status(contract)
+            if not product_session_pacing.allowed:
+                self._log_contract_intent_skipped(
+                    reason="product_session_pacing_blocked",
+                    contract=contract,
+                    cycle_number=cycle_number,
+                    scan_source=scan_source,
+                    details={
+                        **_entry_segment_payload(entry_segment),
+                        **_product_session_pacing_payload(product_session_pacing),
                     },
                 )
                 continue
@@ -357,6 +454,9 @@ class LiveExecutionCoordinator:
                         "realized_daily_pnl_dollars": (
                             LIVE_RUNNER_REALIZED_DAILY_PNL_DOLLARS
                         ),
+                        **_reversal_cross_hold_payload(reversal_cross_hold),
+                        **_entry_segment_payload(entry_segment),
+                        **_product_session_pacing_payload(product_session_pacing),
                     },
                 )
                 continue
@@ -375,6 +475,30 @@ class LiveExecutionCoordinator:
                 contract=contract,
                 market_snapshot=market_snapshot,
             )
+            mid_price_confirmation = _mid_price_confirmation_status(
+                contract=contract,
+                pricing=pricing,
+                itm_persistence=itm_persistence,
+                reversal_cross_hold=reversal_cross_hold,
+                settings=self._settings,
+            )
+            if not mid_price_confirmation.allowed:
+                self._log_contract_intent_skipped(
+                    reason="mid_price_confirmation_required",
+                    contract=contract,
+                    cycle_number=cycle_number,
+                    scan_source=scan_source,
+                    details={
+                        "stake_dollars": stake_dollars,
+                        **_itm_persistence_payload(itm_persistence),
+                        **_reversal_cross_hold_payload(reversal_cross_hold),
+                        **_entry_segment_payload(entry_segment),
+                        **_product_session_pacing_payload(product_session_pacing),
+                        **_execution_pricing_payload(pricing),
+                        **_mid_price_confirmation_payload(mid_price_confirmation),
+                    },
+                )
+                continue
             safety = _execution_safety_status(
                 contract=contract,
                 pricing=pricing,
@@ -395,6 +519,10 @@ class LiveExecutionCoordinator:
                         "stake_dollars": stake_dollars,
                         "count": safety.candidate_count,
                         **_itm_persistence_payload(itm_persistence),
+                        **_reversal_cross_hold_payload(reversal_cross_hold),
+                        **_entry_segment_payload(entry_segment),
+                        **_product_session_pacing_payload(product_session_pacing),
+                        **_mid_price_confirmation_payload(mid_price_confirmation),
                         **_retry_persistence_payload(retry_persistence),
                         **_execution_pricing_payload(pricing),
                         **_execution_safety_payload(safety),
@@ -413,6 +541,10 @@ class LiveExecutionCoordinator:
                     scan_source=scan_source,
                     details={
                         **_itm_persistence_payload(itm_persistence),
+                        **_reversal_cross_hold_payload(reversal_cross_hold),
+                        **_entry_segment_payload(entry_segment),
+                        **_product_session_pacing_payload(product_session_pacing),
+                        **_mid_price_confirmation_payload(mid_price_confirmation),
                         **_retry_persistence_payload(retry_persistence),
                         **_execution_pricing_payload(pricing),
                         **_execution_safety_payload(safety),
@@ -428,6 +560,10 @@ class LiveExecutionCoordinator:
                     details={
                         "stake_dollars": stake_dollars,
                         **_itm_persistence_payload(itm_persistence),
+                        **_reversal_cross_hold_payload(reversal_cross_hold),
+                        **_entry_segment_payload(entry_segment),
+                        **_product_session_pacing_payload(product_session_pacing),
+                        **_mid_price_confirmation_payload(mid_price_confirmation),
                         **_retry_persistence_payload(retry_persistence),
                         **_execution_pricing_payload(pricing),
                         **_execution_safety_payload(safety),
@@ -489,14 +625,19 @@ class LiveExecutionCoordinator:
                     "contract_close_time": getattr(contract, "contract_close_time", None),
                     **_end_window_payload(end_window),
                     **_itm_persistence_payload(itm_persistence),
+                    **_reversal_cross_hold_payload(reversal_cross_hold),
+                    **_entry_segment_payload(entry_segment),
                     **_flip_persistence_payload(flip_persistence),
                     **_retry_persistence_payload(retry_persistence),
+                    **_product_session_pacing_payload(product_session_pacing),
                     **_execution_pricing_payload(pricing),
+                    **_mid_price_confirmation_payload(mid_price_confirmation),
                     **_execution_safety_payload(safety),
                     "intent_count": intent.count,
                 },
             )
             self._record_live_entry_memory(contract)
+            self._record_entry_pacing(contract, entry_segment=entry_segment)
         return tuple(intents)
 
     def reconcile_live_positions(
@@ -1299,7 +1440,7 @@ class LiveExecutionCoordinator:
                 previous_direction=None,
                 previous_entry_age_seconds=None,
             )
-        age_seconds = Decimal(str(time.monotonic() - previous.recorded_at_monotonic)).quantize(
+        age_seconds = Decimal(str(self._time_fn() - previous.recorded_at_monotonic)).quantize(
             Decimal("0.001")
         )
         if int(age_seconds) >= FLIP_PERSISTENCE_WINDOW_SECONDS:
@@ -1338,8 +1479,10 @@ class LiveExecutionCoordinator:
         intent_side = _intent_side_from_direction(contract.direction)
         key = (contract.market_ticker, intent_side)
         previous = self._itm_persistence_by_market_side.get(key)
+        now = self._time_fn()
         side_currently_itm = getattr(contract, "side_currently_itm", None)
         side_needs_cross = getattr(contract, "side_needs_cross", None)
+        first_itm_recorded_at: float | None = None
         if side_currently_itm is None:
             status = "missing_feasibility"
             observations = 0
@@ -1353,6 +1496,13 @@ class LiveExecutionCoordinator:
                 else 0
             )
             observations = previous_observations + 1
+            first_itm_recorded_at = (
+                previous.first_itm_recorded_at_monotonic
+                if previous is not None
+                and previous.side_currently_itm
+                and previous.first_itm_recorded_at_monotonic is not None
+                else now
+            )
             status = "sustained_itm" if observations >= 2 else "newly_itm"
         else:
             status = "not_itm"
@@ -1361,6 +1511,12 @@ class LiveExecutionCoordinator:
         self._itm_persistence_by_market_side[key] = ItmPersistenceMemory(
             side_currently_itm=side_currently_itm,
             consecutive_itm_observations=observations,
+            first_itm_recorded_at_monotonic=first_itm_recorded_at,
+        )
+        hold_seconds = (
+            Decimal(str(now - first_itm_recorded_at)).quantize(Decimal("0.001"))
+            if first_itm_recorded_at is not None
+            else Decimal("0.000")
         )
         return ItmPersistenceStatus(
             status=status,
@@ -1368,6 +1524,7 @@ class LiveExecutionCoordinator:
             previous_side_currently_itm=(
                 previous.side_currently_itm if previous is not None else None
             ),
+            itm_hold_seconds=hold_seconds,
         )
 
     def _retry_persistence_status(
@@ -1384,7 +1541,7 @@ class LiveExecutionCoordinator:
                 previous_distance_to_target_bps=None,
                 previous_required_bps_per_minute=None,
             )
-        age_seconds = int(time.monotonic() - previous.recorded_at_monotonic)
+        age_seconds = int(self._time_fn() - previous.recorded_at_monotonic)
         if age_seconds >= FLIP_PERSISTENCE_WINDOW_SECONDS:
             return RetryPersistenceStatus(
                 allowed=True,
@@ -1429,8 +1586,108 @@ class LiveExecutionCoordinator:
             required_bps_per_minute=getattr(contract, "required_bps_per_minute", None),
             side_currently_itm=getattr(contract, "side_currently_itm", None),
             side_needs_cross=getattr(contract, "side_needs_cross", None),
-            recorded_at_monotonic=time.monotonic(),
+            recorded_at_monotonic=self._time_fn(),
             recorded_at=datetime.now(timezone.utc).isoformat(),
+        )
+
+    def _entry_segment_status(
+        self,
+        contract: ScannedContract,
+        *,
+        end_window: EntryEndWindowStatus,
+    ) -> EntrySegmentStatus:
+        segment = _entry_segment(end_window.remaining_seconds)
+        if not getattr(self._settings, "live_entry_segment_pacing_enabled", False):
+            return EntrySegmentStatus(
+                allowed=True,
+                status="disabled",
+                segment=segment,
+                current_count=0,
+                max_count=None,
+                remaining_seconds=end_window.remaining_seconds,
+            )
+        max_count = _entry_segment_max_count(segment, self._settings)
+        if segment is None or max_count is None:
+            return EntrySegmentStatus(
+                allowed=True,
+                status="segment_not_applicable",
+                segment=segment,
+                current_count=0,
+                max_count=max_count,
+                remaining_seconds=end_window.remaining_seconds,
+            )
+        key = (contract.market_ticker, segment)
+        current_count = self._entry_segment_counts.get(key, 0)
+        if current_count >= max_count:
+            return EntrySegmentStatus(
+                allowed=False,
+                status="budget_exhausted",
+                segment=segment,
+                current_count=current_count,
+                max_count=max_count,
+                remaining_seconds=end_window.remaining_seconds,
+            )
+        return EntrySegmentStatus(
+            allowed=True,
+            status="budget_available",
+            segment=segment,
+            current_count=current_count,
+            max_count=max_count,
+            remaining_seconds=end_window.remaining_seconds,
+        )
+
+    def _product_session_pacing_status(
+        self,
+        contract: ScannedContract,
+    ) -> ProductSessionPacingStatus:
+        max_open = getattr(self._settings, "live_max_open_positions_per_product", 2)
+        max_entries = getattr(
+            self._settings,
+            "live_max_entries_per_product_per_session",
+            2,
+        )
+        open_count = self._live_open_position_count_for_product(contract.product_id)
+        session_key = (contract.product_id, contract.market_ticker)
+        session_count = self._entry_count_by_product_session.get(session_key, 0)
+        if open_count >= max_open:
+            status = "max_open_positions_per_product_reached"
+            allowed = False
+        elif session_count >= max_entries:
+            status = "max_entries_per_product_session_reached"
+            allowed = False
+        else:
+            status = "available"
+            allowed = True
+        return ProductSessionPacingStatus(
+            allowed=allowed,
+            status=status,
+            product_open_position_count=open_count,
+            product_session_entry_count=session_count,
+            max_open_positions_per_product=max_open,
+            max_entries_per_product_per_session=max_entries,
+        )
+
+    def _live_open_position_count_for_product(self, product_id: str) -> int:
+        return sum(
+            1
+            for record in self._live_position_ledger.values()
+            if record.product_id == product_id and _record_has_live_exposure(record)
+        )
+
+    def _record_entry_pacing(
+        self,
+        contract: ScannedContract,
+        *,
+        entry_segment: EntrySegmentStatus,
+    ) -> None:
+        if entry_segment.segment is not None:
+            segment_key = (contract.market_ticker, entry_segment.segment)
+            self._entry_segment_counts[segment_key] = (
+                self._entry_segment_counts.get(segment_key, 0) + 1
+            )
+        session_key = (contract.product_id, contract.market_ticker)
+        self._entry_count_by_product_session[session_key] = (
+            self._entry_count_by_product_session.get(session_key, 0) + 1
         )
 
     def _poll_order(
@@ -1821,6 +2078,13 @@ def _entry_end_window_status(
 
     remaining_seconds = int((close_at - datetime.now(timezone.utc)).total_seconds())
     window_seconds = getattr(settings, "live_entry_end_window_minutes", 5) * 60
+    min_remaining_seconds = getattr(settings, "live_entry_min_remaining_seconds", 0)
+    if remaining_seconds < min_remaining_seconds:
+        return EntryEndWindowStatus(
+            allowed=False,
+            reason="entry_min_remaining_seconds_not_met",
+            remaining_seconds=remaining_seconds,
+        )
     if remaining_seconds <= window_seconds:
         return EntryEndWindowStatus(
             allowed=True,
@@ -1850,6 +2114,150 @@ def _end_window_payload(status: EntryEndWindowStatus) -> dict[str, object]:
         "end_window_allowed": status.allowed,
         "end_window_reason": status.reason,
     }
+
+
+def _entry_segment(remaining_seconds: int | None) -> str | None:
+    if remaining_seconds is None or remaining_seconds < 0:
+        return None
+    if remaining_seconds <= 60:
+        return ENTRY_SEGMENT_FINAL_1
+    if remaining_seconds <= 180:
+        return ENTRY_SEGMENT_3_TO_1
+    if remaining_seconds <= 300:
+        return ENTRY_SEGMENT_5_TO_3
+    if remaining_seconds <= 600:
+        return ENTRY_SEGMENT_10_TO_5
+    return None
+
+
+def _entry_segment_max_count(
+    segment: str | None,
+    settings: KalshiSettings,
+) -> int | None:
+    if segment == ENTRY_SEGMENT_10_TO_5:
+        return getattr(settings, "live_entry_segment_max_10_to_5", 1)
+    if segment == ENTRY_SEGMENT_5_TO_3:
+        return getattr(settings, "live_entry_segment_max_5_to_3", 1)
+    if segment == ENTRY_SEGMENT_3_TO_1:
+        return getattr(settings, "live_entry_segment_max_3_to_1", 1)
+    if segment == ENTRY_SEGMENT_FINAL_1:
+        return getattr(settings, "live_entry_segment_max_final_1", 1)
+    return None
+
+
+def _reversal_cross_hold_status(
+    *,
+    contract: ScannedContract,
+    itm_persistence: ItmPersistenceStatus,
+    settings: KalshiSettings,
+) -> ReversalCrossHoldStatus:
+    required_seconds = getattr(settings, "live_reversal_cross_hold_seconds", 60)
+    if not getattr(settings, "live_reversal_cross_hold_enabled", True):
+        return ReversalCrossHoldStatus(
+            allowed=True,
+            status="disabled",
+            hold_seconds=itm_persistence.itm_hold_seconds,
+            required_seconds=required_seconds,
+            block_reason=None,
+        )
+    if getattr(contract, "structure", None) != "reversal":
+        return ReversalCrossHoldStatus(
+            allowed=True,
+            status="not_reversal",
+            hold_seconds=itm_persistence.itm_hold_seconds,
+            required_seconds=required_seconds,
+            block_reason=None,
+        )
+    if not bool(getattr(contract, "side_currently_itm", False)):
+        return ReversalCrossHoldStatus(
+            allowed=False,
+            status="not_itm",
+            hold_seconds=itm_persistence.itm_hold_seconds,
+            required_seconds=required_seconds,
+            block_reason="reversal_cross_hold_requires_itm",
+        )
+    if bool(getattr(contract, "side_needs_cross", False)):
+        return ReversalCrossHoldStatus(
+            allowed=False,
+            status="needs_cross",
+            hold_seconds=itm_persistence.itm_hold_seconds,
+            required_seconds=required_seconds,
+            block_reason="reversal_cross_hold_requires_no_cross_needed",
+        )
+    if itm_persistence.itm_hold_seconds < Decimal(required_seconds):
+        return ReversalCrossHoldStatus(
+            allowed=False,
+            status="holding",
+            hold_seconds=itm_persistence.itm_hold_seconds,
+            required_seconds=required_seconds,
+            block_reason="reversal_cross_hold_waiting",
+        )
+    return ReversalCrossHoldStatus(
+        allowed=True,
+        status="confirmed",
+        hold_seconds=itm_persistence.itm_hold_seconds,
+        required_seconds=required_seconds,
+        block_reason=None,
+    )
+
+
+def _mid_price_confirmation_status(
+    *,
+    contract: ScannedContract,
+    pricing: ExecutionPricing,
+    itm_persistence: ItmPersistenceStatus,
+    reversal_cross_hold: ReversalCrossHoldStatus,
+    settings: KalshiSettings,
+) -> MidPriceConfirmationStatus:
+    band_min = getattr(settings, "live_mid_price_min", Decimal("0.50"))
+    band_max = getattr(settings, "live_mid_price_max", Decimal("0.70"))
+    if not getattr(settings, "live_mid_price_tightening_enabled", True):
+        return MidPriceConfirmationStatus(
+            allowed=True,
+            status="disabled",
+            price_band_min=band_min,
+            price_band_max=band_max,
+            block_reason=None,
+        )
+    if not (band_min <= pricing.intent_price_dollars <= band_max):
+        return MidPriceConfirmationStatus(
+            allowed=True,
+            status="outside_mid_price_band",
+            price_band_min=band_min,
+            price_band_max=band_max,
+            block_reason=None,
+        )
+    if getattr(contract, "trend_confirmation_status", None) == "confirmed":
+        return MidPriceConfirmationStatus(
+            allowed=True,
+            status="allowed_confirmed_trend",
+            price_band_min=band_min,
+            price_band_max=band_max,
+            block_reason=None,
+        )
+    if itm_persistence.status == "sustained_itm":
+        return MidPriceConfirmationStatus(
+            allowed=True,
+            status="allowed_sustained_itm",
+            price_band_min=band_min,
+            price_band_max=band_max,
+            block_reason=None,
+        )
+    if reversal_cross_hold.status == "confirmed":
+        return MidPriceConfirmationStatus(
+            allowed=True,
+            status="allowed_reversal_cross_hold",
+            price_band_min=band_min,
+            price_band_max=band_max,
+            block_reason=None,
+        )
+    return MidPriceConfirmationStatus(
+        allowed=False,
+        status="confirmation_required",
+        price_band_min=band_min,
+        price_band_max=band_max,
+        block_reason="mid_price_requires_confirmed_trend_sustained_itm_or_cross_hold",
+    )
 
 
 def _execution_safety_status(
@@ -2095,6 +2503,13 @@ def _signal_diagnostic_payload(contract: ScannedContract) -> dict[str, object]:
         "scanner_score_downgrade_reasons": list(
             getattr(contract, "scanner_score_downgrade_reasons", ()) or ()
         ),
+        "scanner_score_bonus_reasons": list(
+            getattr(contract, "scanner_score_bonus_reasons", ()) or ()
+        ),
+        "trend_confirmed_bonus": (
+            "confirmed_trend"
+            in (getattr(contract, "scanner_score_bonus_reasons", ()) or ())
+        ),
     }
 
 
@@ -2112,6 +2527,16 @@ def _itm_persistence_payload(status: ItmPersistenceStatus) -> dict[str, object]:
         "consecutive_itm_observations": status.consecutive_itm_observations,
         "previous_side_currently_itm": status.previous_side_currently_itm,
         "sustained_itm_min_observations": 2,
+        "itm_hold_seconds": status.itm_hold_seconds,
+    }
+
+
+def _reversal_cross_hold_payload(status: ReversalCrossHoldStatus) -> dict[str, object]:
+    return {
+        "reversal_cross_hold_status": status.status,
+        "reversal_cross_hold_seconds": status.hold_seconds,
+        "reversal_cross_hold_required": status.required_seconds,
+        "reversal_cross_hold_block_reason": status.block_reason,
     }
 
 
@@ -2121,6 +2546,37 @@ def _retry_persistence_payload(status: RetryPersistenceStatus) -> dict[str, obje
         "previous_distance_to_target_bps": status.previous_distance_to_target_bps,
         "previous_required_bps_per_minute": status.previous_required_bps_per_minute,
         "retry_persistence_window_seconds": FLIP_PERSISTENCE_WINDOW_SECONDS,
+    }
+
+
+def _mid_price_confirmation_payload(status: MidPriceConfirmationStatus) -> dict[str, object]:
+    return {
+        "mid_price_confirmation_status": status.status,
+        "mid_price_confirmation_block_reason": status.block_reason,
+        "mid_price_min": status.price_band_min,
+        "mid_price_max": status.price_band_max,
+    }
+
+
+def _entry_segment_payload(status: EntrySegmentStatus) -> dict[str, object]:
+    return {
+        "entry_segment_status": status.status,
+        "entry_segment": status.segment,
+        "entry_segment_current_count": status.current_count,
+        "entry_segment_max_count": status.max_count,
+        "entry_segment_remaining_seconds": status.remaining_seconds,
+    }
+
+
+def _product_session_pacing_payload(status: ProductSessionPacingStatus) -> dict[str, object]:
+    return {
+        "product_session_pacing_status": status.status,
+        "product_open_position_count": status.product_open_position_count,
+        "product_session_entry_count": status.product_session_entry_count,
+        "max_open_positions_per_product": status.max_open_positions_per_product,
+        "max_entries_per_product_per_session": (
+            status.max_entries_per_product_per_session
+        ),
     }
 
 

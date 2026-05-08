@@ -221,6 +221,13 @@ LIVE_MAX_STAKE_DOLLARS=4
 LIVE_MAX_EXPOSURE_DOLLARS=8
 LIVE_MAX_OPEN_POSITIONS=1
 LIVE_MAX_CONTRACT_COUNT=2
+LIVE_REVERSAL_CROSS_HOLD_SECONDS=45
+LIVE_MID_PRICE_MIN=0.55
+LIVE_MID_PRICE_MAX=0.65
+LIVE_ENTRY_SEGMENT_PACING_ENABLED=true
+LIVE_ENTRY_SEGMENT_MAX_FINAL_1=1
+LIVE_MAX_OPEN_POSITIONS_PER_PRODUCT=2
+LIVE_MAX_ENTRIES_PER_PRODUCT_PER_SESSION=2
 """
     )
     failures: list[str] = []
@@ -236,6 +243,28 @@ LIVE_MAX_CONTRACT_COUNT=2
         failures.append(f"live max open={settings.live_max_open_positions}")
     if settings.live_max_contract_count != 2:
         failures.append(f"live max count={settings.live_max_contract_count}")
+    if settings.live_reversal_cross_hold_seconds != 45:
+        failures.append(
+            f"live reversal hold seconds={settings.live_reversal_cross_hold_seconds}"
+        )
+    if settings.live_mid_price_min != Decimal("0.5500"):
+        failures.append(f"live mid min={settings.live_mid_price_min}")
+    if settings.live_mid_price_max != Decimal("0.6500"):
+        failures.append(f"live mid max={settings.live_mid_price_max}")
+    if not settings.live_entry_segment_pacing_enabled:
+        failures.append("live segment pacing did not parse true")
+    if settings.live_entry_segment_max_final_1 != 1:
+        failures.append(f"live final segment max={settings.live_entry_segment_max_final_1}")
+    if settings.live_max_open_positions_per_product != 2:
+        failures.append(
+            "live max open per product="
+            f"{settings.live_max_open_positions_per_product}"
+        )
+    if settings.live_max_entries_per_product_per_session != 2:
+        failures.append(
+            "live max entries per product session="
+            f"{settings.live_max_entries_per_product_per_session}"
+        )
 
     generic_manager = RiskManager.from_settings(settings)
     live_manager = RiskManager.from_live_settings(settings)
@@ -452,6 +481,19 @@ def _load_settings_from_text(text: str):
         "LIVE_MAX_STAKE_DOLLARS",
         "LIVE_MAX_OPEN_POSITIONS",
         "LIVE_MAX_CONTRACT_COUNT",
+        "LIVE_REVERSAL_CROSS_HOLD_ENABLED",
+        "LIVE_REVERSAL_CROSS_HOLD_SECONDS",
+        "LIVE_MID_PRICE_TIGHTENING_ENABLED",
+        "LIVE_MID_PRICE_MIN",
+        "LIVE_MID_PRICE_MAX",
+        "LIVE_ENTRY_MIN_REMAINING_SECONDS",
+        "LIVE_ENTRY_SEGMENT_PACING_ENABLED",
+        "LIVE_ENTRY_SEGMENT_MAX_10_TO_5",
+        "LIVE_ENTRY_SEGMENT_MAX_5_TO_3",
+        "LIVE_ENTRY_SEGMENT_MAX_3_TO_1",
+        "LIVE_ENTRY_SEGMENT_MAX_FINAL_1",
+        "LIVE_MAX_OPEN_POSITIONS_PER_PRODUCT",
+        "LIVE_MAX_ENTRIES_PER_PRODUCT_PER_SESSION",
     }
     previous = {key: os.environ.get(key) for key in keys}
     for key in keys:
