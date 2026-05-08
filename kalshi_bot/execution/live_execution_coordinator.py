@@ -145,6 +145,24 @@ class ProductSessionPacingStatus:
 
 
 @dataclass(frozen=True)
+class CompositeQualityStatus:
+    allowed: bool
+    status: str
+    reason: str
+    block_reason: str | None
+    required_conditions: tuple[str, ...]
+    matched_conditions: tuple[str, ...]
+    reversal_price_status: str
+    reversal_max_entry_price: Decimal
+    reversal_price_block_reason: str | None
+    needs_cross_status: str
+    required_bps_per_minute_status: str
+    max_required_bps_per_minute: Decimal
+    target_distance_filter_reason: str | None
+    outside_end_window_exception_status: str
+
+
+@dataclass(frozen=True)
 class LiveSubmissionResult:
     """Outcome from one guarded live submission attempt."""
 
@@ -378,7 +396,26 @@ class LiveExecutionCoordinator:
                 )
                 continue
             end_window = _entry_end_window_status(contract, settings=self._settings)
-            if end_window.reason is not None and not end_window.allowed:
+            defer_end_window_block = (
+                end_window.reason == "end_window_not_open"
+                and (
+                    getattr(
+                        self._settings,
+                        "live_composite_quality_filter_enabled",
+                        True,
+                    )
+                    or getattr(
+                        self._settings,
+                        "live_outside_end_window_exception_enabled",
+                        False,
+                    )
+                )
+            )
+            if (
+                end_window.reason is not None
+                and not end_window.allowed
+                and not defer_end_window_block
+            ):
                 self._log_contract_intent_skipped(
                     reason=end_window.reason,
                     contract=contract,
@@ -580,6 +617,36 @@ class LiveExecutionCoordinator:
                     },
                 )
                 continue
+            composite_quality = _composite_quality_status(
+                contract=contract,
+                pricing=pricing,
+                entry_segment=entry_segment,
+                end_window=end_window,
+                settings=self._settings,
+            )
+            if not composite_quality.allowed:
+                self._log_contract_intent_skipped(
+                    reason=composite_quality.reason,
+                    contract=contract,
+                    cycle_number=cycle_number,
+                    scan_source=scan_source,
+                    details={
+                        "entry_price": pricing.intent_price_dollars,
+                        "intent_side": pricing.intent_side,
+                        "stake_dollars": stake_dollars,
+                        "count": safety.candidate_count,
+                        **_itm_persistence_payload(itm_persistence),
+                        **_reversal_cross_hold_payload(reversal_cross_hold),
+                        **_entry_segment_payload(entry_segment),
+                        **_product_session_pacing_payload(product_session_pacing),
+                        **_mid_price_confirmation_payload(mid_price_confirmation),
+                        **_retry_persistence_payload(retry_persistence),
+                        **_execution_pricing_payload(pricing),
+                        **_execution_safety_payload(safety),
+                        **_composite_quality_payload(composite_quality),
+                    },
+                )
+                continue
 
             intent = build_live_order_intent_from_contract(
                 contract,
@@ -643,6 +710,7 @@ class LiveExecutionCoordinator:
                     **_execution_pricing_payload(pricing),
                     **_mid_price_confirmation_payload(mid_price_confirmation),
                     **_execution_safety_payload(safety),
+                    **_composite_quality_payload(composite_quality),
                     "intent_count": intent.count,
                 },
             )
@@ -2068,7 +2136,7 @@ def _entry_end_window_status(
         return EntryEndWindowStatus(
             allowed=None,
             reason=None,
-            remaining_seconds=None,
+            remaining_seconds=_contract_time_remaining_seconds(contract),
         )
     close_time = getattr(contract, "contract_close_time", None)
     if not close_time:
@@ -2106,6 +2174,20 @@ def _entry_end_window_status(
         reason="end_window_not_open",
         remaining_seconds=remaining_seconds,
     )
+
+
+def _contract_time_remaining_seconds(contract: ScannedContract) -> int | None:
+    remaining_seconds = getattr(contract, "contract_time_remaining_seconds", None)
+    if remaining_seconds is not None:
+        return int(remaining_seconds)
+    close_time = getattr(contract, "contract_close_time", None)
+    if not close_time:
+        return None
+    try:
+        close_at = _parse_iso_datetime(close_time)
+    except ValueError:
+        return None
+    return int((close_at - datetime.now(timezone.utc)).total_seconds())
 
 
 def _stale_contract_status(contract: ScannedContract) -> dict[str, object] | None:
@@ -2295,6 +2377,348 @@ def _mid_price_confirmation_status(
         price_band_max=band_max,
         block_reason="mid_price_requires_confirmed_trend_sustained_itm_or_cross_hold",
     )
+
+
+def _composite_quality_status(
+    *,
+    contract: ScannedContract,
+    pricing: ExecutionPricing,
+    entry_segment: EntrySegmentStatus,
+    end_window: EntryEndWindowStatus,
+    settings: KalshiSettings,
+) -> CompositeQualityStatus:
+    entry_price = pricing.intent_price_dollars
+    required_conditions = _composite_required_conditions(settings)
+    matched_conditions = _composite_matched_conditions(
+        contract=contract,
+        pricing=pricing,
+        entry_segment=entry_segment,
+        settings=settings,
+    )
+    reversal_max_entry_price = getattr(
+        settings,
+        "live_reversal_max_entry_price",
+        Decimal("0.10"),
+    )
+    max_required_bps_per_minute = getattr(
+        settings,
+        "live_max_required_bps_per_minute",
+        Decimal("0.25"),
+    )
+    reversal_price_status = "not_reversal"
+    reversal_price_block_reason = None
+    if getattr(contract, "structure", None) == "reversal":
+        if entry_price >= reversal_max_entry_price:
+            reversal_price_status = "blocked"
+            reversal_price_block_reason = "reversal_entry_price_too_high"
+            return CompositeQualityStatus(
+                allowed=False,
+                status="blocked_reversal_price",
+                reason="reversal_price_blocked",
+                block_reason="reversal_price_blocked",
+                required_conditions=required_conditions,
+                matched_conditions=matched_conditions,
+                reversal_price_status=reversal_price_status,
+                reversal_max_entry_price=reversal_max_entry_price,
+                reversal_price_block_reason=reversal_price_block_reason,
+                needs_cross_status=_needs_cross_status(contract, settings),
+                required_bps_per_minute_status=_required_bps_per_minute_status(
+                    contract,
+                    max_required_bps_per_minute,
+                ),
+                max_required_bps_per_minute=max_required_bps_per_minute,
+                target_distance_filter_reason=None,
+                outside_end_window_exception_status=(
+                    _outside_end_window_exception_status(
+                        contract=contract,
+                        pricing=pricing,
+                        entry_segment=entry_segment,
+                        end_window=end_window,
+                        settings=settings,
+                    )
+                ),
+            )
+        reversal_price_status = "allowed_low_price_reversal"
+
+    needs_cross_status = _needs_cross_status(contract, settings)
+    if needs_cross_status == "blocked":
+        return CompositeQualityStatus(
+            allowed=False,
+            status="blocked_needs_cross",
+            reason="needs_cross_blocked",
+            block_reason="needs_cross_blocked",
+            required_conditions=required_conditions,
+            matched_conditions=matched_conditions,
+            reversal_price_status=reversal_price_status,
+            reversal_max_entry_price=reversal_max_entry_price,
+            reversal_price_block_reason=reversal_price_block_reason,
+            needs_cross_status=needs_cross_status,
+            required_bps_per_minute_status=_required_bps_per_minute_status(
+                contract,
+                max_required_bps_per_minute,
+            ),
+            max_required_bps_per_minute=max_required_bps_per_minute,
+            target_distance_filter_reason="side_needs_cross_blocked",
+            outside_end_window_exception_status=_outside_end_window_exception_status(
+                contract=contract,
+                pricing=pricing,
+                entry_segment=entry_segment,
+                end_window=end_window,
+                settings=settings,
+            ),
+        )
+
+    required_bps_status = _required_bps_per_minute_status(
+        contract,
+        max_required_bps_per_minute,
+    )
+    if required_bps_status == "blocked":
+        return CompositeQualityStatus(
+            allowed=False,
+            status="blocked_required_bps_per_minute",
+            reason="required_bps_per_minute_too_high",
+            block_reason="required_bps_per_minute_too_high",
+            required_conditions=required_conditions,
+            matched_conditions=matched_conditions,
+            reversal_price_status=reversal_price_status,
+            reversal_max_entry_price=reversal_max_entry_price,
+            reversal_price_block_reason=reversal_price_block_reason,
+            needs_cross_status=needs_cross_status,
+            required_bps_per_minute_status=required_bps_status,
+            max_required_bps_per_minute=max_required_bps_per_minute,
+            target_distance_filter_reason="required_bps_per_minute_too_high",
+            outside_end_window_exception_status=_outside_end_window_exception_status(
+                contract=contract,
+                pricing=pricing,
+                entry_segment=entry_segment,
+                end_window=end_window,
+                settings=settings,
+            ),
+        )
+
+    outside_status = _outside_end_window_exception_status(
+        contract=contract,
+        pricing=pricing,
+        entry_segment=entry_segment,
+        end_window=end_window,
+        settings=settings,
+    )
+    if outside_status == "blocked":
+        return CompositeQualityStatus(
+            allowed=False,
+            status="blocked_outside_end_window",
+            reason="outside_end_window_blocked",
+            block_reason="outside_end_window_blocked",
+            required_conditions=required_conditions,
+            matched_conditions=matched_conditions,
+            reversal_price_status=reversal_price_status,
+            reversal_max_entry_price=reversal_max_entry_price,
+            reversal_price_block_reason=reversal_price_block_reason,
+            needs_cross_status=needs_cross_status,
+            required_bps_per_minute_status=required_bps_status,
+            max_required_bps_per_minute=max_required_bps_per_minute,
+            target_distance_filter_reason=None,
+            outside_end_window_exception_status=outside_status,
+        )
+    if outside_status == "allowed_low_price_trend_exception":
+        return CompositeQualityStatus(
+            allowed=True,
+            status="allowed_outside_end_window_exception",
+            reason=outside_status,
+            block_reason=None,
+            required_conditions=required_conditions,
+            matched_conditions=matched_conditions,
+            reversal_price_status=reversal_price_status,
+            reversal_max_entry_price=reversal_max_entry_price,
+            reversal_price_block_reason=reversal_price_block_reason,
+            needs_cross_status=needs_cross_status,
+            required_bps_per_minute_status=required_bps_status,
+            max_required_bps_per_minute=max_required_bps_per_minute,
+            target_distance_filter_reason=None,
+            outside_end_window_exception_status=outside_status,
+        )
+
+    if reversal_price_status == "allowed_low_price_reversal":
+        return CompositeQualityStatus(
+            allowed=True,
+            status="allowed_low_price_reversal",
+            reason="low_price_reversal_allowed",
+            block_reason=None,
+            required_conditions=required_conditions,
+            matched_conditions=matched_conditions,
+            reversal_price_status=reversal_price_status,
+            reversal_max_entry_price=reversal_max_entry_price,
+            reversal_price_block_reason=reversal_price_block_reason,
+            needs_cross_status=needs_cross_status,
+            required_bps_per_minute_status=required_bps_status,
+            max_required_bps_per_minute=max_required_bps_per_minute,
+            target_distance_filter_reason=None,
+            outside_end_window_exception_status=outside_status,
+        )
+
+    if not getattr(settings, "live_composite_quality_filter_enabled", True):
+        return CompositeQualityStatus(
+            allowed=True,
+            status="disabled",
+            reason="composite_quality_filter_disabled",
+            block_reason=None,
+            required_conditions=required_conditions,
+            matched_conditions=matched_conditions,
+            reversal_price_status=reversal_price_status,
+            reversal_max_entry_price=reversal_max_entry_price,
+            reversal_price_block_reason=reversal_price_block_reason,
+            needs_cross_status=needs_cross_status,
+            required_bps_per_minute_status=required_bps_status,
+            max_required_bps_per_minute=max_required_bps_per_minute,
+            target_distance_filter_reason=None,
+            outside_end_window_exception_status=outside_status,
+        )
+
+    missing = tuple(
+        condition
+        for condition in required_conditions
+        if condition not in matched_conditions
+    )
+    if missing:
+        return CompositeQualityStatus(
+            allowed=False,
+            status="blocked_composite_quality",
+            reason="composite_quality_blocked",
+            block_reason=f"missing_{missing[0]}",
+            required_conditions=required_conditions,
+            matched_conditions=matched_conditions,
+            reversal_price_status=reversal_price_status,
+            reversal_max_entry_price=reversal_max_entry_price,
+            reversal_price_block_reason=reversal_price_block_reason,
+            needs_cross_status=needs_cross_status,
+            required_bps_per_minute_status=required_bps_status,
+            max_required_bps_per_minute=max_required_bps_per_minute,
+            target_distance_filter_reason=None,
+            outside_end_window_exception_status=outside_status,
+        )
+
+    status = (
+        "allowed_low_price_trend"
+        if entry_price <= getattr(settings, "live_composite_low_price_max", Decimal("0.30"))
+        else "allowed_composite_quality"
+    )
+    return CompositeQualityStatus(
+        allowed=True,
+        status=status,
+        reason=status,
+        block_reason=None,
+        required_conditions=required_conditions,
+        matched_conditions=matched_conditions,
+        reversal_price_status=reversal_price_status,
+        reversal_max_entry_price=reversal_max_entry_price,
+        reversal_price_block_reason=reversal_price_block_reason,
+        needs_cross_status=needs_cross_status,
+        required_bps_per_minute_status=required_bps_status,
+        max_required_bps_per_minute=max_required_bps_per_minute,
+        target_distance_filter_reason=None,
+        outside_end_window_exception_status=outside_status,
+    )
+
+
+def _composite_required_conditions(settings: KalshiSettings) -> tuple[str, ...]:
+    conditions: list[str] = []
+    if getattr(settings, "live_composite_require_trend", True):
+        conditions.append("structure_trend")
+    if getattr(settings, "live_composite_require_itm", True):
+        conditions.append("side_currently_itm")
+    if getattr(settings, "live_composite_block_needs_cross", True):
+        conditions.append("side_needs_cross_false")
+    conditions.append("entry_price_at_or_below_max")
+    conditions.append("entry_segment_allowed")
+    return tuple(conditions)
+
+
+def _composite_matched_conditions(
+    *,
+    contract: ScannedContract,
+    pricing: ExecutionPricing,
+    entry_segment: EntrySegmentStatus,
+    settings: KalshiSettings,
+) -> tuple[str, ...]:
+    matched: list[str] = []
+    if getattr(contract, "structure", None) == "trend":
+        matched.append("structure_trend")
+    if bool(getattr(contract, "side_currently_itm", False)):
+        matched.append("side_currently_itm")
+    if not bool(getattr(contract, "side_needs_cross", False)):
+        matched.append("side_needs_cross_false")
+    if pricing.intent_price_dollars <= getattr(
+        settings,
+        "live_composite_max_entry_price",
+        Decimal("0.50"),
+    ):
+        matched.append("entry_price_at_or_below_max")
+    if entry_segment.segment in getattr(
+        settings,
+        "live_composite_allowed_segments",
+        ("10_to_5", "3_to_1"),
+    ):
+        matched.append("entry_segment_allowed")
+    if pricing.intent_price_dollars <= getattr(
+        settings,
+        "live_composite_low_price_max",
+        Decimal("0.30"),
+    ):
+        matched.append("low_price_cluster")
+    return tuple(matched)
+
+
+def _needs_cross_status(contract: ScannedContract, settings: KalshiSettings) -> str:
+    if not bool(getattr(contract, "side_needs_cross", False)):
+        return "no_cross_needed"
+    if getattr(settings, "live_block_needs_cross", True):
+        return "blocked"
+    return "allowed"
+
+
+def _required_bps_per_minute_status(
+    contract: ScannedContract,
+    max_required_bps_per_minute: Decimal,
+) -> str:
+    required_bps_per_minute = getattr(contract, "required_bps_per_minute", None)
+    if required_bps_per_minute is None:
+        return "missing"
+    required = Decimal(str(required_bps_per_minute))
+    if required <= Decimal("0"):
+        return "not_required"
+    if required > max_required_bps_per_minute:
+        return "blocked"
+    return "within_limit"
+
+
+def _outside_end_window_exception_status(
+    *,
+    contract: ScannedContract,
+    pricing: ExecutionPricing,
+    entry_segment: EntrySegmentStatus,
+    end_window: EntryEndWindowStatus,
+    settings: KalshiSettings,
+) -> str:
+    outside_window = (
+        end_window.reason == "end_window_not_open"
+        or (
+            getattr(settings, "live_composite_quality_filter_enabled", True)
+            and entry_segment.segment is None
+        )
+    )
+    if not outside_window:
+        return "not_outside_end_window"
+    if not getattr(settings, "live_outside_end_window_exception_enabled", False):
+        return "blocked"
+    if (
+        pricing.intent_price_dollars
+        <= getattr(settings, "live_outside_end_window_max_price", Decimal("0.30"))
+        and getattr(contract, "structure", None) == "trend"
+        and bool(getattr(contract, "side_currently_itm", False))
+        and not bool(getattr(contract, "side_needs_cross", False))
+    ):
+        return "allowed_low_price_trend_exception"
+    return "blocked"
 
 
 def _execution_safety_status(
@@ -2592,6 +3016,26 @@ def _mid_price_confirmation_payload(status: MidPriceConfirmationStatus) -> dict[
         "mid_price_confirmation_block_reason": status.block_reason,
         "mid_price_min": status.price_band_min,
         "mid_price_max": status.price_band_max,
+    }
+
+
+def _composite_quality_payload(status: CompositeQualityStatus) -> dict[str, object]:
+    return {
+        "composite_quality_status": status.status,
+        "composite_quality_reason": status.reason,
+        "composite_quality_required_conditions": list(status.required_conditions),
+        "composite_quality_matched_conditions": list(status.matched_conditions),
+        "composite_quality_block_reason": status.block_reason,
+        "reversal_price_status": status.reversal_price_status,
+        "reversal_max_entry_price": status.reversal_max_entry_price,
+        "reversal_price_block_reason": status.reversal_price_block_reason,
+        "needs_cross_status": status.needs_cross_status,
+        "required_bps_per_minute_status": status.required_bps_per_minute_status,
+        "max_required_bps_per_minute": status.max_required_bps_per_minute,
+        "target_distance_filter_reason": status.target_distance_filter_reason,
+        "outside_end_window_exception_status": (
+            status.outside_end_window_exception_status
+        ),
     }
 
 

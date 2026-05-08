@@ -228,6 +228,18 @@ LIVE_ENTRY_SEGMENT_PACING_ENABLED=true
 LIVE_ENTRY_SEGMENT_MAX_FINAL_1=1
 LIVE_MAX_OPEN_POSITIONS_PER_PRODUCT=2
 LIVE_MAX_ENTRIES_PER_PRODUCT_PER_SESSION=2
+LIVE_COMPOSITE_QUALITY_FILTER_ENABLED=true
+LIVE_COMPOSITE_MAX_ENTRY_PRICE=0.55
+LIVE_COMPOSITE_LOW_PRICE_MAX=0.25
+LIVE_COMPOSITE_ALLOWED_SEGMENTS=10-to-5,3_to_1
+LIVE_COMPOSITE_REQUIRE_TREND=true
+LIVE_COMPOSITE_REQUIRE_ITM=true
+LIVE_COMPOSITE_BLOCK_NEEDS_CROSS=true
+LIVE_REVERSAL_MAX_ENTRY_PRICE=0.09
+LIVE_BLOCK_NEEDS_CROSS=true
+LIVE_MAX_REQUIRED_BPS_PER_MINUTE=0.20
+LIVE_OUTSIDE_END_WINDOW_EXCEPTION_ENABLED=true
+LIVE_OUTSIDE_END_WINDOW_MAX_PRICE=0.25
 """
     )
     failures: list[str] = []
@@ -264,6 +276,26 @@ LIVE_MAX_ENTRIES_PER_PRODUCT_PER_SESSION=2
         failures.append(
             "live max entries per product session="
             f"{settings.live_max_entries_per_product_per_session}"
+        )
+    if settings.live_composite_max_entry_price != Decimal("0.5500"):
+        failures.append(f"live composite max={settings.live_composite_max_entry_price}")
+    if settings.live_composite_low_price_max != Decimal("0.2500"):
+        failures.append(f"live composite low={settings.live_composite_low_price_max}")
+    if settings.live_composite_allowed_segments != ("10_to_5", "3_to_1"):
+        failures.append(
+            f"live composite segments={settings.live_composite_allowed_segments}"
+        )
+    if settings.live_reversal_max_entry_price != Decimal("0.0900"):
+        failures.append(f"live reversal max={settings.live_reversal_max_entry_price}")
+    if settings.live_max_required_bps_per_minute != Decimal("0.20"):
+        failures.append(
+            f"live max required bps={settings.live_max_required_bps_per_minute}"
+        )
+    if not settings.live_outside_end_window_exception_enabled:
+        failures.append("live outside exception did not parse true")
+    if settings.live_outside_end_window_max_price != Decimal("0.2500"):
+        failures.append(
+            f"live outside max={settings.live_outside_end_window_max_price}"
         )
 
     generic_manager = RiskManager.from_settings(settings)

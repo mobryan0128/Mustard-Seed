@@ -59,6 +59,14 @@ def main() -> int:
     failures.extend(_validate_reversal_cross_hold_allows_after_hold())
     failures.extend(_validate_mid_price_weak_reversal_blocks())
     failures.extend(_validate_mid_price_confirmed_trend_allows())
+    failures.extend(_validate_composite_candidate_a_allows())
+    failures.extend(_validate_composite_low_price_candidate_allows())
+    failures.extend(_validate_reversal_price_blocks_confirmed_hold())
+    failures.extend(_validate_needs_cross_blocks_by_default())
+    failures.extend(_validate_required_bps_per_minute_blocks())
+    failures.extend(_validate_far_itm_trend_not_distance_blocked())
+    failures.extend(_validate_outside_end_window_blocks_by_default())
+    failures.extend(_validate_outside_end_window_exception_allows_low_price_trend())
     failures.extend(_validate_zero_visible_liquidity_blocks())
     failures.extend(_validate_midpoint_fallback_price_below_minimum_skip())
     failures.extend(_validate_midpoint_fallback_price_above_maximum_skip())
@@ -189,6 +197,11 @@ def _validate_direct_contract_scan_creates_live_intent() -> list[str]:
         temp_path = Path(temp_dir)
         coordinator = _coordinator(
             temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_composite_quality_filter_enabled=False,
+            ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
         )
         market_snapshot = _market_snapshot(
@@ -281,6 +294,13 @@ def _validate_direct_contract_scan_midpoint_fallback() -> list[str]:
         temp_path = Path(temp_dir)
         coordinator = _coordinator(
             temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_composite_quality_filter_enabled=False,
+                live_block_needs_cross=False,
+                live_max_required_bps_per_minute=Decimal("1.00"),
+            ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
         )
         intents = coordinator.process_contract_scan_snapshot(
@@ -356,6 +376,13 @@ def _validate_contextual_high_price_sustained_itm_allows() -> list[str]:
         temp_path = Path(temp_dir)
         coordinator = _coordinator(
             temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_composite_quality_filter_enabled=False,
+                live_block_needs_cross=False,
+                live_max_required_bps_per_minute=Decimal("1.00"),
+            ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
         )
         market_snapshot = _market_snapshot(
@@ -556,6 +583,12 @@ def _validate_reversal_cross_hold_allows_after_hold() -> list[str]:
         now = {"value": 1000.0}
         coordinator = _coordinator(
             temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_composite_quality_filter_enabled=False,
+                live_reversal_max_entry_price=Decimal("0.99"),
+            ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
             time_fn=lambda: now["value"],
         )
@@ -643,6 +676,11 @@ def _validate_mid_price_confirmed_trend_allows() -> list[str]:
         temp_path = Path(temp_dir)
         coordinator = _coordinator(
             temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_composite_max_entry_price=Decimal("0.70"),
+            ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
         )
         intents = coordinator.process_contract_scan_snapshot(
@@ -671,6 +709,313 @@ def _validate_mid_price_confirmed_trend_allows() -> list[str]:
                 f"{payload.get('mid_price_confirmation_status')}"
             ]
         return []
+
+
+def _validate_composite_candidate_a_allows() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    market_ticker="KXBTC15M-COMP-A",
+                    midpoint=Decimal("0.50"),
+                    contract_close_time=_future_time(minutes=7),
+                    contract_time_remaining_seconds=420,
+                )
+            ),
+            cycle_number=69,
+        )
+        failures: list[str] = []
+        if len(intents) != 1:
+            return [f"composite candidate A intents={len(intents)} expected=1"]
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_intent_created",
+        )
+        if payload is None:
+            return ["composite candidate A intent log missing"]
+        if payload.get("composite_quality_status") != "allowed_composite_quality":
+            failures.append(
+                "composite candidate A status="
+                f"{payload.get('composite_quality_status')}"
+            )
+        if payload.get("entry_segment") != "10_to_5":
+            failures.append(f"composite candidate A segment={payload.get('entry_segment')}")
+        return failures
+
+
+def _validate_composite_low_price_candidate_allows() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    market_ticker="KXBTC15M-COMP-B",
+                    midpoint=Decimal("0.30"),
+                    contract_close_time=_future_time(minutes=2),
+                    contract_time_remaining_seconds=120,
+                )
+            ),
+            cycle_number=70,
+        )
+        if len(intents) != 1:
+            return [f"composite low-price intents={len(intents)} expected=1"]
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_intent_created",
+        )
+        if payload is None:
+            return ["composite low-price intent log missing"]
+        if payload.get("composite_quality_status") != "allowed_low_price_trend":
+            return [
+                "composite low-price status="
+                f"{payload.get('composite_quality_status')}"
+            ]
+        if payload.get("entry_segment") != "3_to_1":
+            return [f"composite low-price segment={payload.get('entry_segment')}"]
+        return []
+
+
+def _validate_reversal_price_blocks_confirmed_hold() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        now = {"value": 1000.0}
+        coordinator = _coordinator(
+            temp_path,
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+            time_fn=lambda: now["value"],
+        )
+        contract = _contract(
+            market_ticker="KXBTC15M-REV-PRICE-BLOCK",
+            structure="reversal",
+            reversal_confirmation_status="confirmed",
+            trend_confirmation_status="not_trend",
+            side_currently_itm=True,
+            side_needs_cross=False,
+            distance_to_target_bps=Decimal("-3.000"),
+            required_bps_per_minute=Decimal("0.000"),
+            midpoint=Decimal("0.10"),
+            contract_close_time=_future_time(minutes=2),
+        )
+        coordinator.process_contract_scan_snapshot(_contract_snapshot(contract), cycle_number=71)
+        now["value"] = 1061.0
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(contract),
+            cycle_number=72,
+        )
+        if intents:
+            return [f"reversal price block intents={len(intents)} expected=0"]
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            return ["reversal price block skip log missing"]
+        if payload.get("reason") != "reversal_price_blocked":
+            return [f"reversal price block reason={payload.get('reason')}"]
+        if payload.get("reversal_price_block_reason") != "reversal_entry_price_too_high":
+            return [
+                "reversal price block detail="
+                f"{payload.get('reversal_price_block_reason')}"
+            ]
+        return []
+
+
+def _validate_needs_cross_blocks_by_default() -> list[str]:
+    return _expect_composite_skip(
+        contract=_contract(
+            market_ticker="KXBTC15M-NEEDS-CROSS-BLOCK",
+            midpoint=Decimal("0.30"),
+            side_currently_itm=False,
+            side_needs_cross=True,
+            distance_to_target_bps=Decimal("1.000"),
+            required_bps_per_minute=Decimal("0.100"),
+            feasibility_status="needs_cross",
+            contract_close_time=_future_time(minutes=2),
+        ),
+        expected_reason="needs_cross_blocked",
+        cycle_number=73,
+    )
+
+
+def _validate_required_bps_per_minute_blocks() -> list[str]:
+    return _expect_composite_skip(
+        contract=_contract(
+            market_ticker="KXBTC15M-REQ-BPS-BLOCK",
+            midpoint=Decimal("0.30"),
+            side_currently_itm=True,
+            side_needs_cross=False,
+            distance_to_target_bps=Decimal("-1.000"),
+            required_bps_per_minute=Decimal("0.500"),
+            contract_close_time=_future_time(minutes=2),
+        ),
+        expected_reason="required_bps_per_minute_too_high",
+        cycle_number=74,
+    )
+
+
+def _validate_far_itm_trend_not_distance_blocked() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        coordinator = _coordinator(
+            Path(temp_dir),
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    market_ticker="KXBTC15M-FAR-ITM",
+                    midpoint=Decimal("0.30"),
+                    side_currently_itm=True,
+                    side_needs_cross=False,
+                    distance_to_target_bps=Decimal("-50.000"),
+                    required_bps_per_minute=Decimal("0.000"),
+                    contract_close_time=_future_time(minutes=2),
+                )
+            ),
+            cycle_number=75,
+        )
+        if len(intents) != 1:
+            return [f"far ITM intents={len(intents)} expected=1"]
+        return []
+
+
+def _validate_outside_end_window_blocks_by_default() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_entry_end_window_only=True,
+                live_entry_end_window_minutes=10,
+            ),
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    market_ticker="KXBTC15M-OUTSIDE-BLOCK",
+                    midpoint=Decimal("0.30"),
+                    contract_close_time=_future_time(minutes=12),
+                )
+            ),
+            cycle_number=76,
+        )
+        if intents:
+            return [f"outside window intents={len(intents)} expected=0"]
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            return ["outside window skip log missing"]
+        if payload.get("reason") != "outside_end_window_blocked":
+            return [f"outside window reason={payload.get('reason')}"]
+        return []
+
+
+def _validate_outside_end_window_exception_allows_low_price_trend() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_entry_end_window_only=True,
+                live_entry_end_window_minutes=10,
+                live_outside_end_window_exception_enabled=True,
+            ),
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    market_ticker="KXBTC15M-OUTSIDE-ALLOW",
+                    midpoint=Decimal("0.30"),
+                    contract_close_time=_future_time(minutes=12),
+                )
+            ),
+            cycle_number=77,
+        )
+        if len(intents) != 1:
+            return [f"outside exception intents={len(intents)} expected=1"]
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_intent_created",
+        )
+        if payload is None:
+            return ["outside exception intent log missing"]
+        if (
+            payload.get("outside_end_window_exception_status")
+            != "allowed_low_price_trend_exception"
+        ):
+            return [
+                "outside exception status="
+                f"{payload.get('outside_end_window_exception_status')}"
+            ]
+        return []
+
+
+def _expect_composite_skip(
+    *,
+    contract: ScannedContract,
+    expected_reason: str,
+    cycle_number: int,
+) -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(contract),
+            cycle_number=cycle_number,
+        )
+        if intents:
+            return [f"{contract.market_ticker} intents={len(intents)} expected=0"]
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            return [f"{contract.market_ticker} skip log missing"]
+        failures: list[str] = []
+        if payload.get("reason") != expected_reason:
+            failures.append(
+                f"{contract.market_ticker} reason={payload.get('reason')}"
+            )
+        required_fields = (
+            "market_ticker",
+            "product_id",
+            "direction",
+            "intent_side",
+            "entry_price",
+            "structure",
+            "entry_segment",
+            "side_currently_itm",
+            "side_needs_cross",
+            "distance_to_target",
+            "distance_to_target_bps",
+            "required_bps_per_minute",
+            "trend_confirmation_status",
+            "reversal_confirmation_status",
+            "composite_quality_block_reason",
+        )
+        missing = tuple(field for field in required_fields if field not in payload)
+        if missing:
+            failures.append(f"{contract.market_ticker} missing fields={missing}")
+        return failures
 
 
 def _validate_midpoint_fallback_price_below_minimum_skip() -> list[str]:
@@ -840,6 +1185,7 @@ def _validate_end_window_blocks_early_contract() -> list[str]:
                 log_jsonl_enabled=True,
                 live_entry_end_window_only=True,
                 live_entry_end_window_minutes=5,
+                live_composite_quality_filter_enabled=False,
             ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
         )
@@ -1078,6 +1424,13 @@ def _validate_same_side_retry_blocks_without_improvement() -> list[str]:
         temp_path = Path(temp_dir)
         coordinator = _coordinator(
             temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_composite_quality_filter_enabled=False,
+                live_block_needs_cross=False,
+                live_max_required_bps_per_minute=Decimal("1.00"),
+            ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
         )
         first_contract = _contract(
@@ -1130,6 +1483,13 @@ def _validate_same_side_retry_allows_improved_feasibility() -> list[str]:
         temp_path = Path(temp_dir)
         coordinator = _coordinator(
             temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_composite_quality_filter_enabled=False,
+                live_block_needs_cross=False,
+                live_max_required_bps_per_minute=Decimal("1.00"),
+            ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
         )
         first_contract = _contract(
@@ -1316,6 +1676,7 @@ def _contract(
     structure: str = "trend",
     reversal_confirmation_status: str = "not_reversal",
     trend_confirmation_status: str = "confirmed",
+    contract_time_remaining_seconds: int | None = 120,
 ) -> ScannedContract:
     return ScannedContract(
         product_id=product_id,
@@ -1361,7 +1722,7 @@ def _contract(
         scanner_score_downgrade_reasons=(),
         contract_open_time="2026-04-23T11:45:00+00:00",
         contract_close_time=contract_close_time,
-        contract_time_remaining_seconds=120,
+        contract_time_remaining_seconds=contract_time_remaining_seconds,
     )
 
 
@@ -1524,6 +1885,18 @@ class _Settings:
     live_mid_price_max: Decimal = Decimal("0.70")
     live_max_open_positions_per_product: int = 2
     live_max_entries_per_product_per_session: int = 2
+    live_composite_quality_filter_enabled: bool = True
+    live_composite_max_entry_price: Decimal = Decimal("0.50")
+    live_composite_low_price_max: Decimal = Decimal("0.30")
+    live_composite_allowed_segments: tuple[str, ...] = ("10_to_5", "3_to_1")
+    live_composite_require_trend: bool = True
+    live_composite_require_itm: bool = True
+    live_composite_block_needs_cross: bool = True
+    live_reversal_max_entry_price: Decimal = Decimal("0.10")
+    live_block_needs_cross: bool = True
+    live_max_required_bps_per_minute: Decimal = Decimal("0.25")
+    live_outside_end_window_exception_enabled: bool = False
+    live_outside_end_window_max_price: Decimal = Decimal("0.30")
 
 
 class _FixedEntryRiskManager:

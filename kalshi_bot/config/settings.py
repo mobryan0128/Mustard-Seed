@@ -94,6 +94,18 @@ DEFAULT_LIVE_MID_PRICE_MIN = Decimal("0.50")
 DEFAULT_LIVE_MID_PRICE_MAX = Decimal("0.70")
 DEFAULT_LIVE_MAX_OPEN_POSITIONS_PER_PRODUCT = 2
 DEFAULT_LIVE_MAX_ENTRIES_PER_PRODUCT_PER_SESSION = 2
+DEFAULT_LIVE_COMPOSITE_QUALITY_FILTER_ENABLED = True
+DEFAULT_LIVE_COMPOSITE_MAX_ENTRY_PRICE = Decimal("0.50")
+DEFAULT_LIVE_COMPOSITE_LOW_PRICE_MAX = Decimal("0.30")
+DEFAULT_LIVE_COMPOSITE_ALLOWED_SEGMENTS = ("10_to_5", "3_to_1")
+DEFAULT_LIVE_COMPOSITE_REQUIRE_TREND = True
+DEFAULT_LIVE_COMPOSITE_REQUIRE_ITM = True
+DEFAULT_LIVE_COMPOSITE_BLOCK_NEEDS_CROSS = True
+DEFAULT_LIVE_REVERSAL_MAX_ENTRY_PRICE = Decimal("0.10")
+DEFAULT_LIVE_BLOCK_NEEDS_CROSS = True
+DEFAULT_LIVE_MAX_REQUIRED_BPS_PER_MINUTE = Decimal("0.25")
+DEFAULT_LIVE_OUTSIDE_END_WINDOW_EXCEPTION_ENABLED = False
+DEFAULT_LIVE_OUTSIDE_END_WINDOW_MAX_PRICE = Decimal("0.30")
 DEFAULT_RUNNER_ENABLED = True
 DEFAULT_RUNNER_LOOP_INTERVAL_SECONDS = 5.0
 DEFAULT_RUNNER_STATUS_LOG_EVERY_N_CYCLES = 1
@@ -216,6 +228,18 @@ class KalshiSettings:
     live_mid_price_max: Decimal
     live_max_open_positions_per_product: int
     live_max_entries_per_product_per_session: int
+    live_composite_quality_filter_enabled: bool
+    live_composite_max_entry_price: Decimal
+    live_composite_low_price_max: Decimal
+    live_composite_allowed_segments: tuple[str, ...]
+    live_composite_require_trend: bool
+    live_composite_require_itm: bool
+    live_composite_block_needs_cross: bool
+    live_reversal_max_entry_price: Decimal
+    live_block_needs_cross: bool
+    live_max_required_bps_per_minute: Decimal
+    live_outside_end_window_exception_enabled: bool
+    live_outside_end_window_max_price: Decimal
     runner_enabled: bool
     runner_loop_interval_seconds: float
     runner_status_log_every_n_cycles: int
@@ -589,6 +613,67 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         DEFAULT_LIVE_MAX_ENTRIES_PER_PRODUCT_PER_SESSION,
         "LIVE_MAX_ENTRIES_PER_PRODUCT_PER_SESSION",
     )
+    live_composite_quality_filter_enabled = _parse_bool(
+        values.get("LIVE_COMPOSITE_QUALITY_FILTER_ENABLED"),
+        DEFAULT_LIVE_COMPOSITE_QUALITY_FILTER_ENABLED,
+        "LIVE_COMPOSITE_QUALITY_FILTER_ENABLED",
+    )
+    live_composite_max_entry_price = _parse_price_dollars(
+        values.get("LIVE_COMPOSITE_MAX_ENTRY_PRICE"),
+        "LIVE_COMPOSITE_MAX_ENTRY_PRICE",
+    ) or DEFAULT_LIVE_COMPOSITE_MAX_ENTRY_PRICE
+    live_composite_low_price_max = _parse_price_dollars(
+        values.get("LIVE_COMPOSITE_LOW_PRICE_MAX"),
+        "LIVE_COMPOSITE_LOW_PRICE_MAX",
+    ) or DEFAULT_LIVE_COMPOSITE_LOW_PRICE_MAX
+    if live_composite_low_price_max > live_composite_max_entry_price:
+        raise SettingsError(
+            "LIVE_COMPOSITE_LOW_PRICE_MAX must be less than or equal to "
+            "LIVE_COMPOSITE_MAX_ENTRY_PRICE."
+        )
+    live_composite_allowed_segments = _parse_allowed_segments(
+        values.get("LIVE_COMPOSITE_ALLOWED_SEGMENTS"),
+        DEFAULT_LIVE_COMPOSITE_ALLOWED_SEGMENTS,
+        "LIVE_COMPOSITE_ALLOWED_SEGMENTS",
+    )
+    live_composite_require_trend = _parse_bool(
+        values.get("LIVE_COMPOSITE_REQUIRE_TREND"),
+        DEFAULT_LIVE_COMPOSITE_REQUIRE_TREND,
+        "LIVE_COMPOSITE_REQUIRE_TREND",
+    )
+    live_composite_require_itm = _parse_bool(
+        values.get("LIVE_COMPOSITE_REQUIRE_ITM"),
+        DEFAULT_LIVE_COMPOSITE_REQUIRE_ITM,
+        "LIVE_COMPOSITE_REQUIRE_ITM",
+    )
+    live_composite_block_needs_cross = _parse_bool(
+        values.get("LIVE_COMPOSITE_BLOCK_NEEDS_CROSS"),
+        DEFAULT_LIVE_COMPOSITE_BLOCK_NEEDS_CROSS,
+        "LIVE_COMPOSITE_BLOCK_NEEDS_CROSS",
+    )
+    live_reversal_max_entry_price = _parse_price_dollars(
+        values.get("LIVE_REVERSAL_MAX_ENTRY_PRICE"),
+        "LIVE_REVERSAL_MAX_ENTRY_PRICE",
+    ) or DEFAULT_LIVE_REVERSAL_MAX_ENTRY_PRICE
+    live_block_needs_cross = _parse_bool(
+        values.get("LIVE_BLOCK_NEEDS_CROSS"),
+        DEFAULT_LIVE_BLOCK_NEEDS_CROSS,
+        "LIVE_BLOCK_NEEDS_CROSS",
+    )
+    live_max_required_bps_per_minute = _parse_positive_decimal(
+        values.get("LIVE_MAX_REQUIRED_BPS_PER_MINUTE"),
+        DEFAULT_LIVE_MAX_REQUIRED_BPS_PER_MINUTE,
+        "LIVE_MAX_REQUIRED_BPS_PER_MINUTE",
+    )
+    live_outside_end_window_exception_enabled = _parse_bool(
+        values.get("LIVE_OUTSIDE_END_WINDOW_EXCEPTION_ENABLED"),
+        DEFAULT_LIVE_OUTSIDE_END_WINDOW_EXCEPTION_ENABLED,
+        "LIVE_OUTSIDE_END_WINDOW_EXCEPTION_ENABLED",
+    )
+    live_outside_end_window_max_price = _parse_price_dollars(
+        values.get("LIVE_OUTSIDE_END_WINDOW_MAX_PRICE"),
+        "LIVE_OUTSIDE_END_WINDOW_MAX_PRICE",
+    ) or DEFAULT_LIVE_OUTSIDE_END_WINDOW_MAX_PRICE
     runner_enabled = _parse_bool(
         values.get("RUNNER_ENABLED"),
         DEFAULT_RUNNER_ENABLED,
@@ -826,6 +911,22 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_max_entries_per_product_per_session=(
             live_max_entries_per_product_per_session
         ),
+        live_composite_quality_filter_enabled=(
+            live_composite_quality_filter_enabled
+        ),
+        live_composite_max_entry_price=live_composite_max_entry_price,
+        live_composite_low_price_max=live_composite_low_price_max,
+        live_composite_allowed_segments=live_composite_allowed_segments,
+        live_composite_require_trend=live_composite_require_trend,
+        live_composite_require_itm=live_composite_require_itm,
+        live_composite_block_needs_cross=live_composite_block_needs_cross,
+        live_reversal_max_entry_price=live_reversal_max_entry_price,
+        live_block_needs_cross=live_block_needs_cross,
+        live_max_required_bps_per_minute=live_max_required_bps_per_minute,
+        live_outside_end_window_exception_enabled=(
+            live_outside_end_window_exception_enabled
+        ),
+        live_outside_end_window_max_price=live_outside_end_window_max_price,
         runner_enabled=runner_enabled,
         runner_loop_interval_seconds=runner_loop_interval_seconds,
         runner_status_log_every_n_cycles=runner_status_log_every_n_cycles,
@@ -951,9 +1052,34 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_TRAILING_STOP_DISTANCE",
         "LIVE_ENTRY_END_WINDOW_ONLY",
         "LIVE_ENTRY_END_WINDOW_MINUTES",
+        "LIVE_ENTRY_MIN_REMAINING_SECONDS",
+        "LIVE_ENTRY_SEGMENT_PACING_ENABLED",
+        "LIVE_ENTRY_SEGMENT_MAX_10_TO_5",
+        "LIVE_ENTRY_SEGMENT_MAX_5_TO_3",
+        "LIVE_ENTRY_SEGMENT_MAX_3_TO_1",
+        "LIVE_ENTRY_SEGMENT_MAX_FINAL_1",
         "LIVE_FAST_SCAN_ENABLED",
         "LIVE_FAST_SCAN_INTERVAL_SECONDS",
         "LIVE_FAST_SCAN_COOLDOWN_SECONDS",
+        "LIVE_REVERSAL_CROSS_HOLD_ENABLED",
+        "LIVE_REVERSAL_CROSS_HOLD_SECONDS",
+        "LIVE_MID_PRICE_TIGHTENING_ENABLED",
+        "LIVE_MID_PRICE_MIN",
+        "LIVE_MID_PRICE_MAX",
+        "LIVE_MAX_OPEN_POSITIONS_PER_PRODUCT",
+        "LIVE_MAX_ENTRIES_PER_PRODUCT_PER_SESSION",
+        "LIVE_COMPOSITE_QUALITY_FILTER_ENABLED",
+        "LIVE_COMPOSITE_MAX_ENTRY_PRICE",
+        "LIVE_COMPOSITE_LOW_PRICE_MAX",
+        "LIVE_COMPOSITE_ALLOWED_SEGMENTS",
+        "LIVE_COMPOSITE_REQUIRE_TREND",
+        "LIVE_COMPOSITE_REQUIRE_ITM",
+        "LIVE_COMPOSITE_BLOCK_NEEDS_CROSS",
+        "LIVE_REVERSAL_MAX_ENTRY_PRICE",
+        "LIVE_BLOCK_NEEDS_CROSS",
+        "LIVE_MAX_REQUIRED_BPS_PER_MINUTE",
+        "LIVE_OUTSIDE_END_WINDOW_EXCEPTION_ENABLED",
+        "LIVE_OUTSIDE_END_WINDOW_MAX_PRICE",
         "RUNNER_ENABLED",
         "RUNNER_LOOP_INTERVAL_SECONDS",
         "RUNNER_STATUS_LOG_EVERY_N_CYCLES",
@@ -1036,6 +1162,31 @@ def _parse_csv(value: str | None) -> tuple[str, ...]:
         return ()
     items = tuple(item.strip() for item in value.split(",") if item.strip())
     return items
+
+
+def _parse_allowed_segments(
+    value: str | None,
+    default: tuple[str, ...],
+    key: str,
+) -> tuple[str, ...]:
+    segments = (
+        tuple(_normalize_segment(item) for item in _parse_csv(value))
+        if value is not None and value.strip()
+        else default
+    )
+    allowed = {"10_to_5", "5_to_3", "3_to_1", "final_1"}
+    invalid = tuple(segment for segment in segments if segment not in allowed)
+    if invalid:
+        raise SettingsError(
+            f"{key} contains unsupported segment(s): {', '.join(invalid)}."
+        )
+    if not segments:
+        raise SettingsError(f"{key} must include at least one segment.")
+    return tuple(dict.fromkeys(segments))
+
+
+def _normalize_segment(value: str) -> str:
+    return value.strip().lower().replace("-", "_")
 
 
 def _parse_bool(value: str | None, default: bool, key: str) -> bool:
