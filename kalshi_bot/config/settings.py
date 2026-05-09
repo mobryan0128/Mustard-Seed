@@ -95,9 +95,9 @@ DEFAULT_LIVE_MID_PRICE_MAX = Decimal("0.70")
 DEFAULT_LIVE_MAX_OPEN_POSITIONS_PER_PRODUCT = 2
 DEFAULT_LIVE_MAX_ENTRIES_PER_PRODUCT_PER_SESSION = 2
 DEFAULT_LIVE_COMPOSITE_QUALITY_FILTER_ENABLED = True
-DEFAULT_LIVE_COMPOSITE_MAX_ENTRY_PRICE = Decimal("0.50")
+DEFAULT_LIVE_COMPOSITE_MAX_ENTRY_PRICE = Decimal("0.70")
 DEFAULT_LIVE_COMPOSITE_LOW_PRICE_MAX = Decimal("0.30")
-DEFAULT_LIVE_COMPOSITE_ALLOWED_SEGMENTS = ("10_to_5", "3_to_1")
+DEFAULT_LIVE_COMPOSITE_ALLOWED_SEGMENTS = ("10_to_5", "5_to_3")
 DEFAULT_LIVE_COMPOSITE_REQUIRE_TREND = True
 DEFAULT_LIVE_COMPOSITE_REQUIRE_ITM = True
 DEFAULT_LIVE_COMPOSITE_BLOCK_NEEDS_CROSS = True
@@ -106,6 +106,31 @@ DEFAULT_LIVE_BLOCK_NEEDS_CROSS = True
 DEFAULT_LIVE_MAX_REQUIRED_BPS_PER_MINUTE = Decimal("0.25")
 DEFAULT_LIVE_OUTSIDE_END_WINDOW_EXCEPTION_ENABLED = False
 DEFAULT_LIVE_OUTSIDE_END_WINDOW_MAX_PRICE = Decimal("0.30")
+DEFAULT_LIVE_EV_FILTER_ENABLED = True
+DEFAULT_LIVE_MIN_EXPECTED_VALUE = Decimal("0.00")
+DEFAULT_LIVE_EV_PRICE_MAX_ITM_NO_CROSS = Decimal("0.70")
+DEFAULT_LIVE_EV_PRICE_MAX_NEEDS_CROSS = Decimal("0.30")
+DEFAULT_LIVE_EV_REQUIRED_BPS_MAX = Decimal("0.25")
+DEFAULT_LIVE_EV_ALLOWED_SEGMENTS = ("10_to_5", "5_to_3")
+DEFAULT_LIVE_EV_CONSERVATIVE_ALLOWED_SEGMENTS = (
+    "10_to_5",
+    "5_to_3",
+    "3_to_1",
+)
+DEFAULT_LIVE_EV_ALLOW_REVERSAL = False
+DEFAULT_LIVE_EV_CANDIDATE_A_WIN_PROBABILITY = Decimal("0.87")
+DEFAULT_LIVE_EV_CANDIDATE_B_WIN_PROBABILITY = Decimal("0.92")
+DEFAULT_LIVE_PRODUCT_BLOCKLIST: tuple[str, ...] = ()
+DEFAULT_LIVE_CONDITIONAL_HIGH_PRICE_PASS_ENABLED = True
+DEFAULT_LIVE_CONDITIONAL_MAX_PREMIUM_OVER_MIDPOINT = Decimal("0.08")
+DEFAULT_LIVE_CONDITIONAL_MAX_SPREAD = Decimal("0.15")
+DEFAULT_LIVE_CONDITIONAL_MAX_SCANNER_PREMIUM = Decimal("0.12")
+DEFAULT_LIVE_CONDITIONAL_ALLOW_EXTREME_ASYMMETRY = False
+DEFAULT_LIVE_CONDITIONAL_ALLOW_HIGH_PRICE_CEILING_BYPASS = False
+DEFAULT_LIVE_CONDITIONAL_HIGH_PRICE_CEILING_MAX = Decimal("0.70")
+DEFAULT_LIVE_EV_TIMING_BYPASS_ENABLED = True
+DEFAULT_LIVE_EV_EXTRA_ENTRIES_PER_PRODUCT_PER_SESSION = 0
+DEFAULT_LIVE_EV_EXTRA_OPEN_POSITIONS_PER_PRODUCT = 0
 DEFAULT_RUNNER_ENABLED = True
 DEFAULT_RUNNER_LOOP_INTERVAL_SECONDS = 5.0
 DEFAULT_RUNNER_STATUS_LOG_EVERY_N_CYCLES = 1
@@ -240,6 +265,27 @@ class KalshiSettings:
     live_max_required_bps_per_minute: Decimal
     live_outside_end_window_exception_enabled: bool
     live_outside_end_window_max_price: Decimal
+    live_ev_filter_enabled: bool
+    live_min_expected_value: Decimal
+    live_ev_price_max_itm_no_cross: Decimal
+    live_ev_price_max_needs_cross: Decimal
+    live_ev_required_bps_max: Decimal
+    live_ev_allowed_segments: tuple[str, ...]
+    live_ev_conservative_allowed_segments: tuple[str, ...]
+    live_ev_allow_reversal: bool
+    live_ev_candidate_a_win_probability: Decimal
+    live_ev_candidate_b_win_probability: Decimal
+    live_product_blocklist: tuple[str, ...]
+    live_conditional_high_price_pass_enabled: bool
+    live_conditional_max_premium_over_midpoint: Decimal
+    live_conditional_max_spread: Decimal
+    live_conditional_max_scanner_premium: Decimal
+    live_conditional_allow_extreme_asymmetry: bool
+    live_conditional_allow_high_price_ceiling_bypass: bool
+    live_conditional_high_price_ceiling_max: Decimal
+    live_ev_timing_bypass_enabled: bool
+    live_ev_extra_entries_per_product_per_session: int
+    live_ev_extra_open_positions_per_product: int
     runner_enabled: bool
     runner_loop_interval_seconds: float
     runner_status_log_every_n_cycles: int
@@ -674,6 +720,103 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         values.get("LIVE_OUTSIDE_END_WINDOW_MAX_PRICE"),
         "LIVE_OUTSIDE_END_WINDOW_MAX_PRICE",
     ) or DEFAULT_LIVE_OUTSIDE_END_WINDOW_MAX_PRICE
+    live_ev_filter_enabled = _parse_bool(
+        values.get("LIVE_EV_FILTER_ENABLED"),
+        DEFAULT_LIVE_EV_FILTER_ENABLED,
+        "LIVE_EV_FILTER_ENABLED",
+    )
+    live_min_expected_value = _parse_non_negative_decimal(
+        values.get("LIVE_MIN_EXPECTED_VALUE"),
+        DEFAULT_LIVE_MIN_EXPECTED_VALUE,
+        "LIVE_MIN_EXPECTED_VALUE",
+    )
+    live_ev_price_max_itm_no_cross = _parse_price_dollars(
+        values.get("LIVE_EV_PRICE_MAX_ITM_NO_CROSS"),
+        "LIVE_EV_PRICE_MAX_ITM_NO_CROSS",
+    ) or DEFAULT_LIVE_EV_PRICE_MAX_ITM_NO_CROSS
+    live_ev_price_max_needs_cross = _parse_price_dollars(
+        values.get("LIVE_EV_PRICE_MAX_NEEDS_CROSS"),
+        "LIVE_EV_PRICE_MAX_NEEDS_CROSS",
+    ) or DEFAULT_LIVE_EV_PRICE_MAX_NEEDS_CROSS
+    live_ev_required_bps_max = _parse_positive_decimal(
+        values.get("LIVE_EV_REQUIRED_BPS_MAX"),
+        DEFAULT_LIVE_EV_REQUIRED_BPS_MAX,
+        "LIVE_EV_REQUIRED_BPS_MAX",
+    )
+    live_ev_allowed_segments = _parse_allowed_segments(
+        values.get("LIVE_EV_ALLOWED_SEGMENTS"),
+        DEFAULT_LIVE_EV_ALLOWED_SEGMENTS,
+        "LIVE_EV_ALLOWED_SEGMENTS",
+    )
+    live_ev_conservative_allowed_segments = _parse_allowed_segments(
+        values.get("LIVE_EV_CONSERVATIVE_ALLOWED_SEGMENTS"),
+        DEFAULT_LIVE_EV_CONSERVATIVE_ALLOWED_SEGMENTS,
+        "LIVE_EV_CONSERVATIVE_ALLOWED_SEGMENTS",
+    )
+    live_ev_allow_reversal = _parse_bool(
+        values.get("LIVE_EV_ALLOW_REVERSAL"),
+        DEFAULT_LIVE_EV_ALLOW_REVERSAL,
+        "LIVE_EV_ALLOW_REVERSAL",
+    )
+    live_ev_candidate_a_win_probability = _parse_probability(
+        values.get("LIVE_EV_CANDIDATE_A_WIN_PROBABILITY"),
+        DEFAULT_LIVE_EV_CANDIDATE_A_WIN_PROBABILITY,
+        "LIVE_EV_CANDIDATE_A_WIN_PROBABILITY",
+    )
+    live_ev_candidate_b_win_probability = _parse_probability(
+        values.get("LIVE_EV_CANDIDATE_B_WIN_PROBABILITY"),
+        DEFAULT_LIVE_EV_CANDIDATE_B_WIN_PROBABILITY,
+        "LIVE_EV_CANDIDATE_B_WIN_PROBABILITY",
+    )
+    live_product_blocklist = tuple(
+        dict.fromkeys(item.upper() for item in _parse_csv(values.get("LIVE_PRODUCT_BLOCKLIST")))
+    )
+    live_conditional_high_price_pass_enabled = _parse_bool(
+        values.get("LIVE_CONDITIONAL_HIGH_PRICE_PASS_ENABLED"),
+        DEFAULT_LIVE_CONDITIONAL_HIGH_PRICE_PASS_ENABLED,
+        "LIVE_CONDITIONAL_HIGH_PRICE_PASS_ENABLED",
+    )
+    live_conditional_max_premium_over_midpoint = _parse_price_dollars(
+        values.get("LIVE_CONDITIONAL_MAX_PREMIUM_OVER_MIDPOINT"),
+        "LIVE_CONDITIONAL_MAX_PREMIUM_OVER_MIDPOINT",
+    ) or DEFAULT_LIVE_CONDITIONAL_MAX_PREMIUM_OVER_MIDPOINT
+    live_conditional_max_spread = _parse_price_dollars(
+        values.get("LIVE_CONDITIONAL_MAX_SPREAD"),
+        "LIVE_CONDITIONAL_MAX_SPREAD",
+    ) or DEFAULT_LIVE_CONDITIONAL_MAX_SPREAD
+    live_conditional_max_scanner_premium = _parse_price_dollars(
+        values.get("LIVE_CONDITIONAL_MAX_SCANNER_PREMIUM"),
+        "LIVE_CONDITIONAL_MAX_SCANNER_PREMIUM",
+    ) or DEFAULT_LIVE_CONDITIONAL_MAX_SCANNER_PREMIUM
+    live_conditional_allow_extreme_asymmetry = _parse_bool(
+        values.get("LIVE_CONDITIONAL_ALLOW_EXTREME_ASYMMETRY"),
+        DEFAULT_LIVE_CONDITIONAL_ALLOW_EXTREME_ASYMMETRY,
+        "LIVE_CONDITIONAL_ALLOW_EXTREME_ASYMMETRY",
+    )
+    live_conditional_allow_high_price_ceiling_bypass = _parse_bool(
+        values.get("LIVE_CONDITIONAL_ALLOW_HIGH_PRICE_CEILING_BYPASS"),
+        DEFAULT_LIVE_CONDITIONAL_ALLOW_HIGH_PRICE_CEILING_BYPASS,
+        "LIVE_CONDITIONAL_ALLOW_HIGH_PRICE_CEILING_BYPASS",
+    )
+    live_conditional_high_price_ceiling_max = _parse_price_dollars(
+        values.get("LIVE_CONDITIONAL_HIGH_PRICE_CEILING_MAX"),
+        "LIVE_CONDITIONAL_HIGH_PRICE_CEILING_MAX",
+    ) or DEFAULT_LIVE_CONDITIONAL_HIGH_PRICE_CEILING_MAX
+    live_ev_timing_bypass_enabled = _parse_bool(
+        values.get("LIVE_EV_TIMING_BYPASS_ENABLED"),
+        DEFAULT_LIVE_EV_TIMING_BYPASS_ENABLED,
+        "LIVE_EV_TIMING_BYPASS_ENABLED",
+    )
+    live_ev_extra_entries_per_product_per_session = _parse_non_negative_int(
+        values.get("LIVE_EV_EXTRA_ENTRIES_PER_PRODUCT_PER_SESSION"),
+        DEFAULT_LIVE_EV_EXTRA_ENTRIES_PER_PRODUCT_PER_SESSION,
+        "LIVE_EV_EXTRA_ENTRIES_PER_PRODUCT_PER_SESSION",
+    )
+    live_ev_extra_open_positions_per_product = _parse_non_negative_int(
+        values.get("LIVE_EV_EXTRA_OPEN_POSITIONS_PER_PRODUCT"),
+        DEFAULT_LIVE_EV_EXTRA_OPEN_POSITIONS_PER_PRODUCT,
+        "LIVE_EV_EXTRA_OPEN_POSITIONS_PER_PRODUCT",
+    )
     runner_enabled = _parse_bool(
         values.get("RUNNER_ENABLED"),
         DEFAULT_RUNNER_ENABLED,
@@ -927,6 +1070,49 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
             live_outside_end_window_exception_enabled
         ),
         live_outside_end_window_max_price=live_outside_end_window_max_price,
+        live_ev_filter_enabled=live_ev_filter_enabled,
+        live_min_expected_value=live_min_expected_value,
+        live_ev_price_max_itm_no_cross=live_ev_price_max_itm_no_cross,
+        live_ev_price_max_needs_cross=live_ev_price_max_needs_cross,
+        live_ev_required_bps_max=live_ev_required_bps_max,
+        live_ev_allowed_segments=live_ev_allowed_segments,
+        live_ev_conservative_allowed_segments=(
+            live_ev_conservative_allowed_segments
+        ),
+        live_ev_allow_reversal=live_ev_allow_reversal,
+        live_ev_candidate_a_win_probability=(
+            live_ev_candidate_a_win_probability
+        ),
+        live_ev_candidate_b_win_probability=(
+            live_ev_candidate_b_win_probability
+        ),
+        live_product_blocklist=live_product_blocklist,
+        live_conditional_high_price_pass_enabled=(
+            live_conditional_high_price_pass_enabled
+        ),
+        live_conditional_max_premium_over_midpoint=(
+            live_conditional_max_premium_over_midpoint
+        ),
+        live_conditional_max_spread=live_conditional_max_spread,
+        live_conditional_max_scanner_premium=(
+            live_conditional_max_scanner_premium
+        ),
+        live_conditional_allow_extreme_asymmetry=(
+            live_conditional_allow_extreme_asymmetry
+        ),
+        live_conditional_allow_high_price_ceiling_bypass=(
+            live_conditional_allow_high_price_ceiling_bypass
+        ),
+        live_conditional_high_price_ceiling_max=(
+            live_conditional_high_price_ceiling_max
+        ),
+        live_ev_timing_bypass_enabled=live_ev_timing_bypass_enabled,
+        live_ev_extra_entries_per_product_per_session=(
+            live_ev_extra_entries_per_product_per_session
+        ),
+        live_ev_extra_open_positions_per_product=(
+            live_ev_extra_open_positions_per_product
+        ),
         runner_enabled=runner_enabled,
         runner_loop_interval_seconds=runner_loop_interval_seconds,
         runner_status_log_every_n_cycles=runner_status_log_every_n_cycles,
@@ -1080,6 +1266,27 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_MAX_REQUIRED_BPS_PER_MINUTE",
         "LIVE_OUTSIDE_END_WINDOW_EXCEPTION_ENABLED",
         "LIVE_OUTSIDE_END_WINDOW_MAX_PRICE",
+        "LIVE_EV_FILTER_ENABLED",
+        "LIVE_MIN_EXPECTED_VALUE",
+        "LIVE_EV_PRICE_MAX_ITM_NO_CROSS",
+        "LIVE_EV_PRICE_MAX_NEEDS_CROSS",
+        "LIVE_EV_REQUIRED_BPS_MAX",
+        "LIVE_EV_ALLOWED_SEGMENTS",
+        "LIVE_EV_CONSERVATIVE_ALLOWED_SEGMENTS",
+        "LIVE_EV_ALLOW_REVERSAL",
+        "LIVE_EV_CANDIDATE_A_WIN_PROBABILITY",
+        "LIVE_EV_CANDIDATE_B_WIN_PROBABILITY",
+        "LIVE_PRODUCT_BLOCKLIST",
+        "LIVE_CONDITIONAL_HIGH_PRICE_PASS_ENABLED",
+        "LIVE_CONDITIONAL_MAX_PREMIUM_OVER_MIDPOINT",
+        "LIVE_CONDITIONAL_MAX_SPREAD",
+        "LIVE_CONDITIONAL_MAX_SCANNER_PREMIUM",
+        "LIVE_CONDITIONAL_ALLOW_EXTREME_ASYMMETRY",
+        "LIVE_CONDITIONAL_ALLOW_HIGH_PRICE_CEILING_BYPASS",
+        "LIVE_CONDITIONAL_HIGH_PRICE_CEILING_MAX",
+        "LIVE_EV_TIMING_BYPASS_ENABLED",
+        "LIVE_EV_EXTRA_ENTRIES_PER_PRODUCT_PER_SESSION",
+        "LIVE_EV_EXTRA_OPEN_POSITIONS_PER_PRODUCT",
         "RUNNER_ENABLED",
         "RUNNER_LOOP_INTERVAL_SECONDS",
         "RUNNER_STATUS_LOG_EVERY_N_CYCLES",
@@ -1229,6 +1436,29 @@ def _parse_positive_decimal(value: str | None, default: Decimal, key: str) -> De
         raise SettingsError(f"{key} must be a valid decimal string.") from exc
     if parsed <= 0:
         raise SettingsError(f"{key} must be greater than zero.")
+    return parsed
+
+
+def _parse_non_negative_decimal(
+    value: str | None,
+    default: Decimal,
+    key: str,
+) -> Decimal:
+    if value is None or not value.strip():
+        return default
+    try:
+        parsed = Decimal(value.strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise SettingsError(f"{key} must be a valid decimal string.") from exc
+    if parsed < 0:
+        raise SettingsError(f"{key} must be greater than or equal to zero.")
+    return parsed
+
+
+def _parse_probability(value: str | None, default: Decimal, key: str) -> Decimal:
+    parsed = _parse_positive_decimal(value, default, key)
+    if parsed > Decimal("1"):
+        raise SettingsError(f"{key} must be less than or equal to 1.")
     return parsed
 
 

@@ -60,6 +60,9 @@ def main() -> int:
     failures.extend(_validate_mid_price_weak_reversal_blocks())
     failures.extend(_validate_mid_price_confirmed_trend_allows())
     failures.extend(_validate_composite_candidate_a_allows())
+    failures.extend(_validate_ev_candidate_a_allows_five_to_three())
+    failures.extend(_validate_ev_candidate_a_blocks_needs_cross())
+    failures.extend(_validate_ev_conditional_scanner_premium_bypass())
     failures.extend(_validate_composite_low_price_candidate_allows())
     failures.extend(_validate_reversal_price_blocks_confirmed_hold())
     failures.extend(_validate_needs_cross_blocks_by_default())
@@ -680,6 +683,7 @@ def _validate_mid_price_confirmed_trend_allows() -> list[str]:
                 log_directory=temp_path,
                 log_jsonl_enabled=True,
                 live_composite_max_entry_price=Decimal("0.70"),
+                live_composite_quality_filter_enabled=False,
             ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
         )
@@ -716,7 +720,20 @@ def _validate_composite_candidate_a_allows() -> list[str]:
         temp_path = Path(temp_dir)
         coordinator = _coordinator(
             temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_ev_filter_enabled=True,
+            ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        market_snapshot = _market_snapshot(
+            market_ticker="KXBTC15M-COMP-A",
+            yes_bid=Decimal("0.49"),
+            yes_ask=Decimal("0.50"),
+            yes_bid_size=Decimal("100"),
+            yes_ask_size=Decimal("100"),
+            orderbook_seq=700,
         )
         intents = coordinator.process_contract_scan_snapshot(
             _contract_snapshot(
@@ -728,6 +745,7 @@ def _validate_composite_candidate_a_allows() -> list[str]:
                 )
             ),
             cycle_number=69,
+            market_snapshot=market_snapshot,
         )
         failures: list[str] = []
         if len(intents) != 1:
@@ -748,12 +766,178 @@ def _validate_composite_candidate_a_allows() -> list[str]:
         return failures
 
 
+def _validate_ev_candidate_a_allows_five_to_three() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_ev_filter_enabled=True,
+            ),
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        market_snapshot = _market_snapshot(
+            market_ticker="KXBTC15M-EV-A-5-3",
+            yes_bid=Decimal("0.59"),
+            yes_ask=Decimal("0.60"),
+            yes_bid_size=Decimal("100"),
+            yes_ask_size=Decimal("100"),
+            orderbook_seq=701,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    market_ticker="KXBTC15M-EV-A-5-3",
+                    midpoint=Decimal("0.58"),
+                    contract_close_time=_future_time(minutes=4),
+                    contract_time_remaining_seconds=240,
+                )
+            ),
+            cycle_number=700,
+            market_snapshot=market_snapshot,
+        )
+        if len(intents) != 1:
+            return [f"ev candidate A intents={len(intents)} expected=1"]
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_intent_created",
+        )
+        if payload is None:
+            return ["ev candidate A intent log missing"]
+        failures: list[str] = []
+        if payload.get("ev_matched_candidate") != "candidate_a":
+            failures.append(f"ev candidate A match={payload.get('ev_matched_candidate')}")
+        if payload.get("entry_segment") != "5_to_3":
+            failures.append(f"ev candidate A segment={payload.get('entry_segment')}")
+        if payload.get("ev_filter_status") != "allowed":
+            failures.append(f"ev candidate A status={payload.get('ev_filter_status')}")
+        return failures
+
+
+def _validate_ev_candidate_a_blocks_needs_cross() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_ev_filter_enabled=True,
+            ),
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        market_snapshot = _market_snapshot(
+            market_ticker="KXBTC15M-EV-A-CROSS",
+            yes_bid=Decimal("0.29"),
+            yes_ask=Decimal("0.30"),
+            yes_bid_size=Decimal("100"),
+            yes_ask_size=Decimal("100"),
+            orderbook_seq=702,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    market_ticker="KXBTC15M-EV-A-CROSS",
+                    midpoint=Decimal("0.30"),
+                    side_currently_itm=False,
+                    side_needs_cross=True,
+                    distance_to_target_bps=Decimal("1.000"),
+                    required_bps_per_minute=Decimal("0.100"),
+                    feasibility_status="needs_cross",
+                    contract_close_time=_future_time(minutes=4),
+                    contract_time_remaining_seconds=240,
+                )
+            ),
+            cycle_number=701,
+            market_snapshot=market_snapshot,
+        )
+        if intents:
+            return [f"ev needs-cross intents={len(intents)} expected=0"]
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            return ["ev needs-cross skip log missing"]
+        if payload.get("reason") != "needs_cross_blocked":
+            return [f"ev needs-cross reason={payload.get('reason')}"]
+        if payload.get("ev_block_reason") != "missing_side_currently_itm":
+            return [f"ev needs-cross block={payload.get('ev_block_reason')}"]
+        return []
+
+
+def _validate_ev_conditional_scanner_premium_bypass() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_ev_filter_enabled=True,
+            ),
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        market_snapshot = _market_snapshot(
+            market_ticker="KXBTC15M-EV-PREMIUM",
+            yes_bid=Decimal("0.60"),
+            yes_ask=Decimal("0.62"),
+            yes_bid_size=Decimal("100"),
+            yes_ask_size=Decimal("100"),
+            orderbook_seq=703,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    market_ticker="KXBTC15M-EV-PREMIUM",
+                    midpoint=Decimal("0.50"),
+                    contract_close_time=_future_time(minutes=6),
+                    contract_time_remaining_seconds=360,
+                )
+            ),
+            cycle_number=702,
+            market_snapshot=market_snapshot,
+        )
+        if len(intents) != 1:
+            return [f"ev premium bypass intents={len(intents)} expected=1"]
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_intent_created",
+        )
+        if payload is None:
+            return ["ev premium bypass intent log missing"]
+        failures: list[str] = []
+        if not payload.get("conditional_override_applied"):
+            failures.append("ev premium bypass override not applied")
+        if payload.get("original_blocker_reason") != "executable_price_above_scanner_premium":
+            failures.append(
+                "ev premium bypass original="
+                f"{payload.get('original_blocker_reason')}"
+            )
+        return failures
+
+
 def _validate_composite_low_price_candidate_allows() -> list[str]:
     with TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
         coordinator = _coordinator(
             temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_ev_filter_enabled=True,
+            ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        market_snapshot = _market_snapshot(
+            market_ticker="KXBTC15M-COMP-B",
+            yes_bid=Decimal("0.29"),
+            yes_ask=Decimal("0.30"),
+            yes_bid_size=Decimal("100"),
+            yes_ask_size=Decimal("100"),
+            orderbook_seq=700,
         )
         intents = coordinator.process_contract_scan_snapshot(
             _contract_snapshot(
@@ -765,6 +949,7 @@ def _validate_composite_low_price_candidate_allows() -> list[str]:
                 )
             ),
             cycle_number=70,
+            market_snapshot=market_snapshot,
         )
         if len(intents) != 1:
             return [f"composite low-price intents={len(intents)} expected=1"]
@@ -774,10 +959,15 @@ def _validate_composite_low_price_candidate_allows() -> list[str]:
         )
         if payload is None:
             return ["composite low-price intent log missing"]
-        if payload.get("composite_quality_status") != "allowed_low_price_trend":
+        if payload.get("composite_quality_status") != "allowed_ev_composite_override":
             return [
                 "composite low-price status="
                 f"{payload.get('composite_quality_status')}"
+            ]
+        if payload.get("ev_matched_candidate") != "candidate_b":
+            return [
+                "composite low-price ev candidate="
+                f"{payload.get('ev_matched_candidate')}"
             ]
         if payload.get("entry_segment") != "3_to_1":
             return [f"composite low-price segment={payload.get('entry_segment')}"]
@@ -866,6 +1056,11 @@ def _validate_far_itm_trend_not_distance_blocked() -> list[str]:
     with TemporaryDirectory() as temp_dir:
         coordinator = _coordinator(
             Path(temp_dir),
+            settings=_Settings(
+                log_directory=Path(temp_dir),
+                log_jsonl_enabled=True,
+                live_composite_quality_filter_enabled=False,
+            ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
         )
         intents = coordinator.process_contract_scan_snapshot(
@@ -1228,6 +1423,7 @@ def _validate_end_window_allows_late_contract() -> list[str]:
                 log_jsonl_enabled=True,
                 live_entry_end_window_only=True,
                 live_entry_end_window_minutes=5,
+                live_composite_quality_filter_enabled=False,
             ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
         )
@@ -1302,6 +1498,11 @@ def _validate_flip_persistence_allows_same_direction() -> list[str]:
     with TemporaryDirectory() as temp_dir:
         coordinator = _coordinator(
             Path(temp_dir),
+            settings=_Settings(
+                log_directory=Path(temp_dir),
+                log_jsonl_enabled=True,
+                live_composite_quality_filter_enabled=False,
+            ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
         )
         first = coordinator.process_contract_scan_snapshot(
@@ -1334,6 +1535,11 @@ def _validate_flip_persistence_blocks_recent_opposite_direction() -> list[str]:
         temp_path = Path(temp_dir)
         coordinator = _coordinator(
             temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_composite_quality_filter_enabled=False,
+            ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
         )
         coordinator.process_contract_scan_snapshot(
@@ -1346,7 +1552,7 @@ def _validate_flip_persistence_blocks_recent_opposite_direction() -> list[str]:
                     market_ticker="KXBTC15M-FLIP-DOWN",
                     direction="down",
                     side_currently_itm=False,
-                    side_needs_cross=True,
+                    side_needs_cross=False,
                     recent_return_bps=Decimal("-20.000"),
                     impulse_return_bps=Decimal("-18.000"),
                 )
@@ -1378,6 +1584,11 @@ def _validate_flip_persistence_allows_itm_persistent_opposite_direction() -> lis
         temp_path = Path(temp_dir)
         coordinator = _coordinator(
             temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_composite_quality_filter_enabled=False,
+            ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
         )
         coordinator.process_contract_scan_snapshot(
@@ -1591,6 +1802,7 @@ def _validate_product_session_cap_blocks_overuse() -> list[str]:
                 log_directory=temp_path,
                 log_jsonl_enabled=True,
                 live_max_entries_per_product_per_session=2,
+                live_composite_quality_filter_enabled=False,
             ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
         )
@@ -1886,9 +2098,9 @@ class _Settings:
     live_max_open_positions_per_product: int = 2
     live_max_entries_per_product_per_session: int = 2
     live_composite_quality_filter_enabled: bool = True
-    live_composite_max_entry_price: Decimal = Decimal("0.50")
+    live_composite_max_entry_price: Decimal = Decimal("0.70")
     live_composite_low_price_max: Decimal = Decimal("0.30")
-    live_composite_allowed_segments: tuple[str, ...] = ("10_to_5", "3_to_1")
+    live_composite_allowed_segments: tuple[str, ...] = ("10_to_5", "5_to_3")
     live_composite_require_trend: bool = True
     live_composite_require_itm: bool = True
     live_composite_block_needs_cross: bool = True
@@ -1897,6 +2109,31 @@ class _Settings:
     live_max_required_bps_per_minute: Decimal = Decimal("0.25")
     live_outside_end_window_exception_enabled: bool = False
     live_outside_end_window_max_price: Decimal = Decimal("0.30")
+    live_ev_filter_enabled: bool = False
+    live_min_expected_value: Decimal = Decimal("0.00")
+    live_ev_price_max_itm_no_cross: Decimal = Decimal("0.70")
+    live_ev_price_max_needs_cross: Decimal = Decimal("0.30")
+    live_ev_required_bps_max: Decimal = Decimal("0.25")
+    live_ev_allowed_segments: tuple[str, ...] = ("10_to_5", "5_to_3")
+    live_ev_conservative_allowed_segments: tuple[str, ...] = (
+        "10_to_5",
+        "5_to_3",
+        "3_to_1",
+    )
+    live_ev_allow_reversal: bool = False
+    live_ev_candidate_a_win_probability: Decimal = Decimal("0.87")
+    live_ev_candidate_b_win_probability: Decimal = Decimal("0.92")
+    live_product_blocklist: tuple[str, ...] = ()
+    live_conditional_high_price_pass_enabled: bool = True
+    live_conditional_max_premium_over_midpoint: Decimal = Decimal("0.08")
+    live_conditional_max_spread: Decimal = Decimal("0.15")
+    live_conditional_max_scanner_premium: Decimal = Decimal("0.12")
+    live_conditional_allow_extreme_asymmetry: bool = False
+    live_conditional_allow_high_price_ceiling_bypass: bool = False
+    live_conditional_high_price_ceiling_max: Decimal = Decimal("0.70")
+    live_ev_timing_bypass_enabled: bool = True
+    live_ev_extra_entries_per_product_per_session: int = 0
+    live_ev_extra_open_positions_per_product: int = 0
 
 
 class _FixedEntryRiskManager:

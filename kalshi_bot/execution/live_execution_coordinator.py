@@ -73,6 +73,9 @@ class ExecutionSafetyStatus:
     reason: str | None
     contextual_high_price_status: str
     candidate_count: int
+    original_blocker_reason: str | None = None
+    conditional_override_applied: bool = False
+    conditional_override_denied_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -142,6 +145,30 @@ class ProductSessionPacingStatus:
     product_session_entry_count: int
     max_open_positions_per_product: int
     max_entries_per_product_per_session: int
+    ev_pacing_override_status: str = "not_evaluated"
+    ev_pacing_only_blocker: bool = False
+    ev_extra_session_capacity_used: bool = False
+    ev_extra_product_capacity_used: bool = False
+    ev_extra_entries_per_product_per_session: int = 0
+    ev_extra_open_positions_per_product: int = 0
+
+
+@dataclass(frozen=True)
+class EVFilterStatus:
+    allowed: bool
+    status: str
+    reason: str
+    block_reason: str | None
+    estimated_reward: Decimal | None
+    estimated_risk: Decimal | None
+    score: Decimal | None
+    matched_candidate: str | None
+    candidate_a_match: bool
+    candidate_b_match: bool
+    probability: Decimal | None
+    conditional_override_eligible: bool
+    required_conditions: tuple[str, ...]
+    matched_conditions: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -397,9 +424,21 @@ class LiveExecutionCoordinator:
                 continue
             end_window = _entry_end_window_status(contract, settings=self._settings)
             defer_end_window_block = (
-                end_window.reason == "end_window_not_open"
+                end_window.reason
+                in {"end_window_not_open", "entry_min_remaining_seconds_not_met"}
                 and (
-                    getattr(
+                    getattr(self._settings, "live_ev_filter_enabled", True)
+                    or getattr(
+                        self._settings,
+                        "live_ev_timing_bypass_enabled",
+                        True,
+                    )
+                    or getattr(
+                        self._settings,
+                        "live_conditional_high_price_pass_enabled",
+                        True,
+                    )
+                    or getattr(
                         self._settings,
                         "live_composite_quality_filter_enabled",
                         True,
@@ -469,7 +508,38 @@ class LiveExecutionCoordinator:
                     },
                 )
                 continue
-            product_session_pacing = self._product_session_pacing_status(contract)
+            pricing = _execution_pricing(
+                contract=contract,
+                market_snapshot=market_snapshot,
+            )
+            ev_filter = _ev_filter_status(
+                contract=contract,
+                pricing=pricing,
+                entry_segment=entry_segment,
+                settings=self._settings,
+            )
+            if _deferred_timing_block_applies(
+                end_window=end_window,
+                ev_filter=ev_filter,
+                settings=self._settings,
+            ):
+                self._log_contract_intent_skipped(
+                    reason=end_window.reason or "entry_timing_blocked",
+                    contract=contract,
+                    cycle_number=cycle_number,
+                    scan_source=scan_source,
+                    details={
+                        **_end_window_payload(end_window),
+                        **_entry_segment_payload(entry_segment),
+                        **_execution_pricing_payload(pricing),
+                        **_ev_filter_payload(ev_filter),
+                    },
+                )
+                continue
+            product_session_pacing = self._product_session_pacing_status(
+                contract,
+                ev_filter=ev_filter,
+            )
             if not product_session_pacing.allowed:
                 self._log_contract_intent_skipped(
                     reason="product_session_pacing_blocked",
@@ -478,6 +548,27 @@ class LiveExecutionCoordinator:
                     scan_source=scan_source,
                     details={
                         **_entry_segment_payload(entry_segment),
+                        **_execution_pricing_payload(pricing),
+                        **_ev_filter_payload(ev_filter),
+                        **_product_session_pacing_payload(product_session_pacing),
+                    },
+                )
+                continue
+            if not ev_filter.allowed:
+                self._log_contract_intent_skipped(
+                    reason=_ev_filter_skip_reason(
+                        contract=contract,
+                        ev_filter=ev_filter,
+                        settings=self._settings,
+                    ),
+                    contract=contract,
+                    cycle_number=cycle_number,
+                    scan_source=scan_source,
+                    details={
+                        **_end_window_payload(end_window),
+                        **_entry_segment_payload(entry_segment),
+                        **_execution_pricing_payload(pricing),
+                        **_ev_filter_payload(ev_filter),
                         **_product_session_pacing_payload(product_session_pacing),
                     },
                 )
@@ -503,6 +594,8 @@ class LiveExecutionCoordinator:
                         ),
                         **_reversal_cross_hold_payload(reversal_cross_hold),
                         **_entry_segment_payload(entry_segment),
+                        **_execution_pricing_payload(pricing),
+                        **_ev_filter_payload(ev_filter),
                         **_product_session_pacing_payload(product_session_pacing),
                     },
                 )
@@ -515,13 +608,13 @@ class LiveExecutionCoordinator:
                     contract=contract,
                     cycle_number=cycle_number,
                     scan_source=scan_source,
+                    details={
+                        **_execution_pricing_payload(pricing),
+                        **_ev_filter_payload(ev_filter),
+                    },
                 )
                 continue
 
-            pricing = _execution_pricing(
-                contract=contract,
-                market_snapshot=market_snapshot,
-            )
             mid_price_confirmation = _mid_price_confirmation_status(
                 contract=contract,
                 pricing=pricing,
@@ -541,6 +634,7 @@ class LiveExecutionCoordinator:
                         **_reversal_cross_hold_payload(reversal_cross_hold),
                         **_entry_segment_payload(entry_segment),
                         **_product_session_pacing_payload(product_session_pacing),
+                        **_ev_filter_payload(ev_filter),
                         **_execution_pricing_payload(pricing),
                         **_mid_price_confirmation_payload(mid_price_confirmation),
                     },
@@ -554,6 +648,8 @@ class LiveExecutionCoordinator:
                     price_dollars=pricing.intent_price_dollars,
                 ),
                 itm_persistence=itm_persistence,
+                ev_filter=ev_filter,
+                settings=self._settings,
             )
             if not safety.allowed:
                 self._log_contract_intent_skipped(
@@ -571,6 +667,7 @@ class LiveExecutionCoordinator:
                         **_product_session_pacing_payload(product_session_pacing),
                         **_mid_price_confirmation_payload(mid_price_confirmation),
                         **_retry_persistence_payload(retry_persistence),
+                        **_ev_filter_payload(ev_filter),
                         **_execution_pricing_payload(pricing),
                         **_execution_safety_payload(safety),
                     },
@@ -593,6 +690,7 @@ class LiveExecutionCoordinator:
                         **_product_session_pacing_payload(product_session_pacing),
                         **_mid_price_confirmation_payload(mid_price_confirmation),
                         **_retry_persistence_payload(retry_persistence),
+                        **_ev_filter_payload(ev_filter),
                         **_execution_pricing_payload(pricing),
                         **_execution_safety_payload(safety),
                     },
@@ -612,6 +710,7 @@ class LiveExecutionCoordinator:
                         **_product_session_pacing_payload(product_session_pacing),
                         **_mid_price_confirmation_payload(mid_price_confirmation),
                         **_retry_persistence_payload(retry_persistence),
+                        **_ev_filter_payload(ev_filter),
                         **_execution_pricing_payload(pricing),
                         **_execution_safety_payload(safety),
                     },
@@ -623,6 +722,7 @@ class LiveExecutionCoordinator:
                 entry_segment=entry_segment,
                 end_window=end_window,
                 settings=self._settings,
+                ev_filter=ev_filter,
             )
             if not composite_quality.allowed:
                 self._log_contract_intent_skipped(
@@ -641,6 +741,7 @@ class LiveExecutionCoordinator:
                         **_product_session_pacing_payload(product_session_pacing),
                         **_mid_price_confirmation_payload(mid_price_confirmation),
                         **_retry_persistence_payload(retry_persistence),
+                        **_ev_filter_payload(ev_filter),
                         **_execution_pricing_payload(pricing),
                         **_execution_safety_payload(safety),
                         **_composite_quality_payload(composite_quality),
@@ -710,6 +811,7 @@ class LiveExecutionCoordinator:
                     **_execution_pricing_payload(pricing),
                     **_mid_price_confirmation_payload(mid_price_confirmation),
                     **_execution_safety_payload(safety),
+                    **_ev_filter_payload(ev_filter),
                     **_composite_quality_payload(composite_quality),
                     "intent_count": intent.count,
                 },
@@ -1717,6 +1819,8 @@ class LiveExecutionCoordinator:
     def _product_session_pacing_status(
         self,
         contract: ScannedContract,
+        *,
+        ev_filter: EVFilterStatus | None = None,
     ) -> ProductSessionPacingStatus:
         max_open = getattr(self._settings, "live_max_open_positions_per_product", 2)
         max_entries = getattr(
@@ -1724,18 +1828,63 @@ class LiveExecutionCoordinator:
             "live_max_entries_per_product_per_session",
             2,
         )
+        ev_extra_open = getattr(
+            self._settings,
+            "live_ev_extra_open_positions_per_product",
+            0,
+        )
+        ev_extra_entries = getattr(
+            self._settings,
+            "live_ev_extra_entries_per_product_per_session",
+            0,
+        )
         open_count = self._live_open_position_count_for_product(contract.product_id)
         session_key = (contract.product_id, contract.market_ticker)
         session_count = self._entry_count_by_product_session.get(session_key, 0)
-        if open_count >= max_open:
+        ev_eligible = (
+            ev_filter is not None and ev_filter.conditional_override_eligible
+        )
+        ev_open_override = (
+            ev_eligible
+            and open_count >= max_open
+            and open_count < max_open + ev_extra_open
+        )
+        ev_session_override = (
+            ev_eligible
+            and session_count >= max_entries
+            and session_count < max_entries + ev_extra_entries
+        )
+        if open_count >= max_open and not ev_open_override:
             status = "max_open_positions_per_product_reached"
             allowed = False
-        elif session_count >= max_entries:
+        elif session_count >= max_entries and not ev_session_override:
             status = "max_entries_per_product_session_reached"
             allowed = False
         else:
-            status = "available"
+            status = (
+                "ev_extra_capacity_available"
+                if ev_open_override or ev_session_override
+                else "available"
+            )
             allowed = True
+        ev_pacing_only_blocker = (
+            ev_eligible
+            and not allowed
+            and status
+            in {
+                "max_open_positions_per_product_reached",
+                "max_entries_per_product_session_reached",
+            }
+        )
+        ev_pacing_status = (
+            "override_used"
+            if ev_open_override or ev_session_override
+            else "only_blocker"
+            if ev_pacing_only_blocker
+            else "not_needed"
+            if ev_eligible
+            else "not_eligible"
+        )
         return ProductSessionPacingStatus(
             allowed=allowed,
             status=status,
@@ -1743,6 +1892,12 @@ class LiveExecutionCoordinator:
             product_session_entry_count=session_count,
             max_open_positions_per_product=max_open,
             max_entries_per_product_per_session=max_entries,
+            ev_pacing_override_status=ev_pacing_status,
+            ev_pacing_only_blocker=ev_pacing_only_blocker,
+            ev_extra_session_capacity_used=ev_session_override,
+            ev_extra_product_capacity_used=ev_open_override,
+            ev_extra_entries_per_product_per_session=ev_extra_entries,
+            ev_extra_open_positions_per_product=ev_extra_open,
         )
 
     def _live_open_position_count_for_product(self, product_id: str) -> int:
@@ -2379,6 +2534,248 @@ def _mid_price_confirmation_status(
     )
 
 
+def _ev_filter_status(
+    *,
+    contract: ScannedContract,
+    pricing: ExecutionPricing,
+    entry_segment: EntrySegmentStatus,
+    settings: KalshiSettings,
+) -> EVFilterStatus:
+    required_conditions = (
+        "structure_trend",
+        "side_currently_itm",
+        "side_needs_cross_false",
+        "required_bps_within_limit",
+        "entry_price_within_limit",
+        "entry_segment_allowed",
+        "product_not_blocklisted",
+        "liquidity_present",
+        "ev_score_at_or_above_minimum",
+    )
+    matched: list[str] = []
+    if not getattr(settings, "live_ev_filter_enabled", True):
+        return EVFilterStatus(
+            allowed=True,
+            status="disabled",
+            reason="ev_filter_disabled",
+            block_reason=None,
+            estimated_reward=None,
+            estimated_risk=None,
+            score=None,
+            matched_candidate=None,
+            candidate_a_match=False,
+            candidate_b_match=False,
+            probability=None,
+            conditional_override_eligible=False,
+            required_conditions=required_conditions,
+            matched_conditions=(),
+        )
+
+    entry_price = pricing.intent_price_dollars
+    estimated_reward = (Decimal("1") - entry_price).quantize(Decimal("0.0001"))
+    estimated_risk = entry_price
+    product_blocklist = {
+        item.upper() for item in getattr(settings, "live_product_blocklist", ())
+    }
+    product_blocked = contract.product_id.upper() in product_blocklist
+    required_bps = getattr(contract, "required_bps_per_minute", None)
+    required_bps_decimal = (
+        Decimal(str(required_bps)) if required_bps is not None else None
+    )
+    required_bps_limit = getattr(
+        settings,
+        "live_ev_required_bps_max",
+        Decimal("0.25"),
+    )
+    has_liquidity = (
+        pricing.orderbook_present
+        and pricing.available_count_at_intent_price is not None
+        and pricing.available_count_at_intent_price > Decimal("0")
+    )
+    no_cross = not bool(getattr(contract, "side_needs_cross", False))
+    currently_itm = bool(getattr(contract, "side_currently_itm", False))
+    trend = getattr(contract, "structure", None) == "trend"
+    reversal_allowed = (
+        getattr(settings, "live_ev_allow_reversal", False)
+        and getattr(contract, "structure", None) == "reversal"
+    )
+    structure_allowed = trend or reversal_allowed
+    required_bps_ok = (
+        required_bps_decimal is not None and required_bps_decimal <= required_bps_limit
+    )
+    entry_price_ok = entry_price <= getattr(
+        settings,
+        "live_ev_price_max_itm_no_cross",
+        Decimal("0.70"),
+    )
+    segment_allowed = entry_segment.segment in getattr(
+        settings,
+        "live_ev_allowed_segments",
+        (ENTRY_SEGMENT_10_TO_5, ENTRY_SEGMENT_5_TO_3),
+    )
+    conservative_segment_allowed = entry_segment.segment in getattr(
+        settings,
+        "live_ev_conservative_allowed_segments",
+        (ENTRY_SEGMENT_10_TO_5, ENTRY_SEGMENT_5_TO_3, ENTRY_SEGMENT_3_TO_1),
+    )
+
+    if trend:
+        matched.append("structure_trend")
+    if currently_itm:
+        matched.append("side_currently_itm")
+    if no_cross:
+        matched.append("side_needs_cross_false")
+    if required_bps_ok:
+        matched.append("required_bps_within_limit")
+    if entry_price_ok:
+        matched.append("entry_price_within_limit")
+    if segment_allowed:
+        matched.append("entry_segment_allowed")
+    if not product_blocked:
+        matched.append("product_not_blocklisted")
+    if has_liquidity:
+        matched.append("liquidity_present")
+
+    candidate_a_match = (
+        structure_allowed
+        and currently_itm
+        and no_cross
+        and required_bps_ok
+        and entry_price_ok
+        and segment_allowed
+        and not product_blocked
+        and has_liquidity
+    )
+    candidate_b_match = (
+        trend
+        and currently_itm
+        and no_cross
+        and required_bps_ok
+        and entry_price
+        <= getattr(settings, "live_composite_low_price_max", Decimal("0.30"))
+        and conservative_segment_allowed
+        and not product_blocked
+        and has_liquidity
+    )
+    probability = None
+    matched_candidate = None
+    if candidate_b_match:
+        probability = getattr(
+            settings,
+            "live_ev_candidate_b_win_probability",
+            Decimal("0.92"),
+        )
+        matched_candidate = "candidate_b"
+    elif candidate_a_match:
+        probability = getattr(
+            settings,
+            "live_ev_candidate_a_win_probability",
+            Decimal("0.87"),
+        )
+        matched_candidate = "candidate_a"
+
+    score = (probability - entry_price).quantize(Decimal("0.0001")) if probability is not None else None
+    min_ev = getattr(settings, "live_min_expected_value", Decimal("0.00"))
+    score_ok = score is not None and score >= min_ev
+    if score_ok:
+        matched.append("ev_score_at_or_above_minimum")
+
+    missing = tuple(
+        condition for condition in required_conditions if condition not in matched
+    )
+    if not score_ok or not (candidate_a_match or candidate_b_match):
+        block_reason = f"missing_{missing[0]}" if missing else "candidate_not_matched"
+        return EVFilterStatus(
+            allowed=False,
+            status="blocked",
+            reason="ev_filter_blocked",
+            block_reason=block_reason,
+            estimated_reward=estimated_reward,
+            estimated_risk=estimated_risk,
+            score=score,
+            matched_candidate=matched_candidate,
+            candidate_a_match=candidate_a_match,
+            candidate_b_match=candidate_b_match,
+            probability=probability,
+            conditional_override_eligible=False,
+            required_conditions=required_conditions,
+            matched_conditions=tuple(dict.fromkeys(matched)),
+        )
+
+    return EVFilterStatus(
+        allowed=True,
+        status="allowed",
+        reason="ev_filter_allowed",
+        block_reason=None,
+        estimated_reward=estimated_reward,
+        estimated_risk=estimated_risk,
+        score=score,
+        matched_candidate=matched_candidate,
+        candidate_a_match=candidate_a_match,
+        candidate_b_match=candidate_b_match,
+        probability=probability,
+        conditional_override_eligible=True,
+        required_conditions=required_conditions,
+        matched_conditions=tuple(dict.fromkeys(matched)),
+    )
+
+
+def _deferred_timing_block_applies(
+    *,
+    end_window: EntryEndWindowStatus,
+    ev_filter: EVFilterStatus,
+    settings: KalshiSettings,
+) -> bool:
+    if end_window.reason not in {
+        "end_window_not_open",
+        "entry_min_remaining_seconds_not_met",
+    }:
+        return False
+    if (
+        end_window.reason == "end_window_not_open"
+        and (
+            getattr(settings, "live_composite_quality_filter_enabled", True)
+            or getattr(settings, "live_outside_end_window_exception_enabled", False)
+        )
+    ):
+        return False
+    if (
+        getattr(settings, "live_ev_timing_bypass_enabled", True)
+        and ev_filter.conditional_override_eligible
+    ):
+        return False
+    return not end_window.allowed
+
+
+def _ev_filter_skip_reason(
+    *,
+    contract: ScannedContract,
+    ev_filter: EVFilterStatus,
+    settings: KalshiSettings,
+) -> str:
+    product_blocklist = {
+        item.upper() for item in getattr(settings, "live_product_blocklist", ())
+    }
+    if contract.product_id.upper() in product_blocklist:
+        return "product_blocklisted"
+    if bool(getattr(contract, "side_needs_cross", False)) and getattr(
+        settings,
+        "live_block_needs_cross",
+        True,
+    ):
+        return "needs_cross_blocked"
+    required_bps = getattr(contract, "required_bps_per_minute", None)
+    if required_bps is not None and Decimal(str(required_bps)) > getattr(
+        settings,
+        "live_ev_required_bps_max",
+        Decimal("0.25"),
+    ):
+        return "required_bps_per_minute_too_high"
+    if ev_filter.block_reason == "missing_liquidity_present":
+        return "executable_price_no_visible_liquidity"
+    return ev_filter.reason
+
+
 def _composite_quality_status(
     *,
     contract: ScannedContract,
@@ -2386,6 +2783,7 @@ def _composite_quality_status(
     entry_segment: EntrySegmentStatus,
     end_window: EntryEndWindowStatus,
     settings: KalshiSettings,
+    ev_filter: EVFilterStatus | None = None,
 ) -> CompositeQualityStatus:
     entry_price = pricing.intent_price_dollars
     required_conditions = _composite_required_conditions(settings)
@@ -2503,6 +2901,13 @@ def _composite_quality_status(
         end_window=end_window,
         settings=settings,
     )
+    if (
+        outside_status == "blocked"
+        and ev_filter is not None
+        and ev_filter.conditional_override_eligible
+        and getattr(settings, "live_ev_timing_bypass_enabled", True)
+    ):
+        outside_status = "allowed_ev_timing_bypass"
     if outside_status == "blocked":
         return CompositeQualityStatus(
             allowed=False,
@@ -2580,6 +2985,26 @@ def _composite_quality_status(
         if condition not in matched_conditions
     )
     if missing:
+        if (
+            ev_filter is not None
+            and ev_filter.conditional_override_eligible
+        ):
+            return CompositeQualityStatus(
+                allowed=True,
+                status="allowed_ev_composite_override",
+                reason="ev_composite_quality_override",
+                block_reason=None,
+                required_conditions=required_conditions,
+                matched_conditions=matched_conditions,
+                reversal_price_status=reversal_price_status,
+                reversal_max_entry_price=reversal_max_entry_price,
+                reversal_price_block_reason=reversal_price_block_reason,
+                needs_cross_status=needs_cross_status,
+                required_bps_per_minute_status=required_bps_status,
+                max_required_bps_per_minute=max_required_bps_per_minute,
+                target_distance_filter_reason=None,
+                outside_end_window_exception_status=outside_status,
+            )
         return CompositeQualityStatus(
             allowed=False,
             status="blocked_composite_quality",
@@ -2727,6 +3152,8 @@ def _execution_safety_status(
     pricing: ExecutionPricing,
     candidate_count: int,
     itm_persistence: ItmPersistenceStatus,
+    ev_filter: EVFilterStatus | None = None,
+    settings: KalshiSettings | None = None,
 ) -> ExecutionSafetyStatus:
     if pricing.intent_price_dollars < MIN_LIVE_EXECUTION_PRICE_DOLLARS:
         return ExecutionSafetyStatus(
@@ -2736,11 +3163,28 @@ def _execution_safety_status(
             candidate_count=candidate_count,
         )
     if pricing.intent_price_dollars >= EXTREME_EXECUTION_PRICE_DOLLARS:
+        denial = _conditional_ev_override_denial(
+            blocker_reason="executable_price_extreme_asymmetry",
+            pricing=pricing,
+            ev_filter=ev_filter,
+            settings=settings,
+        )
+        if denial is None:
+            return ExecutionSafetyStatus(
+                allowed=True,
+                reason=None,
+                contextual_high_price_status="conditional_extreme_asymmetry_pass",
+                candidate_count=candidate_count,
+                original_blocker_reason="executable_price_extreme_asymmetry",
+                conditional_override_applied=True,
+            )
         return ExecutionSafetyStatus(
             allowed=False,
             reason="executable_price_extreme_asymmetry",
             contextual_high_price_status="extreme_price_blocked",
             candidate_count=candidate_count,
+            original_blocker_reason="executable_price_extreme_asymmetry",
+            conditional_override_denied_reason=denial,
         )
     if pricing.intent_price_dollars > MAX_LIVE_EXECUTION_PRICE_DOLLARS:
         if pricing.pricing_source != "executable_side_ask":
@@ -2759,11 +3203,30 @@ def _execution_safety_status(
             itm_persistence=itm_persistence,
         )
         if contextual_reason is not None:
+            denial = _conditional_ev_override_denial(
+                blocker_reason=contextual_reason,
+                pricing=pricing,
+                ev_filter=ev_filter,
+                settings=settings,
+            )
+            if denial is None:
+                return ExecutionSafetyStatus(
+                    allowed=True,
+                    reason=None,
+                    contextual_high_price_status=(
+                        f"conditional_override_{contextual_reason}"
+                    ),
+                    candidate_count=candidate_count,
+                    original_blocker_reason=contextual_reason,
+                    conditional_override_applied=True,
+                )
             return ExecutionSafetyStatus(
                 allowed=False,
                 reason=contextual_reason,
                 contextual_high_price_status=contextual_reason,
                 candidate_count=candidate_count,
+                original_blocker_reason=contextual_reason,
+                conditional_override_denied_reason=denial,
             )
         return ExecutionSafetyStatus(
             allowed=True,
@@ -2777,11 +3240,30 @@ def _execution_safety_status(
         and pricing.executable_side_ask
         > pricing.scanner_midpoint + MAX_EXECUTION_PREMIUM_OVER_SCANNER_DOLLARS
     ):
+        denial = _conditional_ev_override_denial(
+            blocker_reason="executable_price_above_scanner_premium",
+            pricing=pricing,
+            ev_filter=ev_filter,
+            settings=settings,
+        )
+        if denial is None:
+            return ExecutionSafetyStatus(
+                allowed=True,
+                reason=None,
+                contextual_high_price_status=(
+                    "conditional_override_executable_price_above_scanner_premium"
+                ),
+                candidate_count=candidate_count,
+                original_blocker_reason="executable_price_above_scanner_premium",
+                conditional_override_applied=True,
+            )
         return ExecutionSafetyStatus(
             allowed=False,
             reason="executable_price_above_scanner_premium",
             contextual_high_price_status="not_high_price",
             candidate_count=candidate_count,
+            original_blocker_reason="executable_price_above_scanner_premium",
+            conditional_override_denied_reason=denial,
         )
     if (
         pricing.orderbook_present
@@ -2800,6 +3282,71 @@ def _execution_safety_status(
         contextual_high_price_status="not_high_price",
         candidate_count=candidate_count,
     )
+
+
+def _conditional_ev_override_denial(
+    *,
+    blocker_reason: str,
+    pricing: ExecutionPricing,
+    ev_filter: EVFilterStatus | None,
+    settings: KalshiSettings | None,
+) -> str | None:
+    if settings is None:
+        return "settings_unavailable"
+    if not getattr(settings, "live_conditional_high_price_pass_enabled", True):
+        return "conditional_high_price_pass_disabled"
+    if ev_filter is None or not ev_filter.conditional_override_eligible:
+        return "ev_filter_not_eligible"
+    if blocker_reason == "executable_price_extreme_asymmetry" and not getattr(
+        settings,
+        "live_conditional_allow_extreme_asymmetry",
+        False,
+    ):
+        return "extreme_asymmetry_bypass_disabled"
+    if blocker_reason == "contextual_high_price_above_ceiling" and not getattr(
+        settings,
+        "live_conditional_allow_high_price_ceiling_bypass",
+        False,
+    ):
+        return "high_price_ceiling_bypass_disabled"
+    ceiling_max = getattr(
+        settings,
+        "live_conditional_high_price_ceiling_max",
+        Decimal("0.70"),
+    )
+    if pricing.intent_price_dollars > ceiling_max:
+        return "entry_price_above_conditional_ceiling"
+    if pricing.spread_dollars is None:
+        return "spread_unavailable"
+    if pricing.spread_dollars > getattr(
+        settings,
+        "live_conditional_max_spread",
+        Decimal("0.15"),
+    ):
+        return "spread_above_relaxed_limit"
+    if (
+        blocker_reason != "executable_price_above_scanner_premium"
+        and pricing.execution_premium_over_midpoint_dollars
+        > getattr(
+            settings,
+            "live_conditional_max_premium_over_midpoint",
+            Decimal("0.08"),
+        )
+    ):
+        return "premium_above_relaxed_limit"
+    scanner_premium = pricing.intent_price_dollars - pricing.scanner_midpoint
+    if scanner_premium > getattr(
+        settings,
+        "live_conditional_max_scanner_premium",
+        Decimal("0.12"),
+    ):
+        return "scanner_premium_above_relaxed_limit"
+    if (
+        pricing.available_count_at_intent_price is None
+        or pricing.available_count_at_intent_price <= Decimal("0")
+    ):
+        return "visible_liquidity_unavailable"
+    return None
 
 
 def _contextual_high_price_rejection_reason(
@@ -2904,6 +3451,11 @@ def _execution_safety_payload(status: ExecutionSafetyStatus) -> dict[str, object
     return {
         "execution_safety_reason": status.reason,
         "contextual_high_price_status": status.contextual_high_price_status,
+        "original_blocker_reason": status.original_blocker_reason,
+        "conditional_override_applied": status.conditional_override_applied,
+        "conditional_override_denied_reason": (
+            status.conditional_override_denied_reason
+        ),
         "candidate_count": status.candidate_count,
         "min_live_execution_price_dollars": MIN_LIVE_EXECUTION_PRICE_DOLLARS,
         "max_live_execution_price_dollars": MAX_LIVE_EXECUTION_PRICE_DOLLARS,
@@ -2915,6 +3467,40 @@ def _execution_safety_payload(status: ExecutionSafetyStatus) -> dict[str, object
             MAX_CONTEXTUAL_PREMIUM_OVER_MIDPOINT_DOLLARS
         ),
         "max_contextual_spread_dollars": MAX_CONTEXTUAL_SPREAD_DOLLARS,
+    }
+
+
+def _ev_filter_payload(status: EVFilterStatus | None) -> dict[str, object]:
+    if status is None:
+        return {
+            "ev_filter_status": None,
+            "ev_filter_reason": None,
+            "ev_estimated_reward": None,
+            "ev_estimated_risk": None,
+            "ev_score": None,
+            "ev_block_reason": None,
+            "ev_matched_candidate": None,
+            "ev_candidate_a_match": None,
+            "ev_candidate_b_match": None,
+            "ev_probability": None,
+            "ev_conditional_override_eligible": None,
+            "ev_required_conditions": [],
+            "ev_matched_conditions": [],
+        }
+    return {
+        "ev_filter_status": status.status,
+        "ev_filter_reason": status.reason,
+        "ev_estimated_reward": status.estimated_reward,
+        "ev_estimated_risk": status.estimated_risk,
+        "ev_score": status.score,
+        "ev_block_reason": status.block_reason,
+        "ev_matched_candidate": status.matched_candidate,
+        "ev_candidate_a_match": status.candidate_a_match,
+        "ev_candidate_b_match": status.candidate_b_match,
+        "ev_probability": status.probability,
+        "ev_conditional_override_eligible": status.conditional_override_eligible,
+        "ev_required_conditions": list(status.required_conditions),
+        "ev_matched_conditions": list(status.matched_conditions),
     }
 
 
@@ -3057,6 +3643,16 @@ def _product_session_pacing_payload(status: ProductSessionPacingStatus) -> dict[
         "max_open_positions_per_product": status.max_open_positions_per_product,
         "max_entries_per_product_per_session": (
             status.max_entries_per_product_per_session
+        ),
+        "ev_pacing_override_status": status.ev_pacing_override_status,
+        "ev_pacing_only_blocker": status.ev_pacing_only_blocker,
+        "ev_extra_session_capacity_used": status.ev_extra_session_capacity_used,
+        "ev_extra_product_capacity_used": status.ev_extra_product_capacity_used,
+        "ev_extra_entries_per_product_per_session": (
+            status.ev_extra_entries_per_product_per_session
+        ),
+        "ev_extra_open_positions_per_product": (
+            status.ev_extra_open_positions_per_product
         ),
     }
 

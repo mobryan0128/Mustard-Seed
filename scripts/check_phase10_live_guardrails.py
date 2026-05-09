@@ -240,6 +240,27 @@ LIVE_BLOCK_NEEDS_CROSS=true
 LIVE_MAX_REQUIRED_BPS_PER_MINUTE=0.20
 LIVE_OUTSIDE_END_WINDOW_EXCEPTION_ENABLED=true
 LIVE_OUTSIDE_END_WINDOW_MAX_PRICE=0.25
+LIVE_EV_FILTER_ENABLED=true
+LIVE_MIN_EXPECTED_VALUE=0.01
+LIVE_EV_PRICE_MAX_ITM_NO_CROSS=0.65
+LIVE_EV_PRICE_MAX_NEEDS_CROSS=0.20
+LIVE_EV_REQUIRED_BPS_MAX=0.20
+LIVE_EV_ALLOWED_SEGMENTS=10-to-5,5_to_3
+LIVE_EV_CONSERVATIVE_ALLOWED_SEGMENTS=10_to_5,5_to_3,3_to_1
+LIVE_EV_ALLOW_REVERSAL=false
+LIVE_EV_CANDIDATE_A_WIN_PROBABILITY=0.86
+LIVE_EV_CANDIDATE_B_WIN_PROBABILITY=0.91
+LIVE_PRODUCT_BLOCKLIST=BNB-USD
+LIVE_CONDITIONAL_HIGH_PRICE_PASS_ENABLED=true
+LIVE_CONDITIONAL_MAX_PREMIUM_OVER_MIDPOINT=0.07
+LIVE_CONDITIONAL_MAX_SPREAD=0.14
+LIVE_CONDITIONAL_MAX_SCANNER_PREMIUM=0.11
+LIVE_CONDITIONAL_ALLOW_EXTREME_ASYMMETRY=false
+LIVE_CONDITIONAL_ALLOW_HIGH_PRICE_CEILING_BYPASS=true
+LIVE_CONDITIONAL_HIGH_PRICE_CEILING_MAX=0.65
+LIVE_EV_TIMING_BYPASS_ENABLED=true
+LIVE_EV_EXTRA_ENTRIES_PER_PRODUCT_PER_SESSION=1
+LIVE_EV_EXTRA_OPEN_POSITIONS_PER_PRODUCT=1
 """
     )
     failures: list[str] = []
@@ -296,6 +317,28 @@ LIVE_OUTSIDE_END_WINDOW_MAX_PRICE=0.25
     if settings.live_outside_end_window_max_price != Decimal("0.2500"):
         failures.append(
             f"live outside max={settings.live_outside_end_window_max_price}"
+        )
+    if not settings.live_ev_filter_enabled:
+        failures.append("live ev filter did not parse true")
+    if settings.live_min_expected_value != Decimal("0.01"):
+        failures.append(f"live min ev={settings.live_min_expected_value}")
+    if settings.live_ev_price_max_itm_no_cross != Decimal("0.6500"):
+        failures.append(f"live ev max itm={settings.live_ev_price_max_itm_no_cross}")
+    if settings.live_ev_allowed_segments != ("10_to_5", "5_to_3"):
+        failures.append(f"live ev segments={settings.live_ev_allowed_segments}")
+    if settings.live_product_blocklist != ("BNB-USD",):
+        failures.append(f"live product blocklist={settings.live_product_blocklist}")
+    if settings.live_conditional_max_scanner_premium != Decimal("0.1100"):
+        failures.append(
+            "live conditional scanner premium="
+            f"{settings.live_conditional_max_scanner_premium}"
+        )
+    if not settings.live_conditional_allow_high_price_ceiling_bypass:
+        failures.append("live high price ceiling bypass did not parse true")
+    if settings.live_ev_extra_entries_per_product_per_session != 1:
+        failures.append(
+            "live ev extra entries="
+            f"{settings.live_ev_extra_entries_per_product_per_session}"
         )
 
     generic_manager = RiskManager.from_settings(settings)
