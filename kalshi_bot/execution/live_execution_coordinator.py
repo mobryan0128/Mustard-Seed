@@ -159,9 +159,19 @@ class EVFilterStatus:
     status: str
     reason: str
     block_reason: str | None
+    cost_price: Decimal | None
+    market_probability_price: Decimal | None
+    price_limit_basis: str | None
+    side_price_basis: str | None
+    opposite_price: Decimal | None
+    entry_price_within_limit_status: str | None
+    side_adjusted_price_within_limit: bool | None
+    no_side_price_interpretation_applied: bool
     estimated_reward: Decimal | None
     estimated_risk: Decimal | None
+    cost_expected_value: Decimal | None
     score: Decimal | None
+    score_basis: str | None
     matched_candidate: str | None
     candidate_a_match: bool
     candidate_b_match: bool
@@ -2559,9 +2569,19 @@ def _ev_filter_status(
             status="disabled",
             reason="ev_filter_disabled",
             block_reason=None,
+            cost_price=None,
+            market_probability_price=None,
+            price_limit_basis=None,
+            side_price_basis=None,
+            opposite_price=None,
+            entry_price_within_limit_status=None,
+            side_adjusted_price_within_limit=None,
+            no_side_price_interpretation_applied=False,
             estimated_reward=None,
             estimated_risk=None,
+            cost_expected_value=None,
             score=None,
+            score_basis=None,
             matched_candidate=None,
             candidate_a_match=False,
             candidate_b_match=False,
@@ -2571,9 +2591,16 @@ def _ev_filter_status(
             matched_conditions=(),
         )
 
-    entry_price = pricing.intent_price_dollars
-    estimated_reward = (Decimal("1") - entry_price).quantize(Decimal("0.0001"))
-    estimated_risk = entry_price
+    cost_price = pricing.intent_price_dollars
+    (
+        market_probability_price,
+        price_limit_basis,
+        side_price_basis,
+        opposite_price,
+        no_side_interpretation,
+    ) = _ev_price_basis(pricing)
+    estimated_reward = (Decimal("1") - cost_price).quantize(Decimal("0.0001"))
+    estimated_risk = cost_price
     product_blocklist = {
         item.upper() for item in getattr(settings, "live_product_blocklist", ())
     }
@@ -2603,11 +2630,24 @@ def _ev_filter_status(
     required_bps_ok = (
         required_bps_decimal is not None and required_bps_decimal <= required_bps_limit
     )
-    entry_price_ok = entry_price <= getattr(
+    price_limit = getattr(
         settings,
         "live_ev_price_max_itm_no_cross",
         Decimal("0.70"),
     )
+    entry_price_ok = (
+        market_probability_price is not None
+        and Decimal("0") < market_probability_price < Decimal("1")
+        and market_probability_price <= price_limit
+    )
+    if market_probability_price is None:
+        entry_price_status = "missing"
+    elif market_probability_price <= Decimal("0") or market_probability_price >= Decimal("1"):
+        entry_price_status = "invalid"
+    elif entry_price_ok:
+        entry_price_status = "within_limit"
+    else:
+        entry_price_status = "above_limit"
     segment_allowed = entry_segment.segment in getattr(
         settings,
         "live_ev_allowed_segments",
@@ -2651,7 +2691,9 @@ def _ev_filter_status(
         and currently_itm
         and no_cross
         and required_bps_ok
-        and entry_price
+        and entry_price_ok
+        and market_probability_price is not None
+        and market_probability_price
         <= getattr(settings, "live_composite_low_price_max", Decimal("0.30"))
         and conservative_segment_allowed
         and not product_blocked
@@ -2674,7 +2716,16 @@ def _ev_filter_status(
         )
         matched_candidate = "candidate_a"
 
-    score = (probability - entry_price).quantize(Decimal("0.0001")) if probability is not None else None
+    score = (
+        (probability - market_probability_price).quantize(Decimal("0.0001"))
+        if probability is not None and market_probability_price is not None
+        else None
+    )
+    cost_expected_value = (
+        (probability - cost_price).quantize(Decimal("0.0001"))
+        if probability is not None
+        else None
+    )
     min_ev = getattr(settings, "live_min_expected_value", Decimal("0.00"))
     score_ok = score is not None and score >= min_ev
     if score_ok:
@@ -2690,9 +2741,19 @@ def _ev_filter_status(
             status="blocked",
             reason="ev_filter_blocked",
             block_reason=block_reason,
+            cost_price=cost_price,
+            market_probability_price=market_probability_price,
+            price_limit_basis=price_limit_basis,
+            side_price_basis=side_price_basis,
+            opposite_price=opposite_price,
+            entry_price_within_limit_status=entry_price_status,
+            side_adjusted_price_within_limit=entry_price_ok,
+            no_side_price_interpretation_applied=no_side_interpretation,
             estimated_reward=estimated_reward,
             estimated_risk=estimated_risk,
+            cost_expected_value=cost_expected_value,
             score=score,
+            score_basis="market_probability_price",
             matched_candidate=matched_candidate,
             candidate_a_match=candidate_a_match,
             candidate_b_match=candidate_b_match,
@@ -2707,9 +2768,19 @@ def _ev_filter_status(
         status="allowed",
         reason="ev_filter_allowed",
         block_reason=None,
+        cost_price=cost_price,
+        market_probability_price=market_probability_price,
+        price_limit_basis=price_limit_basis,
+        side_price_basis=side_price_basis,
+        opposite_price=opposite_price,
+        entry_price_within_limit_status=entry_price_status,
+        side_adjusted_price_within_limit=entry_price_ok,
+        no_side_price_interpretation_applied=no_side_interpretation,
         estimated_reward=estimated_reward,
         estimated_risk=estimated_risk,
+        cost_expected_value=cost_expected_value,
         score=score,
+        score_basis="market_probability_price",
         matched_candidate=matched_candidate,
         candidate_a_match=candidate_a_match,
         candidate_b_match=candidate_b_match,
@@ -2717,6 +2788,47 @@ def _ev_filter_status(
         conditional_override_eligible=True,
         required_conditions=required_conditions,
         matched_conditions=tuple(dict.fromkeys(matched)),
+    )
+
+
+def _ev_price_basis(
+    pricing: ExecutionPricing,
+) -> tuple[Decimal | None, str, str, Decimal | None, bool]:
+    cost_price = pricing.intent_price_dollars
+    if pricing.intent_side == "no":
+        if pricing.yes_bid is not None:
+            return (
+                pricing.yes_bid,
+                "market_probability_price",
+                "opposite_yes_bid",
+                pricing.yes_bid,
+                True,
+            )
+        if cost_price is not None:
+            opposite_price = Decimal("1") - cost_price
+            return (
+                opposite_price,
+                "market_probability_price",
+                "one_minus_no_cost",
+                opposite_price,
+                True,
+            )
+        return (None, "market_probability_price", "missing_no_basis", None, True)
+    if pricing.intent_side == "yes":
+        opposite_price = Decimal("1") - cost_price if cost_price is not None else None
+        return (
+            cost_price,
+            "market_probability_price",
+            "yes_cost",
+            opposite_price,
+            False,
+        )
+    return (
+        cost_price,
+        "market_probability_price",
+        "unknown_side_cost",
+        None,
+        False,
     )
 
 
@@ -3475,9 +3587,19 @@ def _ev_filter_payload(status: EVFilterStatus | None) -> dict[str, object]:
         return {
             "ev_filter_status": None,
             "ev_filter_reason": None,
+            "ev_cost_price": None,
+            "ev_market_probability_price": None,
+            "ev_price_limit_basis": None,
+            "ev_side_price_basis": None,
+            "ev_opposite_price": None,
+            "ev_entry_price_within_limit_status": None,
+            "ev_side_adjusted_price_within_limit": None,
+            "ev_no_side_price_interpretation_applied": None,
             "ev_estimated_reward": None,
             "ev_estimated_risk": None,
+            "ev_cost_expected_value": None,
             "ev_score": None,
+            "ev_score_basis": None,
             "ev_block_reason": None,
             "ev_matched_candidate": None,
             "ev_candidate_a_match": None,
@@ -3490,9 +3612,21 @@ def _ev_filter_payload(status: EVFilterStatus | None) -> dict[str, object]:
     return {
         "ev_filter_status": status.status,
         "ev_filter_reason": status.reason,
+        "ev_cost_price": status.cost_price,
+        "ev_market_probability_price": status.market_probability_price,
+        "ev_price_limit_basis": status.price_limit_basis,
+        "ev_side_price_basis": status.side_price_basis,
+        "ev_opposite_price": status.opposite_price,
+        "ev_entry_price_within_limit_status": status.entry_price_within_limit_status,
+        "ev_side_adjusted_price_within_limit": status.side_adjusted_price_within_limit,
+        "ev_no_side_price_interpretation_applied": (
+            status.no_side_price_interpretation_applied
+        ),
         "ev_estimated_reward": status.estimated_reward,
         "ev_estimated_risk": status.estimated_risk,
+        "ev_cost_expected_value": status.cost_expected_value,
         "ev_score": status.score,
+        "ev_score_basis": status.score_basis,
         "ev_block_reason": status.block_reason,
         "ev_matched_candidate": status.matched_candidate,
         "ev_candidate_a_match": status.candidate_a_match,

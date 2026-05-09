@@ -61,6 +61,11 @@ def main() -> int:
     failures.extend(_validate_mid_price_confirmed_trend_allows())
     failures.extend(_validate_composite_candidate_a_allows())
     failures.extend(_validate_ev_candidate_a_allows_five_to_three())
+    failures.extend(_validate_ev_no_candidate_a_side_aware_allows())
+    failures.extend(_validate_ev_no_candidate_a_needs_cross_blocks())
+    failures.extend(_validate_ev_no_candidate_a_required_bps_blocks())
+    failures.extend(_validate_ev_no_candidate_a_missing_liquidity_blocks())
+    failures.extend(_validate_ev_no_candidate_a_hard_cost_ceiling_blocks())
     failures.extend(_validate_ev_candidate_a_blocks_needs_cross())
     failures.extend(_validate_ev_conditional_scanner_premium_bypass())
     failures.extend(_validate_composite_low_price_candidate_allows())
@@ -813,6 +818,207 @@ def _validate_ev_candidate_a_allows_five_to_three() -> list[str]:
             failures.append(f"ev candidate A segment={payload.get('entry_segment')}")
         if payload.get("ev_filter_status") != "allowed":
             failures.append(f"ev candidate A status={payload.get('ev_filter_status')}")
+        return failures
+
+
+def _validate_ev_no_candidate_a_side_aware_allows() -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_ev_filter_enabled=True,
+                live_composite_low_price_max=Decimal("0.05"),
+                live_conditional_allow_high_price_ceiling_bypass=True,
+                live_conditional_high_price_ceiling_max=Decimal("0.92"),
+                live_conditional_max_premium_over_midpoint=Decimal("0.90"),
+                live_conditional_max_scanner_premium=Decimal("0.90"),
+            ),
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        market_snapshot = _market_snapshot(
+            market_ticker="KXBTC15M-EV-NO-A",
+            yes_bid=Decimal("0.09"),
+            yes_ask=Decimal("0.15"),
+            yes_bid_size=Decimal("100"),
+            yes_ask_size=Decimal("100"),
+            orderbook_seq=704,
+        )
+        contract = _contract(
+            market_ticker="KXBTC15M-EV-NO-A",
+            direction="down",
+            midpoint=Decimal("0.12"),
+            recent_return_bps=Decimal("-20.000"),
+            lookback_return_bps=Decimal("-25.000"),
+            impulse_direction="down",
+            impulse_return_bps=Decimal("-18.000"),
+            contract_close_time=_future_time(minutes=7),
+            contract_time_remaining_seconds=420,
+        )
+        coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(contract),
+            cycle_number=703,
+            market_snapshot=market_snapshot,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(contract),
+            cycle_number=704,
+            market_snapshot=market_snapshot,
+        )
+        if len(intents) != 1:
+            return [f"ev NO candidate A intents={len(intents)} expected=1"]
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_intent_created",
+        )
+        if payload is None:
+            return ["ev NO candidate A intent log missing"]
+        failures: list[str] = []
+        expected = {
+            "intent_side": "no",
+            "ev_filter_status": "allowed",
+            "ev_matched_candidate": "candidate_a",
+            "ev_cost_price": "0.91",
+            "ev_market_probability_price": "0.09",
+            "ev_price_limit_basis": "market_probability_price",
+            "ev_side_price_basis": "opposite_yes_bid",
+            "ev_opposite_price": "0.09",
+            "ev_entry_price_within_limit_status": "within_limit",
+            "ev_side_adjusted_price_within_limit": True,
+            "ev_no_side_price_interpretation_applied": True,
+            "ev_estimated_reward": "0.0900",
+            "ev_estimated_risk": "0.91",
+            "ev_score": "0.7800",
+            "ev_score_basis": "market_probability_price",
+        }
+        for key, value in expected.items():
+            if payload.get(key) != value:
+                failures.append(f"ev NO {key}={payload.get(key)} expected={value}")
+        return failures
+
+
+def _validate_ev_no_candidate_a_needs_cross_blocks() -> list[str]:
+    return _expect_ev_no_skip(
+        market_ticker="KXBTC15M-EV-NO-CROSS",
+        side_currently_itm=False,
+        side_needs_cross=True,
+        distance_to_target_bps=Decimal("1.000"),
+        required_bps_per_minute=Decimal("0.100"),
+        expected_reason="needs_cross_blocked",
+    )
+
+
+def _validate_ev_no_candidate_a_required_bps_blocks() -> list[str]:
+    return _expect_ev_no_skip(
+        market_ticker="KXBTC15M-EV-NO-BPS",
+        required_bps_per_minute=Decimal("0.500"),
+        expected_reason="required_bps_per_minute_too_high",
+    )
+
+
+def _validate_ev_no_candidate_a_missing_liquidity_blocks() -> list[str]:
+    return _expect_ev_no_skip(
+        market_ticker="KXBTC15M-EV-NO-LIQ",
+        yes_bid_size=Decimal("0"),
+        expected_reason="executable_price_no_visible_liquidity",
+        expected_ev_block_reason="missing_liquidity_present",
+    )
+
+
+def _validate_ev_no_candidate_a_hard_cost_ceiling_blocks() -> list[str]:
+    return _expect_ev_no_skip(
+        market_ticker="KXBTC15M-EV-NO-CEILING",
+        expected_reason="contextual_high_price_above_ceiling",
+        expected_ev_status="allowed",
+    )
+
+
+def _expect_ev_no_skip(
+    *,
+    market_ticker: str,
+    expected_reason: str,
+    side_currently_itm: bool = True,
+    side_needs_cross: bool = False,
+    distance_to_target_bps: Decimal = Decimal("-100.000"),
+    required_bps_per_minute: Decimal = Decimal("0.000"),
+    yes_bid_size: Decimal = Decimal("100"),
+    expected_ev_block_reason: str | None = None,
+    expected_ev_status: str | None = None,
+) -> list[str]:
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_ev_filter_enabled=True,
+            ),
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
+        )
+        market_snapshot = _market_snapshot(
+            market_ticker=market_ticker,
+            yes_bid=Decimal("0.09"),
+            yes_ask=Decimal("0.15"),
+            yes_bid_size=yes_bid_size,
+            yes_ask_size=Decimal("100"),
+            orderbook_seq=705,
+        )
+        intents = coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(
+                _contract(
+                    market_ticker=market_ticker,
+                    direction="down",
+                    midpoint=Decimal("0.12"),
+                    side_currently_itm=side_currently_itm,
+                    side_needs_cross=side_needs_cross,
+                    distance_to_target_bps=distance_to_target_bps,
+                    required_bps_per_minute=required_bps_per_minute,
+                    feasibility_status=(
+                        "needs_cross" if side_needs_cross else "currently_itm"
+                    ),
+                    recent_return_bps=Decimal("-20.000"),
+                    lookback_return_bps=Decimal("-25.000"),
+                    impulse_direction="down",
+                    impulse_return_bps=Decimal("-18.000"),
+                    contract_close_time=_future_time(minutes=7),
+                    contract_time_remaining_seconds=420,
+                )
+            ),
+            cycle_number=705,
+            market_snapshot=market_snapshot,
+        )
+        if intents:
+            return [f"{market_ticker} intents={len(intents)} expected=0"]
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="live_order_intent_skipped",
+        )
+        if payload is None:
+            return [f"{market_ticker} skip log missing"]
+        failures: list[str] = []
+        if payload.get("reason") != expected_reason:
+            failures.append(f"{market_ticker} reason={payload.get('reason')}")
+        if payload.get("ev_cost_price") != "0.91":
+            failures.append(f"{market_ticker} ev_cost={payload.get('ev_cost_price')}")
+        if payload.get("ev_market_probability_price") != "0.09":
+            failures.append(
+                f"{market_ticker} ev_market={payload.get('ev_market_probability_price')}"
+            )
+        if payload.get("ev_no_side_price_interpretation_applied") is not True:
+            failures.append(
+                f"{market_ticker} no-side={payload.get('ev_no_side_price_interpretation_applied')}"
+            )
+        if expected_ev_block_reason is not None and payload.get("ev_block_reason") != expected_ev_block_reason:
+            failures.append(
+                f"{market_ticker} ev_block={payload.get('ev_block_reason')}"
+            )
+        if expected_ev_status is not None and payload.get("ev_filter_status") != expected_ev_status:
+            failures.append(
+                f"{market_ticker} ev_status={payload.get('ev_filter_status')}"
+            )
         return failures
 
 
