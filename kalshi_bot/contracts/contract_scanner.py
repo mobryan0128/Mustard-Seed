@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Mapping
@@ -95,6 +95,14 @@ class ScannedContract:
     contract_time_remaining_seconds: int | None = None
     end_window_allowed: bool | None = None
     end_window_reason: str | None = None
+    classification_reason: str | None = None
+    chop_threshold_bps: Decimal | None = None
+    recent_window_seconds: int | None = None
+    lookback_window_seconds: int | None = None
+    recent_abs_bps: Decimal | None = None
+    lookback_abs_bps: Decimal | None = None
+    recent_threshold_gap_bps: Decimal | None = None
+    lookback_threshold_gap_bps: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -122,6 +130,25 @@ class SkippedContract:
     contract_time_remaining_seconds: int | None = None
     end_window_allowed: bool | None = None
     end_window_reason: str | None = None
+    direction: str | None = None
+    structure: str | None = None
+    confidence: int | None = None
+    latest_price: Decimal | None = None
+    observation_count: int | None = None
+    recent_return_bps: Decimal | None = None
+    lookback_return_bps: Decimal | None = None
+    impulse_direction: str | None = None
+    impulse_return_bps: Decimal | None = None
+    impulse_detected: bool | None = None
+    risk_flags: tuple[tuple[str, bool], ...] = ()
+    classification_reason: str | None = None
+    chop_threshold_bps: Decimal | None = None
+    recent_window_seconds: int | None = None
+    lookback_window_seconds: int | None = None
+    recent_abs_bps: Decimal | None = None
+    lookback_abs_bps: Decimal | None = None
+    recent_threshold_gap_bps: Decimal | None = None
+    lookback_threshold_gap_bps: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -140,6 +167,8 @@ class ContractScanner:
         *,
         product_markets: Mapping[str, tuple[str, ...]],
         market_metadata_by_ticker: Mapping[str, Mapping[str, object]] | None = None,
+        quiet_continuation_enabled: bool = False,
+        quiet_continuation_max_required_bps_per_minute: Decimal = Decimal("0.25"),
     ) -> None:
         normalized = {
             product_id.strip(): tuple(
@@ -157,12 +186,22 @@ class ContractScanner:
             market_ticker: dict(metadata)
             for market_ticker, metadata in (market_metadata_by_ticker or {}).items()
         }
+        self._quiet_continuation_enabled = quiet_continuation_enabled
+        self._quiet_continuation_max_required_bps_per_minute = Decimal(
+            str(quiet_continuation_max_required_bps_per_minute)
+        )
 
     @classmethod
     def from_settings(cls, settings: KalshiSettings) -> "ContractScanner":
         if not settings.contract_scanner_product_markets:
             raise ContractScannerError("CONTRACT_SCANNER_PRODUCT_MARKETS_JSON is required.")
-        return cls(product_markets=settings.contract_scanner_product_markets)
+        return cls(
+            product_markets=settings.contract_scanner_product_markets,
+            quiet_continuation_enabled=settings.live_quiet_continuation_enabled,
+            quiet_continuation_max_required_bps_per_minute=(
+                settings.live_max_required_bps_per_minute
+            ),
+        )
 
     def scan(
         self,
@@ -198,43 +237,106 @@ class ContractScanner:
                         )
                     )
                     continue
+                effective_bias_state = bias_state
                 skip_reason = _skip_reason(bias_state, ticker_state)
                 if skip_reason is not None:
+                    quiet_bias_state = _quiet_continuation_bias_state(
+                        bias_state,
+                        enabled=self._quiet_continuation_enabled,
+                    )
+                    if (
+                        skip_reason == "neutral_bias"
+                        and quiet_bias_state is not None
+                        and ticker_state.yes_bid_dollars is not None
+                        and ticker_state.yes_ask_dollars is not None
+                    ):
+                        quiet_feasibility = _target_feasibility(
+                            direction=quiet_bias_state.direction,
+                            current_spot_price=quiet_bias_state.latest_price,
+                            target_price=_optional_decimal_metadata(metadata, "target_price"),
+                            target_price_source=_optional_str_metadata(metadata, "target_price_source"),
+                            close_time=_optional_str_metadata(metadata, "close_time"),
+                        )
+                        quiet_skip_reason = _quiet_continuation_skip_reason(
+                            quiet_feasibility,
+                            max_required_bps_per_minute=(
+                                self._quiet_continuation_max_required_bps_per_minute
+                            ),
+                        )
+                        if quiet_skip_reason is None:
+                            effective_bias_state = quiet_bias_state
+                            skip_reason = None
+                        else:
+                            skipped_contracts.append(
+                                SkippedContract(
+                                    product_id=product_id,
+                                    market_ticker=market_ticker,
+                                    reason=quiet_skip_reason,
+                                    contract_open_time=_optional_str_metadata(metadata, "open_time"),
+                                    contract_close_time=_optional_str_metadata(metadata, "close_time"),
+                                    target_price=quiet_feasibility.target_price,
+                                    target_price_source=quiet_feasibility.target_price_source,
+                                    distance_to_target_bps=quiet_feasibility.distance_to_target_bps,
+                                    time_remaining_seconds=quiet_feasibility.time_remaining_seconds,
+                                    required_bps_per_minute=quiet_feasibility.required_bps_per_minute,
+                                    side_currently_itm=quiet_feasibility.side_currently_itm,
+                                    side_needs_cross=quiet_feasibility.side_needs_cross,
+                                    feasibility_status=quiet_feasibility.feasibility_status,
+                                    **_bias_diagnostic_fields(quiet_bias_state),
+                                )
+                            )
+                            continue
+                    if skip_reason is None:
+                        pass
+                    else:
+                        skipped_contracts.append(
+                            SkippedContract(
+                                product_id=product_id,
+                                market_ticker=market_ticker,
+                                reason=skip_reason,
+                                contract_open_time=_optional_str_metadata(metadata, "open_time"),
+                                contract_close_time=_optional_str_metadata(metadata, "close_time"),
+                                **_bias_diagnostic_fields(bias_state),
+                            )
+                        )
+                        continue
+
+                if effective_bias_state is None:
                     skipped_contracts.append(
                         SkippedContract(
                             product_id=product_id,
                             market_ticker=market_ticker,
-                            reason=skip_reason,
+                            reason="missing_bias_state",
                             contract_open_time=_optional_str_metadata(metadata, "open_time"),
                             contract_close_time=_optional_str_metadata(metadata, "close_time"),
                         )
                     )
                     continue
 
-                assert bias_state is not None
+                assert effective_bias_state is not None
                 assert ticker_state.yes_bid_dollars is not None
                 assert ticker_state.yes_ask_dollars is not None
                 feasibility = _target_feasibility(
-                    direction=bias_state.direction,
-                    current_spot_price=bias_state.latest_price,
+                    direction=effective_bias_state.direction,
+                    current_spot_price=effective_bias_state.latest_price,
                     target_price=_optional_decimal_metadata(metadata, "target_price"),
                     target_price_source=_optional_str_metadata(metadata, "target_price_source"),
                     close_time=_optional_str_metadata(metadata, "close_time"),
                 )
                 signal_conflict_flags = _signal_conflict_flags(
-                    direction=bias_state.direction,
-                    impulse_return_bps=getattr(bias_state, "impulse_return_bps", None),
+                    direction=effective_bias_state.direction,
+                    impulse_return_bps=getattr(effective_bias_state, "impulse_return_bps", None),
                 )
                 reversal_confirmation_status = _reversal_confirmation_status(
-                    bias_state=bias_state,
+                    bias_state=effective_bias_state,
                     signal_conflict_flags=signal_conflict_flags,
                 )
                 trend_confirmation_status = _trend_confirmation_status(
-                    bias_state=bias_state,
+                    bias_state=effective_bias_state,
                     feasibility=feasibility,
                 )
                 feasibility_skip_reason = _feasibility_skip_reason(
-                    bias_state=bias_state,
+                    bias_state=effective_bias_state,
                     feasibility=feasibility,
                     signal_conflict_flags=signal_conflict_flags,
                 )
@@ -258,6 +360,7 @@ class ContractScanner:
                             trend_confirmation_status=trend_confirmation_status,
                             signal_conflict_flags=signal_conflict_flags,
                             scanner_score_downgrade_reasons=(),
+                            **_bias_diagnostic_fields(effective_bias_state),
                         )
                     )
                     continue
@@ -270,7 +373,7 @@ class ContractScanner:
                     score_bonus_reasons,
                 ) = _scanner_score_confidence(
                     product_id=product_id,
-                    bias_state=bias_state,
+                    bias_state=effective_bias_state,
                     feasibility=feasibility,
                     reversal_confirmation_status=reversal_confirmation_status,
                     trend_confirmation_status=trend_confirmation_status,
@@ -288,23 +391,23 @@ class ContractScanner:
                     ScannedContract(
                         product_id=product_id,
                         market_ticker=market_ticker,
-                        direction=bias_state.direction,
-                        structure=bias_state.structure,
-                        confidence=bias_state.confidence,
+                        direction=effective_bias_state.direction,
+                        structure=effective_bias_state.structure,
+                        confidence=effective_bias_state.confidence,
                         best_bid=ticker_state.yes_bid_dollars,
                         best_ask=ticker_state.yes_ask_dollars,
                         midpoint=midpoint,
-                        bias_as_of=bias_state.as_of,
+                        bias_as_of=effective_bias_state.as_of,
                         market_as_of=_market_as_of(ticker_state),
                         score=score,
-                        latest_price=bias_state.latest_price,
-                        observation_count=bias_state.observation_count,
-                        recent_return_bps=bias_state.recent_return_bps,
-                        lookback_return_bps=bias_state.lookback_return_bps,
-                        impulse_direction=bias_state.impulse_direction,
-                        impulse_return_bps=bias_state.impulse_return_bps,
-                        impulse_detected=bias_state.impulse_detected,
-                        risk_flags=_risk_flags(bias_state.risk_flags),
+                        latest_price=effective_bias_state.latest_price,
+                        observation_count=effective_bias_state.observation_count,
+                        recent_return_bps=effective_bias_state.recent_return_bps,
+                        lookback_return_bps=effective_bias_state.lookback_return_bps,
+                        impulse_direction=effective_bias_state.impulse_direction,
+                        impulse_return_bps=effective_bias_state.impulse_return_bps,
+                        impulse_detected=effective_bias_state.impulse_detected,
+                        risk_flags=_risk_flags(effective_bias_state.risk_flags),
                         target_price=feasibility.target_price,
                         target_price_source=feasibility.target_price_source,
                         distance_to_target=feasibility.distance_to_target,
@@ -322,6 +425,7 @@ class ContractScanner:
                         contract_open_time=_optional_str_metadata(metadata, "open_time"),
                         contract_close_time=_optional_str_metadata(metadata, "close_time"),
                         contract_time_remaining_seconds=feasibility.time_remaining_seconds,
+                        **_bias_threshold_diagnostic_fields(effective_bias_state),
                     )
                 )
 
@@ -347,6 +451,122 @@ def _skip_reason(bias_state, ticker_state: TickerState) -> str | None:
     if ticker_state.yes_bid_dollars is None or ticker_state.yes_ask_dollars is None:
         return "missing_best_quote"
     return None
+
+
+def _quiet_continuation_bias_state(bias_state, *, enabled: bool):  # noqa: ANN001
+    if not enabled or bias_state is None:
+        return None
+    if bias_state.direction != "neutral" or bias_state.structure not in {"chop", "exhaustion"}:
+        return None
+    if bias_state.structure == "reversal":
+        return None
+    if bias_state.confidence <= 0:
+        return None
+    risk_flags = getattr(bias_state, "risk_flags", None)
+    if risk_flags is None or any(
+        (
+            bool(risk_flags.insufficient_history),
+            bool(risk_flags.stale_data),
+            bool(risk_flags.time_sync_failed),
+        )
+    ):
+        return None
+    lookback_return_bps = getattr(bias_state, "lookback_return_bps", None)
+    recent_return_bps = getattr(bias_state, "recent_return_bps", None)
+    threshold_bps = getattr(bias_state, "chop_threshold_bps", None)
+    if lookback_return_bps is None or recent_return_bps is None or threshold_bps is None:
+        return None
+    lookback_return = Decimal(str(lookback_return_bps))
+    recent_return = Decimal(str(recent_return_bps))
+    threshold = Decimal(str(threshold_bps))
+    lookback_sign = _sign(lookback_return)
+    if lookback_sign == 0 or abs(lookback_return) <= threshold:
+        return None
+    if abs(recent_return) > threshold:
+        return None
+    direction = "up" if lookback_sign > 0 else "down"
+    return replace(
+        bias_state,
+        direction=direction,
+        structure="trend",
+        confidence=max(int(bias_state.confidence), SCORE_DOWNGRADE_CONFLICT_CONFIDENCE),
+        classification_reason=f"quiet_continuation_from_{bias_state.structure}",
+    )
+
+
+def _quiet_continuation_skip_reason(
+    feasibility: TargetFeasibility,
+    *,
+    max_required_bps_per_minute: Decimal,
+) -> str | None:
+    if feasibility.target_price is None:
+        return "quiet_continuation_target_missing"
+    if feasibility.current_spot_price is None:
+        return "quiet_continuation_current_spot_missing"
+    if feasibility.side_needs_cross or not feasibility.side_currently_itm:
+        return "quiet_continuation_needs_cross_blocked"
+    if feasibility.required_bps_per_minute is None:
+        return "quiet_continuation_required_bps_missing"
+    if feasibility.required_bps_per_minute > max_required_bps_per_minute:
+        return "quiet_continuation_required_bps_too_high"
+    return None
+
+
+def _bias_diagnostic_fields(bias_state) -> dict[str, object]:  # noqa: ANN001
+    if bias_state is None:
+        return {}
+    return {
+        "direction": getattr(bias_state, "direction", None),
+        "structure": getattr(bias_state, "structure", None),
+        "confidence": getattr(bias_state, "confidence", None),
+        "latest_price": getattr(bias_state, "latest_price", None),
+        "observation_count": getattr(bias_state, "observation_count", None),
+        "recent_return_bps": getattr(bias_state, "recent_return_bps", None),
+        "lookback_return_bps": getattr(bias_state, "lookback_return_bps", None),
+        "impulse_direction": getattr(bias_state, "impulse_direction", None),
+        "impulse_return_bps": getattr(bias_state, "impulse_return_bps", None),
+        "impulse_detected": getattr(bias_state, "impulse_detected", None),
+        "risk_flags": _risk_flags(getattr(bias_state, "risk_flags", None)),
+        "classification_reason": getattr(bias_state, "classification_reason", None),
+        "chop_threshold_bps": getattr(bias_state, "chop_threshold_bps", None),
+        "recent_window_seconds": getattr(bias_state, "recent_window_seconds", None),
+        "lookback_window_seconds": getattr(bias_state, "lookback_window_seconds", None),
+        "recent_abs_bps": getattr(bias_state, "recent_abs_bps", None),
+        "lookback_abs_bps": getattr(bias_state, "lookback_abs_bps", None),
+        "recent_threshold_gap_bps": getattr(
+            bias_state,
+            "recent_threshold_gap_bps",
+            None,
+        ),
+        "lookback_threshold_gap_bps": getattr(
+            bias_state,
+            "lookback_threshold_gap_bps",
+            None,
+        ),
+    }
+
+
+def _bias_threshold_diagnostic_fields(bias_state) -> dict[str, object]:  # noqa: ANN001
+    if bias_state is None:
+        return {}
+    return {
+        "classification_reason": getattr(bias_state, "classification_reason", None),
+        "chop_threshold_bps": getattr(bias_state, "chop_threshold_bps", None),
+        "recent_window_seconds": getattr(bias_state, "recent_window_seconds", None),
+        "lookback_window_seconds": getattr(bias_state, "lookback_window_seconds", None),
+        "recent_abs_bps": getattr(bias_state, "recent_abs_bps", None),
+        "lookback_abs_bps": getattr(bias_state, "lookback_abs_bps", None),
+        "recent_threshold_gap_bps": getattr(
+            bias_state,
+            "recent_threshold_gap_bps",
+            None,
+        ),
+        "lookback_threshold_gap_bps": getattr(
+            bias_state,
+            "lookback_threshold_gap_bps",
+            None,
+        ),
+    }
 
 
 def _stale_ticker_skip_reason(metadata: Mapping[str, object]) -> str | None:
@@ -439,6 +659,8 @@ def _market_as_of(ticker_state: TickerState) -> str | None:
 
 
 def _risk_flags(risk_flags) -> tuple[tuple[str, bool], ...]:  # noqa: ANN001
+    if risk_flags is None:
+        return ()
     return (
         ("insufficient_history", bool(risk_flags.insufficient_history)),
         ("stale_data", bool(risk_flags.stale_data)),

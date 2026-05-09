@@ -240,6 +240,28 @@ def _run_case(
         failures.append(f"{case_name}: time_sync_failed flag was not set")
     if state.confidence == 0 and state.direction != "neutral":
         failures.append(f"{case_name}: zero confidence must force neutral direction")
+    if state.classification_reason is None:
+        failures.append(f"{case_name}: classification_reason missing")
+    if state.chop_threshold_bps != Decimal(str(settings.bias_chop_threshold_bps)):
+        failures.append(
+            f"{case_name}: chop_threshold_bps={state.chop_threshold_bps}"
+        )
+    if state.recent_window_seconds != settings.bias_recent_window_seconds:
+        failures.append(
+            f"{case_name}: recent_window_seconds={state.recent_window_seconds}"
+        )
+    if state.lookback_window_seconds != settings.bias_lookback_seconds:
+        failures.append(
+            f"{case_name}: lookback_window_seconds={state.lookback_window_seconds}"
+        )
+    if state.recent_return_bps is not None and state.recent_abs_bps != abs(
+        state.recent_return_bps
+    ):
+        failures.append(f"{case_name}: recent_abs_bps={state.recent_abs_bps}")
+    if state.lookback_return_bps is not None and state.lookback_abs_bps != abs(
+        state.lookback_return_bps
+    ):
+        failures.append(f"{case_name}: lookback_abs_bps={state.lookback_abs_bps}")
     return failures
 
 

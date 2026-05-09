@@ -17,6 +17,7 @@ class BiasClassification:
     direction: str
     structure: str
     confidence: int
+    classification_reason: str
 
 
 def classify_bias_state(
@@ -32,22 +33,42 @@ def classify_bias_state(
 
     hard_risk = insufficient_history or stale_data or time_sync_failed
     if hard_risk or lookback_return_bps is None or recent_return_bps is None:
-        return BiasClassification(direction="neutral", structure="chop", confidence=0)
+        return BiasClassification(
+            direction="neutral",
+            structure="chop",
+            confidence=0,
+            classification_reason="hard_risk_or_missing_returns",
+        )
 
     abs_lookback = abs(lookback_return_bps)
     abs_recent = abs(recent_return_bps)
     signs_match = _sign(lookback_return_bps) == _sign(recent_return_bps)
 
     if abs_lookback <= chop_threshold_bps and abs_recent <= chop_threshold_bps:
-        return BiasClassification(direction="neutral", structure="chop", confidence=10)
+        return BiasClassification(
+            direction="neutral",
+            structure="chop",
+            confidence=10,
+            classification_reason="below_chop_threshold",
+        )
 
     if abs_lookback > chop_threshold_bps and abs_recent <= chop_threshold_bps:
-        return BiasClassification(direction="neutral", structure="exhaustion", confidence=30)
+        return BiasClassification(
+            direction="neutral",
+            structure="exhaustion",
+            confidence=30,
+            classification_reason="recent_below_chop_exhaustion",
+        )
 
     if signs_match and _sign(recent_return_bps) != 0:
         confidence = _trend_confidence(abs_lookback, abs_recent, chop_threshold_bps)
         direction = "up" if recent_return_bps > 0 else "down"
-        return BiasClassification(direction=direction, structure="trend", confidence=confidence)
+        return BiasClassification(
+            direction=direction,
+            structure="trend",
+            confidence=confidence,
+            classification_reason="aligned_trend",
+        )
 
     if _sign(lookback_return_bps) != 0 and _sign(recent_return_bps) != 0:
         confidence = _trend_confidence(abs_lookback, abs_recent, chop_threshold_bps)
@@ -56,9 +77,15 @@ def classify_bias_state(
             direction=direction,
             structure="reversal",
             confidence=confidence,
+            classification_reason="countertrend_reversal",
         )
 
-    return BiasClassification(direction="neutral", structure="chop", confidence=10)
+    return BiasClassification(
+        direction="neutral",
+        structure="chop",
+        confidence=10,
+        classification_reason="neutral_chop_fallback",
+    )
 
 
 def _trend_confidence(

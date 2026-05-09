@@ -101,6 +101,11 @@ def _run_fixtures(scanner: ContractScanner) -> list[str]:
     failures.extend(_validate_reversal_near_target_downgrades(scanner))
     failures.extend(_validate_impulse_direction_conflict_downgrade(scanner))
     failures.extend(_validate_stale_ticker_blocked())
+    failures.extend(_validate_neutral_exhaustion_skip_diagnostics())
+    failures.extend(_validate_quiet_continuation_disabled_by_default())
+    failures.extend(_validate_quiet_continuation_itm_no_cross_ranks())
+    failures.extend(_validate_quiet_continuation_needs_cross_blocks())
+    failures.extend(_validate_quiet_continuation_ignores_reversal())
     return failures
 
 
@@ -977,6 +982,149 @@ def _validate_stale_ticker_blocked() -> list[str]:
     return []
 
 
+def _validate_neutral_exhaustion_skip_diagnostics() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=5),
+                "target_price": Decimal("99"),
+                "target_price_source": "target_price",
+            }
+        },
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=_quiet_continuation_bias_snapshot(structure="exhaustion"),
+        market_snapshot=_base_market_snapshot(),
+    )
+    if snapshot.ranked_contracts:
+        return [f"neutral exhaustion ranked={snapshot.ranked_contracts}"]
+    skipped = snapshot.skipped_contracts[0]
+    failures: list[str] = []
+    if skipped.reason != "neutral_bias":
+        failures.append(f"neutral exhaustion reason={skipped.reason}")
+    if skipped.classification_reason != "recent_below_chop_exhaustion":
+        failures.append(
+            f"neutral exhaustion classification={skipped.classification_reason}"
+        )
+    if skipped.recent_return_bps != Decimal("5.000"):
+        failures.append(f"neutral exhaustion recent={skipped.recent_return_bps}")
+    if skipped.lookback_return_bps != Decimal("30.000"):
+        failures.append(f"neutral exhaustion lookback={skipped.lookback_return_bps}")
+    if skipped.chop_threshold_bps != Decimal("10"):
+        failures.append(f"neutral exhaustion threshold={skipped.chop_threshold_bps}")
+    return failures
+
+
+def _validate_quiet_continuation_disabled_by_default() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=5),
+                "target_price": Decimal("99"),
+                "target_price_source": "target_price",
+            }
+        },
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=_quiet_continuation_bias_snapshot(),
+        market_snapshot=_base_market_snapshot(),
+    )
+    if snapshot.ranked_contracts:
+        return [f"quiet disabled ranked={snapshot.ranked_contracts}"]
+    reasons = {(item.market_ticker, item.reason) for item in snapshot.skipped_contracts}
+    if ("KXBTC-1", "neutral_bias") not in reasons:
+        return [f"quiet disabled reasons={reasons}"]
+    return []
+
+
+def _validate_quiet_continuation_itm_no_cross_ranks() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=5),
+                "target_price": Decimal("99"),
+                "target_price_source": "target_price",
+            }
+        },
+        quiet_continuation_enabled=True,
+        quiet_continuation_max_required_bps_per_minute=Decimal("0.25"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=_quiet_continuation_bias_snapshot(),
+        market_snapshot=_base_market_snapshot(),
+    )
+    failures: list[str] = []
+    if len(snapshot.ranked_contracts) != 1:
+        return [f"quiet continuation ranked={snapshot.ranked_contracts}"]
+    contract = snapshot.ranked_contracts[0]
+    if contract.direction != "up" or contract.structure != "trend":
+        failures.append(f"quiet continuation signal={contract.direction}/{contract.structure}")
+    if contract.classification_reason != "quiet_continuation_from_exhaustion":
+        failures.append(f"quiet continuation reason={contract.classification_reason}")
+    if contract.side_currently_itm is not True or contract.side_needs_cross is not False:
+        failures.append(
+            "quiet continuation feasibility="
+            f"{contract.side_currently_itm}/{contract.side_needs_cross}"
+        )
+    if contract.trend_confirmation_status != "weak_recent_return":
+        failures.append(f"quiet continuation trend status={contract.trend_confirmation_status}")
+    return failures
+
+
+def _validate_quiet_continuation_needs_cross_blocks() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=5),
+                "target_price": Decimal("101"),
+                "target_price_source": "target_price",
+            }
+        },
+        quiet_continuation_enabled=True,
+        quiet_continuation_max_required_bps_per_minute=Decimal("0.25"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=_quiet_continuation_bias_snapshot(),
+        market_snapshot=_base_market_snapshot(),
+    )
+    if snapshot.ranked_contracts:
+        return [f"quiet needs-cross ranked={snapshot.ranked_contracts}"]
+    skipped = snapshot.skipped_contracts[0]
+    if skipped.reason != "quiet_continuation_needs_cross_blocked":
+        return [f"quiet needs-cross reason={skipped.reason}"]
+    if skipped.side_needs_cross is not True:
+        return [f"quiet needs-cross flag={skipped.side_needs_cross}"]
+    return []
+
+
+def _validate_quiet_continuation_ignores_reversal() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=5),
+                "target_price": Decimal("99"),
+                "target_price_source": "target_price",
+            }
+        },
+        quiet_continuation_enabled=True,
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=_quiet_continuation_bias_snapshot(structure="reversal"),
+        market_snapshot=_base_market_snapshot(),
+    )
+    if snapshot.ranked_contracts:
+        return [f"quiet reversal ranked={snapshot.ranked_contracts}"]
+    skipped = snapshot.skipped_contracts[0]
+    if skipped.reason != "neutral_bias":
+        return [f"quiet reversal reason={skipped.reason}"]
+    return []
+
+
 def _base_bias_snapshot() -> BiasSnapshot:
     return BiasSnapshot(
         products={
@@ -1012,6 +1160,37 @@ def _base_bias_snapshot() -> BiasSnapshot:
                 observation_count=45,
                 as_of="2026-04-23T12:00:05+00:00",
             ),
+        }
+    )
+
+
+def _quiet_continuation_bias_snapshot(*, structure: str = "exhaustion") -> BiasSnapshot:
+    return BiasSnapshot(
+        products={
+            "BTC-USD": BiasState(
+                product_id="BTC-USD",
+                direction="neutral",
+                confidence=30,
+                structure=structure,
+                risk_flags=BiasRiskFlags(
+                    insufficient_history=False,
+                    stale_data=False,
+                    time_sync_failed=False,
+                ),
+                latest_price=Decimal("100"),
+                lookback_return_bps=Decimal("30.000"),
+                recent_return_bps=Decimal("5.000"),
+                observation_count=50,
+                as_of="2026-04-23T12:00:00+00:00",
+                classification_reason="recent_below_chop_exhaustion",
+                chop_threshold_bps=Decimal("10"),
+                recent_window_seconds=60,
+                lookback_window_seconds=1800,
+                recent_abs_bps=Decimal("5.000"),
+                lookback_abs_bps=Decimal("30.000"),
+                recent_threshold_gap_bps=Decimal("-5.000"),
+                lookback_threshold_gap_bps=Decimal("20.000"),
+            )
         }
     )
 

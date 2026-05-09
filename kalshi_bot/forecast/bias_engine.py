@@ -62,6 +62,14 @@ class BiasState:
     impulse_direction: str | None = None
     impulse_return_bps: Decimal | None = None
     impulse_detected: bool = False
+    classification_reason: str | None = None
+    chop_threshold_bps: Decimal | None = None
+    recent_window_seconds: int | None = None
+    lookback_window_seconds: int | None = None
+    recent_abs_bps: Decimal | None = None
+    lookback_abs_bps: Decimal | None = None
+    recent_threshold_gap_bps: Decimal | None = None
+    lookback_threshold_gap_bps: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -203,6 +211,20 @@ class BiasEngine:
                 impulse_direction=impulse_diagnostics.direction,
                 impulse_return_bps=impulse_diagnostics.return_bps,
                 impulse_detected=impulse_diagnostics.detected,
+                classification_reason=classification.classification_reason,
+                chop_threshold_bps=self._chop_threshold_bps,
+                recent_window_seconds=int(self._recent_window.total_seconds()),
+                lookback_window_seconds=int(self._lookback.total_seconds()),
+                recent_abs_bps=_absolute_return_bps(recent_return_bps),
+                lookback_abs_bps=_absolute_return_bps(lookback_return_bps),
+                recent_threshold_gap_bps=_threshold_gap_bps(
+                    recent_return_bps,
+                    threshold_bps=self._chop_threshold_bps,
+                ),
+                lookback_threshold_gap_bps=_threshold_gap_bps(
+                    lookback_return_bps,
+                    threshold_bps=self._chop_threshold_bps,
+                ),
             )
 
         self._latest_snapshot = BiasSnapshot(products=products)
@@ -266,6 +288,7 @@ def _apply_impulse_bias_override(
                 impulse_diagnostics.return_bps,
                 impulse_min_abs_bps=impulse_min_abs_bps,
             ),
+            classification_reason="impulse_override_from_chop",
         )
     return classification
 
@@ -421,3 +444,19 @@ def _compute_return_bps(
     return ((latest.price - anchor.price) / anchor.price * BASIS_POINTS_MULTIPLIER).quantize(
         Decimal("0.001")
     )
+
+
+def _absolute_return_bps(value: Decimal | None) -> Decimal | None:
+    if value is None:
+        return None
+    return abs(value).quantize(Decimal("0.001"))
+
+
+def _threshold_gap_bps(
+    value: Decimal | None,
+    *,
+    threshold_bps: Decimal,
+) -> Decimal | None:
+    if value is None:
+        return None
+    return (abs(value) - threshold_bps).quantize(Decimal("0.001"))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_FLOOR
@@ -374,7 +375,11 @@ class LiveExecutionCoordinator:
                 product_id="",
                 market_ticker=None,
                 simulation_position_id=None,
-                details={"cycle_number": cycle_number, "scan_source": scan_source},
+                details={
+                    "cycle_number": cycle_number,
+                    "scan_source": scan_source,
+                    **_contract_scan_skip_diagnostics_payload(contract_scan_snapshot),
+                },
             )
             return ()
 
@@ -3691,6 +3696,110 @@ def _signal_diagnostic_payload(contract: ScannedContract) -> dict[str, object]:
             "confirmed_trend"
             in (getattr(contract, "scanner_score_bonus_reasons", ()) or ())
         ),
+        "classification_reason": getattr(contract, "classification_reason", None),
+        "chop_threshold_bps": getattr(contract, "chop_threshold_bps", None),
+        "recent_window_seconds": getattr(contract, "recent_window_seconds", None),
+        "lookback_window_seconds": getattr(contract, "lookback_window_seconds", None),
+        "recent_abs_bps": getattr(contract, "recent_abs_bps", None),
+        "lookback_abs_bps": getattr(contract, "lookback_abs_bps", None),
+        "recent_threshold_gap_bps": getattr(
+            contract,
+            "recent_threshold_gap_bps",
+            None,
+        ),
+        "lookback_threshold_gap_bps": getattr(
+            contract,
+            "lookback_threshold_gap_bps",
+            None,
+        ),
+    }
+
+
+def _contract_scan_skip_diagnostics_payload(
+    snapshot: ContractScanSnapshot,
+) -> dict[str, object]:
+    skip_counts = Counter(contract.reason for contract in snapshot.skipped_contracts)
+    return {
+        "ranked_contract_count": len(snapshot.ranked_contracts),
+        "skipped_contract_count": len(snapshot.skipped_contracts),
+        "top_skip_reasons": [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(
+                skip_counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            )[:5]
+        ],
+        "skipped_contract_diagnostics": [
+            {
+                "product_id": contract.product_id,
+                "market_ticker": contract.market_ticker,
+                "reason": contract.reason,
+                "direction": getattr(contract, "direction", None),
+                "structure": getattr(contract, "structure", None),
+                "confidence": getattr(contract, "confidence", None),
+                "latest_price": getattr(contract, "latest_price", None),
+                "observation_count": getattr(contract, "observation_count", None),
+                "recent_return_bps": getattr(contract, "recent_return_bps", None),
+                "lookback_return_bps": getattr(contract, "lookback_return_bps", None),
+                "impulse_direction": getattr(contract, "impulse_direction", None),
+                "impulse_return_bps": getattr(contract, "impulse_return_bps", None),
+                "impulse_detected": getattr(contract, "impulse_detected", None),
+                "risk_flags": dict(getattr(contract, "risk_flags", ()) or ()),
+                "classification_reason": getattr(
+                    contract,
+                    "classification_reason",
+                    None,
+                ),
+                "chop_threshold_bps": getattr(contract, "chop_threshold_bps", None),
+                "recent_window_seconds": getattr(
+                    contract,
+                    "recent_window_seconds",
+                    None,
+                ),
+                "lookback_window_seconds": getattr(
+                    contract,
+                    "lookback_window_seconds",
+                    None,
+                ),
+                "recent_abs_bps": getattr(contract, "recent_abs_bps", None),
+                "lookback_abs_bps": getattr(contract, "lookback_abs_bps", None),
+                "recent_threshold_gap_bps": getattr(
+                    contract,
+                    "recent_threshold_gap_bps",
+                    None,
+                ),
+                "lookback_threshold_gap_bps": getattr(
+                    contract,
+                    "lookback_threshold_gap_bps",
+                    None,
+                ),
+                "target_price": getattr(contract, "target_price", None),
+                "distance_to_target_bps": getattr(
+                    contract,
+                    "distance_to_target_bps",
+                    None,
+                ),
+                "required_bps_per_minute": getattr(
+                    contract,
+                    "required_bps_per_minute",
+                    None,
+                ),
+                "side_currently_itm": getattr(contract, "side_currently_itm", None),
+                "side_needs_cross": getattr(contract, "side_needs_cross", None),
+                "feasibility_status": getattr(contract, "feasibility_status", None),
+                "trend_confirmation_status": getattr(
+                    contract,
+                    "trend_confirmation_status",
+                    None,
+                ),
+                "reversal_confirmation_status": getattr(
+                    contract,
+                    "reversal_confirmation_status",
+                    None,
+                ),
+            }
+            for contract in snapshot.skipped_contracts[:10]
+        ],
     }
 
 

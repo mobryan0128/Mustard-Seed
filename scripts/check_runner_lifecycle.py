@@ -1112,6 +1112,7 @@ def _settings(
         live_ev_timing_bypass_enabled=True,
         live_ev_extra_entries_per_product_per_session=0,
         live_ev_extra_open_positions_per_product=0,
+        live_quiet_continuation_enabled=False,
         runner_enabled=True,
         runner_loop_interval_seconds=5.0 if live_fast_scan_enabled else 0.001,
         runner_status_log_every_n_cycles=1,

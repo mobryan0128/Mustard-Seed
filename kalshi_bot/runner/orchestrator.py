@@ -75,6 +75,25 @@ class SkippedContractDiagnostic:
     reversal_confirmation_status: str | None
     scanner_score_downgrade_reasons: tuple[str, ...]
     scanner_score_bonus_reasons: tuple[str, ...]
+    direction: str | None
+    structure: str | None
+    confidence: int | None
+    latest_price: Decimal | None
+    observation_count: int | None
+    recent_return_bps: Decimal | None
+    lookback_return_bps: Decimal | None
+    impulse_direction: str | None
+    impulse_return_bps: Decimal | None
+    impulse_detected: bool | None
+    risk_flags: tuple[tuple[str, bool], ...]
+    classification_reason: str | None
+    chop_threshold_bps: Decimal | None
+    recent_window_seconds: int | None
+    lookback_window_seconds: int | None
+    recent_abs_bps: Decimal | None
+    lookback_abs_bps: Decimal | None
+    recent_threshold_gap_bps: Decimal | None
+    lookback_threshold_gap_bps: Decimal | None
 
 
 @dataclass(frozen=True)
@@ -96,6 +115,14 @@ class BiasDiagnostic:
     impulse_direction: str | None
     impulse_return_bps: Decimal | None
     impulse_detected: bool
+    classification_reason: str | None
+    chop_threshold_bps: Decimal | None
+    recent_window_seconds: int | None
+    lookback_window_seconds: int | None
+    recent_abs_bps: Decimal | None
+    lookback_abs_bps: Decimal | None
+    recent_threshold_gap_bps: Decimal | None
+    lookback_threshold_gap_bps: Decimal | None
 
 
 @dataclass(frozen=True)
@@ -1322,6 +1349,25 @@ def _skipped_contract_diagnostics(
             reversal_confirmation_status=contract.reversal_confirmation_status,
             scanner_score_downgrade_reasons=contract.scanner_score_downgrade_reasons,
             scanner_score_bonus_reasons=contract.scanner_score_bonus_reasons,
+            direction=contract.direction,
+            structure=contract.structure,
+            confidence=contract.confidence,
+            latest_price=contract.latest_price,
+            observation_count=contract.observation_count,
+            recent_return_bps=contract.recent_return_bps,
+            lookback_return_bps=contract.lookback_return_bps,
+            impulse_direction=contract.impulse_direction,
+            impulse_return_bps=contract.impulse_return_bps,
+            impulse_detected=contract.impulse_detected,
+            risk_flags=contract.risk_flags,
+            classification_reason=contract.classification_reason,
+            chop_threshold_bps=contract.chop_threshold_bps,
+            recent_window_seconds=contract.recent_window_seconds,
+            lookback_window_seconds=contract.lookback_window_seconds,
+            recent_abs_bps=contract.recent_abs_bps,
+            lookback_abs_bps=contract.lookback_abs_bps,
+            recent_threshold_gap_bps=contract.recent_threshold_gap_bps,
+            lookback_threshold_gap_bps=contract.lookback_threshold_gap_bps,
         )
         for contract in contract_scan_snapshot.skipped_contracts[:10]
     )
@@ -1368,6 +1414,28 @@ def _bias_diagnostics(
                 ),
                 impulse_detected=(
                     state.impulse_detected if state is not None else False
+                ),
+                classification_reason=(
+                    state.classification_reason if state is not None else None
+                ),
+                chop_threshold_bps=(
+                    state.chop_threshold_bps if state is not None else None
+                ),
+                recent_window_seconds=(
+                    state.recent_window_seconds if state is not None else None
+                ),
+                lookback_window_seconds=(
+                    state.lookback_window_seconds if state is not None else None
+                ),
+                recent_abs_bps=state.recent_abs_bps if state is not None else None,
+                lookback_abs_bps=(
+                    state.lookback_abs_bps if state is not None else None
+                ),
+                recent_threshold_gap_bps=(
+                    state.recent_threshold_gap_bps if state is not None else None
+                ),
+                lookback_threshold_gap_bps=(
+                    state.lookback_threshold_gap_bps if state is not None else None
                 ),
             )
         )
@@ -1450,6 +1518,25 @@ def _skipped_contract_diagnostic_payloads(
                 item.scanner_score_downgrade_reasons
             ),
             "scanner_score_bonus_reasons": list(item.scanner_score_bonus_reasons),
+            "direction": item.direction,
+            "structure": item.structure,
+            "confidence": item.confidence,
+            "latest_price": item.latest_price,
+            "observation_count": item.observation_count,
+            "recent_return_bps": item.recent_return_bps,
+            "lookback_return_bps": item.lookback_return_bps,
+            "impulse_direction": item.impulse_direction,
+            "impulse_return_bps": item.impulse_return_bps,
+            "impulse_detected": item.impulse_detected,
+            "risk_flags": dict(item.risk_flags),
+            "classification_reason": item.classification_reason,
+            "chop_threshold_bps": item.chop_threshold_bps,
+            "recent_window_seconds": item.recent_window_seconds,
+            "lookback_window_seconds": item.lookback_window_seconds,
+            "recent_abs_bps": item.recent_abs_bps,
+            "lookback_abs_bps": item.lookback_abs_bps,
+            "recent_threshold_gap_bps": item.recent_threshold_gap_bps,
+            "lookback_threshold_gap_bps": item.lookback_threshold_gap_bps,
         }
         for item in diagnostics
     )
@@ -1475,6 +1562,14 @@ def _bias_diagnostic_payloads(
             "impulse_direction": item.impulse_direction,
             "impulse_return_bps": item.impulse_return_bps,
             "impulse_detected": item.impulse_detected,
+            "classification_reason": item.classification_reason,
+            "chop_threshold_bps": item.chop_threshold_bps,
+            "recent_window_seconds": item.recent_window_seconds,
+            "lookback_window_seconds": item.lookback_window_seconds,
+            "recent_abs_bps": item.recent_abs_bps,
+            "lookback_abs_bps": item.lookback_abs_bps,
+            "recent_threshold_gap_bps": item.recent_threshold_gap_bps,
+            "lookback_threshold_gap_bps": item.lookback_threshold_gap_bps,
         }
         for item in diagnostics
     )
