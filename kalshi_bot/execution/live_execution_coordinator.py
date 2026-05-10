@@ -370,6 +370,22 @@ class LiveExecutionCoordinator:
         """Create live intents directly from ranked contracts after entry risk approval."""
 
         if not contract_scan_snapshot.ranked_contracts:
+            self._log_and_record(
+                event_type="candidate_funnel_summary",
+                identifier=_candidate_funnel_identifier(cycle_number, scan_source),
+                payload=_live_candidate_funnel_summary_payload(
+                    contract_scan_snapshot=contract_scan_snapshot,
+                    cycle_number=cycle_number,
+                    scan_source=scan_source,
+                    live_outcomes=(),
+                    intent_count=0,
+                    include_diagnostics=getattr(
+                        self._settings,
+                        "live_candidate_funnel_diagnostics_enabled",
+                        False,
+                    ),
+                ),
+            )
             self._log_intent_skipped(
                 reason="no_ranked_contracts",
                 product_id="",
@@ -392,8 +408,54 @@ class LiveExecutionCoordinator:
             )
 
         intents: list[LiveOrderIntent] = []
+        live_funnel_outcomes: list[dict[str, object]] = []
+
+        def record_live_outcome(
+            *,
+            stage: str,
+            reason: str,
+            contract: ScannedContract,
+        ) -> None:
+            live_funnel_outcomes.append(
+                {
+                    "stage": stage,
+                    "reason": reason,
+                    "product_id": contract.product_id,
+                    "market_ticker": contract.market_ticker,
+                    "direction": contract.direction,
+                    "structure": contract.structure,
+                    "classification_reason": getattr(
+                        contract,
+                        "classification_reason",
+                        None,
+                    ),
+                    "trend_confirmation_status": getattr(
+                        contract,
+                        "trend_confirmation_status",
+                        None,
+                    ),
+                    "scanner_score_confidence": getattr(
+                        contract,
+                        "scanner_score_confidence",
+                        None,
+                    ),
+                    "side_currently_itm": getattr(contract, "side_currently_itm", None),
+                    "side_needs_cross": getattr(contract, "side_needs_cross", None),
+                    "required_bps_per_minute": getattr(
+                        contract,
+                        "required_bps_per_minute",
+                        None,
+                    ),
+                }
+            )
+
         for contract in contract_scan_snapshot.ranked_contracts:
             if contract.direction not in {"up", "down"}:
+                record_live_outcome(
+                    stage="live_validation",
+                    reason="invalid_direction",
+                    contract=contract,
+                )
                 self._log_contract_intent_skipped(
                     reason="invalid_direction",
                     contract=contract,
@@ -402,6 +464,11 @@ class LiveExecutionCoordinator:
                 )
                 continue
             if contract.midpoint <= Decimal("0"):
+                record_live_outcome(
+                    stage="live_validation",
+                    reason="invalid_entry_price",
+                    contract=contract,
+                )
                 self._log_contract_intent_skipped(
                     reason="invalid_entry_price",
                     contract=contract,
@@ -411,6 +478,11 @@ class LiveExecutionCoordinator:
                 continue
             stale_contract = _stale_contract_status(contract)
             if stale_contract is not None:
+                record_live_outcome(
+                    stage="stale_contract",
+                    reason="stale_ticker_blocked",
+                    contract=contract,
+                )
                 self._log_contract_intent_skipped(
                     reason="stale_ticker_blocked",
                     contract=contract,
@@ -426,6 +498,11 @@ class LiveExecutionCoordinator:
                 settings=self._settings,
             )
             if not reversal_cross_hold.allowed:
+                record_live_outcome(
+                    stage="reversal_cross_hold",
+                    reason="reversal_cross_hold_blocked",
+                    contract=contract,
+                )
                 self._log_contract_intent_skipped(
                     reason="reversal_cross_hold_blocked",
                     contract=contract,
@@ -470,6 +547,11 @@ class LiveExecutionCoordinator:
                 and not end_window.allowed
                 and not defer_end_window_block
             ):
+                record_live_outcome(
+                    stage="entry_window",
+                    reason=end_window.reason,
+                    contract=contract,
+                )
                 self._log_contract_intent_skipped(
                     reason=end_window.reason,
                     contract=contract,
@@ -480,6 +562,11 @@ class LiveExecutionCoordinator:
                 continue
             entry_segment = self._entry_segment_status(contract, end_window=end_window)
             if not entry_segment.allowed:
+                record_live_outcome(
+                    stage="entry_segment",
+                    reason="entry_segment_budget_exhausted",
+                    contract=contract,
+                )
                 self._log_contract_intent_skipped(
                     reason="entry_segment_budget_exhausted",
                     contract=contract,
@@ -493,6 +580,11 @@ class LiveExecutionCoordinator:
                 continue
             flip_persistence = self._flip_persistence_status(contract)
             if not flip_persistence.allowed:
+                record_live_outcome(
+                    stage="flip_persistence",
+                    reason="flip_persistence_blocked",
+                    contract=contract,
+                )
                 self._log_contract_intent_skipped(
                     reason="flip_persistence_blocked",
                     contract=contract,
@@ -510,6 +602,11 @@ class LiveExecutionCoordinator:
                 itm_persistence=itm_persistence,
             )
             if not retry_persistence.allowed:
+                record_live_outcome(
+                    stage="retry_persistence",
+                    reason="retry_persistence_blocked",
+                    contract=contract,
+                )
                 self._log_contract_intent_skipped(
                     reason="retry_persistence_blocked",
                     contract=contract,
@@ -538,6 +635,11 @@ class LiveExecutionCoordinator:
                 ev_filter=ev_filter,
                 settings=self._settings,
             ):
+                record_live_outcome(
+                    stage="entry_timing",
+                    reason=end_window.reason or "entry_timing_blocked",
+                    contract=contract,
+                )
                 self._log_contract_intent_skipped(
                     reason=end_window.reason or "entry_timing_blocked",
                     contract=contract,
@@ -556,6 +658,11 @@ class LiveExecutionCoordinator:
                 ev_filter=ev_filter,
             )
             if not product_session_pacing.allowed:
+                record_live_outcome(
+                    stage="product_session_pacing",
+                    reason="product_session_pacing_blocked",
+                    contract=contract,
+                )
                 self._log_contract_intent_skipped(
                     reason="product_session_pacing_blocked",
                     contract=contract,
@@ -570,12 +677,18 @@ class LiveExecutionCoordinator:
                 )
                 continue
             if not ev_filter.allowed:
+                ev_skip_reason = _ev_filter_skip_reason(
+                    contract=contract,
+                    ev_filter=ev_filter,
+                    settings=self._settings,
+                )
+                record_live_outcome(
+                    stage="ev_filter",
+                    reason=ev_skip_reason,
+                    contract=contract,
+                )
                 self._log_contract_intent_skipped(
-                    reason=_ev_filter_skip_reason(
-                        contract=contract,
-                        ev_filter=ev_filter,
-                        settings=self._settings,
-                    ),
+                    reason=ev_skip_reason,
                     contract=contract,
                     cycle_number=cycle_number,
                     scan_source=scan_source,
@@ -597,6 +710,11 @@ class LiveExecutionCoordinator:
                 realized_daily_pnl_dollars=LIVE_RUNNER_REALIZED_DAILY_PNL_DOLLARS,
             )
             if not risk_decision.allowed:
+                record_live_outcome(
+                    stage="risk",
+                    reason=risk_decision.reason,
+                    contract=contract,
+                )
                 self._log_contract_intent_skipped(
                     reason=risk_decision.reason,
                     contract=contract,
@@ -618,6 +736,11 @@ class LiveExecutionCoordinator:
 
             stake_dollars = risk_decision.stake_dollars
             if stake_dollars is None:
+                record_live_outcome(
+                    stage="risk",
+                    reason="risk_stake_unavailable",
+                    contract=contract,
+                )
                 self._log_contract_intent_skipped(
                     reason="risk_stake_unavailable",
                     contract=contract,
@@ -638,6 +761,11 @@ class LiveExecutionCoordinator:
                 settings=self._settings,
             )
             if not mid_price_confirmation.allowed:
+                record_live_outcome(
+                    stage="mid_price_confirmation",
+                    reason="mid_price_confirmation_required",
+                    contract=contract,
+                )
                 self._log_contract_intent_skipped(
                     reason="mid_price_confirmation_required",
                     contract=contract,
@@ -667,6 +795,11 @@ class LiveExecutionCoordinator:
                 settings=self._settings,
             )
             if not safety.allowed:
+                record_live_outcome(
+                    stage="execution_safety",
+                    reason=safety.reason or "execution_safety_blocked",
+                    contract=contract,
+                )
                 self._log_contract_intent_skipped(
                     reason=safety.reason or "execution_safety_blocked",
                     contract=contract,
@@ -693,6 +826,11 @@ class LiveExecutionCoordinator:
                 and safety.contextual_high_price_status
                 != "allowed_contextual_itm_high_price"
             ):
+                record_live_outcome(
+                    stage="entry_price",
+                    reason="entry_price_too_high",
+                    contract=contract,
+                )
                 self._log_contract_intent_skipped(
                     reason="entry_price_too_high",
                     contract=contract,
@@ -712,6 +850,11 @@ class LiveExecutionCoordinator:
                 )
                 continue
             if safety.candidate_count < 1:
+                record_live_outcome(
+                    stage="count",
+                    reason="count_below_one",
+                    contract=contract,
+                )
                 self._log_contract_intent_skipped(
                     reason="count_below_one",
                     contract=contract,
@@ -740,6 +883,11 @@ class LiveExecutionCoordinator:
                 ev_filter=ev_filter,
             )
             if not composite_quality.allowed:
+                record_live_outcome(
+                    stage="composite_quality",
+                    reason=composite_quality.reason,
+                    contract=contract,
+                )
                 self._log_contract_intent_skipped(
                     reason=composite_quality.reason,
                     contract=contract,
@@ -778,6 +926,11 @@ class LiveExecutionCoordinator:
                 else None,
             )
             if intent is None:
+                record_live_outcome(
+                    stage="intent_build",
+                    reason="intent_unavailable",
+                    contract=contract,
+                )
                 self._log_contract_intent_skipped(
                     reason="intent_unavailable",
                     contract=contract,
@@ -788,6 +941,11 @@ class LiveExecutionCoordinator:
                 continue
 
             intents.append(intent)
+            record_live_outcome(
+                stage="live_intent",
+                reason="live_intent_created",
+                contract=contract,
+            )
             self._log_and_record(
                 event_type="live_intent_created",
                 identifier=intent.client_order_id,
@@ -833,6 +991,22 @@ class LiveExecutionCoordinator:
             )
             self._record_live_entry_memory(contract)
             self._record_entry_pacing(contract, entry_segment=entry_segment)
+        self._log_and_record(
+            event_type="candidate_funnel_summary",
+            identifier=_candidate_funnel_identifier(cycle_number, scan_source),
+            payload=_live_candidate_funnel_summary_payload(
+                contract_scan_snapshot=contract_scan_snapshot,
+                cycle_number=cycle_number,
+                scan_source=scan_source,
+                live_outcomes=tuple(live_funnel_outcomes),
+                intent_count=len(intents),
+                include_diagnostics=getattr(
+                    self._settings,
+                    "live_candidate_funnel_diagnostics_enabled",
+                    False,
+                ),
+            ),
+        )
         return tuple(intents)
 
     def reconcile_live_positions(
@@ -3801,6 +3975,86 @@ def _contract_scan_skip_diagnostics_payload(
             for contract in snapshot.skipped_contracts[:10]
         ],
     }
+
+
+def _candidate_funnel_identifier(
+    cycle_number: int | None,
+    scan_source: str | None,
+) -> str:
+    cycle_text = "unknown" if cycle_number is None else str(cycle_number)
+    source_text = scan_source or "unknown"
+    return f"candidate_funnel_{source_text}_{cycle_text}"
+
+
+def _live_candidate_funnel_summary_payload(
+    *,
+    contract_scan_snapshot: ContractScanSnapshot,
+    cycle_number: int | None,
+    scan_source: str,
+    live_outcomes: tuple[dict[str, object], ...],
+    intent_count: int,
+    include_diagnostics: bool,
+) -> dict[str, object]:
+    scanner_skip_counts = Counter(
+        contract.reason for contract in contract_scan_snapshot.skipped_contracts
+    )
+    live_stage_counts = Counter(
+        str(outcome.get("stage")) for outcome in live_outcomes
+    )
+    live_reason_counts = Counter(
+        str(outcome.get("reason")) for outcome in live_outcomes
+    )
+    quiet_ranked_count = sum(
+        1
+        for contract in contract_scan_snapshot.ranked_contracts
+        if str(getattr(contract, "classification_reason", "")).startswith(
+            "quiet_continuation_"
+        )
+    )
+    quiet_failed_count = sum(
+        count
+        for reason, count in scanner_skip_counts.items()
+        if reason.startswith("quiet_continuation_")
+    )
+    payload: dict[str, object] = {
+        "cycle_number": cycle_number,
+        "scan_source": scan_source,
+        "ranked_contract_count": len(contract_scan_snapshot.ranked_contracts),
+        "skipped_contract_count": len(contract_scan_snapshot.skipped_contracts),
+        "intent_count": intent_count,
+        "scanner_skip_reasons": [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(
+                scanner_skip_counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+        ],
+        "live_stage_counts": [
+            {"stage": stage, "count": count}
+            for stage, count in sorted(
+                live_stage_counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+        ],
+        "live_reason_counts": [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(
+                live_reason_counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+        ],
+        "neutral_bias_count": scanner_skip_counts.get("neutral_bias", 0),
+        "quiet_continuation_ranked_count": quiet_ranked_count,
+        "quiet_continuation_failed_count": quiet_failed_count,
+    }
+    if include_diagnostics:
+        payload["live_candidate_funnel_diagnostics"] = list(live_outcomes[:20])
+        payload["scanner_candidate_funnel_diagnostics"] = (
+            _contract_scan_skip_diagnostics_payload(
+                contract_scan_snapshot
+            ).get("skipped_contract_diagnostics", [])
+        )
+    return payload
 
 
 def _flip_persistence_payload(status: FlipPersistenceStatus) -> dict[str, object]:

@@ -71,6 +71,9 @@ def main() -> int:
     failures.extend(_validate_live_runner_starts_without_simulation())
     failures.extend(_validate_live_runner_risk_does_not_require_live_validation())
     failures.extend(_validate_live_runner_uses_live_risk_overrides())
+    failures.extend(_validate_market_discovery_preserves_quiet_continuation_settings())
+    failures.extend(_validate_quiet_continuation_settings_rank_itm_no_cross())
+    failures.extend(_validate_cycle_candidate_funnel_summary_logged())
 
     if failures:
         for failure in failures:
@@ -245,6 +248,90 @@ def _validate_market_discovery_tradable_filter() -> list[str]:
             "tradable discovery target_price="
             f"{snapshot.discovered_markets[0].target_price}"
         )
+    return failures
+
+
+def _validate_market_discovery_preserves_quiet_continuation_settings() -> list[str]:
+    runner, _state = _build_runner(live_quiet_continuation_enabled=True)
+    runner.run_cycles(max_cycles=1)
+    scanner = runner._contract_scanner  # type: ignore[attr-defined]
+    failures: list[str] = []
+    if scanner is None:
+        return ["quiet continuation scanner missing after discovery"]
+    if not getattr(scanner, "_quiet_continuation_enabled", False):
+        failures.append("quiet continuation setting not preserved after discovery")
+    if getattr(
+        scanner,
+        "_quiet_continuation_max_required_bps_per_minute",
+        None,
+    ) != Decimal("0.25"):
+        failures.append(
+            "quiet continuation required-bps cap="
+            f"{getattr(scanner, '_quiet_continuation_max_required_bps_per_minute', None)}"
+        )
+    return failures
+
+
+def _validate_quiet_continuation_settings_rank_itm_no_cross() -> list[str]:
+    runner, state = _build_runner(
+        live_quiet_continuation_enabled=True,
+        live_candidate_funnel_diagnostics_enabled=True,
+        bias_direction="neutral",
+        bias_structure="exhaustion",
+        bias_latest_price=Decimal("70050"),
+        bias_lookback_return_bps=Decimal("30"),
+        bias_recent_return_bps=Decimal("5"),
+    )
+    runner.run_cycles(max_cycles=1)
+    records = _jsonl_records(state.log_written_ref)
+    payload = _first_event_payload(
+        records,
+        key="event_type",
+        value="cycle_completed",
+    )
+    if payload is None:
+        return ["quiet continuation through settings cycle log missing"]
+    summary = payload.get("candidate_funnel_summary")
+    if not isinstance(summary, dict):
+        return [f"quiet continuation through settings summary missing={summary}"]
+    failures: list[str] = []
+    if summary.get("quiet_continuation_ranked_count") != 1:
+        failures.append(
+            "quiet continuation through settings ranked="
+            f"{summary.get('quiet_continuation_ranked_count')}"
+        )
+    diagnostics = payload.get("candidate_funnel_diagnostics") or []
+    if not any(
+        isinstance(item, dict)
+        and item.get("classification_reason") == "quiet_continuation_from_exhaustion"
+        for item in diagnostics
+    ):
+        failures.append("quiet continuation through settings diagnostic missing")
+    return failures
+
+
+def _validate_cycle_candidate_funnel_summary_logged() -> list[str]:
+    runner, state = _build_runner(live_candidate_funnel_diagnostics_enabled=True)
+    runner.run_cycles(max_cycles=1)
+    records = _jsonl_records(state.log_written_ref)
+    payload = _first_event_payload(
+        records,
+        key="event_type",
+        value="cycle_completed",
+    )
+    if payload is None:
+        return ["candidate funnel cycle_completed missing"]
+    summary = payload.get("candidate_funnel_summary")
+    if not isinstance(summary, dict):
+        return [f"candidate funnel summary missing={summary}"]
+    failures: list[str] = []
+    if summary.get("ranked_contract_count") != 1:
+        failures.append(f"candidate funnel ranked={summary.get('ranked_contract_count')}")
+    if "scanner_skip_reasons" not in summary:
+        failures.append(f"candidate funnel skip reasons missing={summary}")
+    diagnostics = payload.get("candidate_funnel_diagnostics")
+    if not isinstance(diagnostics, list) and not isinstance(diagnostics, tuple):
+        failures.append(f"candidate funnel diagnostics missing={diagnostics}")
     return failures
 
 
@@ -902,6 +989,13 @@ def _build_runner(
     live_order_intent_skip_events: bool = False,
     simulation_enabled: bool = True,
     live_fast_scan_enabled: bool = False,
+    live_quiet_continuation_enabled: bool = False,
+    live_candidate_funnel_diagnostics_enabled: bool = False,
+    bias_direction: str = "up",
+    bias_structure: str = "trend",
+    bias_latest_price: Decimal = Decimal("70000"),
+    bias_lookback_return_bps: Decimal = Decimal("100"),
+    bias_recent_return_bps: Decimal = Decimal("20"),
     time_fn=None,  # noqa: ANN001
     live_execution_coordinator=None,  # noqa: ANN001
     expired_initial_market: bool = False,
@@ -924,6 +1018,10 @@ def _build_runner(
             simulation_enabled=simulation_enabled,
             fail_fast_on_startup=fail_fast_on_startup,
             live_fast_scan_enabled=live_fast_scan_enabled,
+            live_quiet_continuation_enabled=live_quiet_continuation_enabled,
+            live_candidate_funnel_diagnostics_enabled=(
+                live_candidate_funnel_diagnostics_enabled
+            ),
         ),
         market_state_cache=cache,
         kalshi_ws_client=_FakeKalshiClient(
@@ -932,7 +1030,13 @@ def _build_runner(
             emit_market_data=kalshi_market_data,
         ),
         crypto_feed_client=_FakeCryptoFeedClient(state=state),
-        bias_engine=_FakeBiasEngine(),
+        bias_engine=_FakeBiasEngine(
+            direction=bias_direction,
+            structure=bias_structure,
+            latest_price=bias_latest_price,
+            lookback_return_bps=bias_lookback_return_bps,
+            recent_return_bps=bias_recent_return_bps,
+        ),
         contract_scanner=None,
         market_discovery=_FakeMarketDiscovery(state=state),
         simulation_engine=(
@@ -955,6 +1059,10 @@ def _build_runner(
                 simulation_enabled=simulation_enabled,
                 fail_fast_on_startup=fail_fast_on_startup,
                 live_fast_scan_enabled=live_fast_scan_enabled,
+                live_quiet_continuation_enabled=live_quiet_continuation_enabled,
+                live_candidate_funnel_diagnostics_enabled=(
+                    live_candidate_funnel_diagnostics_enabled
+                ),
             )
         ),
         logger=logger,
@@ -977,6 +1085,8 @@ def _settings(
     live_runner_execution_enabled: bool = False,
     simulation_enabled: bool = True,
     live_fast_scan_enabled: bool = False,
+    live_quiet_continuation_enabled: bool = False,
+    live_candidate_funnel_diagnostics_enabled: bool = False,
 ) -> KalshiSettings:
     return KalshiSettings(
         env="demo",
@@ -1112,7 +1222,10 @@ def _settings(
         live_ev_timing_bypass_enabled=True,
         live_ev_extra_entries_per_product_per_session=0,
         live_ev_extra_open_positions_per_product=0,
-        live_quiet_continuation_enabled=False,
+        live_quiet_continuation_enabled=live_quiet_continuation_enabled,
+        live_candidate_funnel_diagnostics_enabled=(
+            live_candidate_funnel_diagnostics_enabled
+        ),
         runner_enabled=True,
         runner_loop_interval_seconds=5.0 if live_fast_scan_enabled else 0.001,
         runner_status_log_every_n_cycles=1,
@@ -1176,6 +1289,21 @@ class _FakeCryptoFeedClient:
 
 
 class _FakeBiasEngine:
+    def __init__(
+        self,
+        *,
+        direction: str = "up",
+        structure: str = "trend",
+        latest_price: Decimal = Decimal("70000"),
+        lookback_return_bps: Decimal = Decimal("100"),
+        recent_return_bps: Decimal = Decimal("20"),
+    ) -> None:
+        self._direction = direction
+        self._structure = structure
+        self._latest_price = latest_price
+        self._lookback_return_bps = lookback_return_bps
+        self._recent_return_bps = recent_return_bps
+
     def snapshot(self):
         return BiasSnapshot(products={})
 
@@ -1184,19 +1312,21 @@ class _FakeBiasEngine:
             products={
                 "BTC-USD": BiasState(
                     product_id="BTC-USD",
-                    direction="up",
+                    direction=self._direction,
                     confidence=70,
-                    structure="trend",
+                    structure=self._structure,
                     risk_flags=BiasRiskFlags(
                         insufficient_history=False,
                         stale_data=False,
                         time_sync_failed=False,
                     ),
-                    latest_price=Decimal("70000"),
-                    lookback_return_bps=Decimal("100"),
-                    recent_return_bps=Decimal("20"),
+                    latest_price=self._latest_price,
+                    lookback_return_bps=self._lookback_return_bps,
+                    recent_return_bps=self._recent_return_bps,
                     observation_count=25,
                     as_of="2026-04-23T12:00:00+00:00",
+                    classification_reason=f"{self._structure}_fixture",
+                    chop_threshold_bps=Decimal("15"),
                 ),
                 "ETH-USD": BiasState(
                     product_id="ETH-USD",
@@ -1662,6 +1792,8 @@ def _discovery_snapshot(
     product_markets: dict[str, tuple[str, ...]],
     *,
     close_time: str,
+    target_price: Decimal | None = Decimal("70000"),
+    target_price_source: str | None = "target_price",
 ) -> CryptoMarketDiscoverySnapshot:
     discovered = tuple(
         DiscoveredCryptoMarket(
@@ -1671,6 +1803,8 @@ def _discovery_snapshot(
             close_time=close_time,
             open_time="2026-04-23T12:00:00+00:00",
             expiration_time=close_time,
+            target_price=target_price,
+            target_price_source=target_price_source,
         )
         for product_id, market_tickers in product_markets.items()
         for market_ticker in market_tickers

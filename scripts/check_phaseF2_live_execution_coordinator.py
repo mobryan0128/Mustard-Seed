@@ -20,6 +20,7 @@ from kalshi_bot.contracts.contract_scorer import ContractScore  # noqa: E402
 from kalshi_bot.contracts.contract_scanner import (  # noqa: E402
     ContractScanSnapshot,
     ScannedContract,
+    SkippedContract,
 )
 from kalshi_bot.execution.execution_engine import (  # noqa: E402
     SimulatedPosition,
@@ -90,6 +91,7 @@ def main() -> int:
     failures.extend(_validate_same_side_retry_allows_improved_feasibility())
     failures.extend(_validate_entry_segment_budget_blocks_overuse())
     failures.extend(_validate_product_session_cap_blocks_overuse())
+    failures.extend(_validate_candidate_funnel_summary_logs_scanner_and_live_counts())
 
     if failures:
         for failure in failures:
@@ -2047,7 +2049,115 @@ def _validate_product_session_cap_blocks_overuse() -> list[str]:
                 "product cap status="
                 f"{payload.get('product_session_pacing_status')} expected={expected_status}"
             )
-        return failures
+    return failures
+
+
+def _validate_candidate_funnel_summary_logs_scanner_and_live_counts() -> list[str]:
+    failures: list[str] = []
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_candidate_funnel_diagnostics_enabled=True,
+            ),
+        )
+        skipped_snapshot = ContractScanSnapshot(
+            ranked_contracts=(),
+            skipped_contracts=(
+                SkippedContract(
+                    product_id="BTC-USD",
+                    market_ticker="KXBTC15M-TEST",
+                    reason="neutral_bias",
+                    direction="neutral",
+                    structure="exhaustion",
+                    confidence=30,
+                    classification_reason="recent_below_chop_exhaustion",
+                    recent_return_bps=Decimal("5.000"),
+                    lookback_return_bps=Decimal("30.000"),
+                ),
+                SkippedContract(
+                    product_id="ETH-USD",
+                    market_ticker="KXETH15M-TEST",
+                    reason="quiet_continuation_needs_cross_blocked",
+                    direction="up",
+                    structure="trend",
+                    confidence=30,
+                    classification_reason="quiet_continuation_from_exhaustion",
+                    side_currently_itm=False,
+                    side_needs_cross=True,
+                    required_bps_per_minute=Decimal("0.500"),
+                ),
+            ),
+        )
+        coordinator.process_contract_scan_snapshot(skipped_snapshot, cycle_number=10)
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="candidate_funnel_summary",
+        )
+        if payload is None:
+            failures.append("candidate funnel no-ranked summary missing")
+        else:
+            if payload.get("neutral_bias_count") != 1:
+                failures.append(
+                    f"candidate funnel neutral={payload.get('neutral_bias_count')}"
+                )
+            if payload.get("quiet_continuation_failed_count") != 1:
+                failures.append(
+                    "candidate funnel quiet failed="
+                    f"{payload.get('quiet_continuation_failed_count')}"
+                )
+            diagnostics = payload.get("scanner_candidate_funnel_diagnostics")
+            if not isinstance(diagnostics, list) or not diagnostics:
+                failures.append("candidate funnel scanner diagnostics missing")
+
+    with TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        coordinator = _coordinator(
+            temp_path,
+            settings=_Settings(
+                log_directory=temp_path,
+                log_jsonl_enabled=True,
+                live_ev_filter_enabled=True,
+                live_composite_quality_filter_enabled=True,
+                live_candidate_funnel_diagnostics_enabled=True,
+            ),
+            risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("2.00")),
+        )
+        contract = _contract(
+            midpoint=Decimal("0.40"),
+            contract_close_time=_future_time(minutes=6),
+            contract_time_remaining_seconds=360,
+        )
+        coordinator.process_contract_scan_snapshot(
+            _contract_snapshot(contract),
+            cycle_number=11,
+            market_snapshot=None,
+        )
+        payload = _last_event_payload(
+            _jsonl_records(temp_path / "runtime.jsonl"),
+            event_type="candidate_funnel_summary",
+        )
+        if payload is None:
+            failures.append("candidate funnel live summary missing")
+        else:
+            live_reasons = {
+                item.get("reason"): item.get("count")
+                for item in payload.get("live_reason_counts", [])
+                if isinstance(item, dict)
+            }
+            if live_reasons.get("executable_price_no_visible_liquidity") != 1:
+                failures.append(f"candidate funnel live reasons={live_reasons}")
+            if payload.get("ranked_contract_count") != 1:
+                failures.append(
+                    f"candidate funnel ranked={payload.get('ranked_contract_count')}"
+                )
+            live_diagnostics = payload.get("live_candidate_funnel_diagnostics")
+            if not isinstance(live_diagnostics, list) or not live_diagnostics:
+                failures.append("candidate funnel live diagnostics missing")
+    return failures
 
 
 def _coordinator(
@@ -2340,6 +2450,7 @@ class _Settings:
     live_ev_timing_bypass_enabled: bool = True
     live_ev_extra_entries_per_product_per_session: int = 0
     live_ev_extra_open_positions_per_product: int = 0
+    live_candidate_funnel_diagnostics_enabled: bool = False
 
 
 class _FixedEntryRiskManager:

@@ -132,6 +132,7 @@ DEFAULT_LIVE_EV_TIMING_BYPASS_ENABLED = True
 DEFAULT_LIVE_EV_EXTRA_ENTRIES_PER_PRODUCT_PER_SESSION = 0
 DEFAULT_LIVE_EV_EXTRA_OPEN_POSITIONS_PER_PRODUCT = 0
 DEFAULT_LIVE_QUIET_CONTINUATION_ENABLED = False
+DEFAULT_LIVE_CANDIDATE_FUNNEL_DIAGNOSTICS_ENABLED = False
 DEFAULT_RUNNER_ENABLED = True
 DEFAULT_RUNNER_LOOP_INTERVAL_SECONDS = 5.0
 DEFAULT_RUNNER_STATUS_LOG_EVERY_N_CYCLES = 1
@@ -288,6 +289,7 @@ class KalshiSettings:
     live_ev_extra_entries_per_product_per_session: int
     live_ev_extra_open_positions_per_product: int
     live_quiet_continuation_enabled: bool
+    live_candidate_funnel_diagnostics_enabled: bool
     runner_enabled: bool
     runner_loop_interval_seconds: float
     runner_status_log_every_n_cycles: int
@@ -824,6 +826,11 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         DEFAULT_LIVE_QUIET_CONTINUATION_ENABLED,
         "LIVE_QUIET_CONTINUATION_ENABLED",
     )
+    live_candidate_funnel_diagnostics_enabled = _parse_bool(
+        values.get("LIVE_CANDIDATE_FUNNEL_DIAGNOSTICS_ENABLED"),
+        DEFAULT_LIVE_CANDIDATE_FUNNEL_DIAGNOSTICS_ENABLED,
+        "LIVE_CANDIDATE_FUNNEL_DIAGNOSTICS_ENABLED",
+    )
     runner_enabled = _parse_bool(
         values.get("RUNNER_ENABLED"),
         DEFAULT_RUNNER_ENABLED,
@@ -1121,6 +1128,9 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
             live_ev_extra_open_positions_per_product
         ),
         live_quiet_continuation_enabled=live_quiet_continuation_enabled,
+        live_candidate_funnel_diagnostics_enabled=(
+            live_candidate_funnel_diagnostics_enabled
+        ),
         runner_enabled=runner_enabled,
         runner_loop_interval_seconds=runner_loop_interval_seconds,
         runner_status_log_every_n_cycles=runner_status_log_every_n_cycles,
@@ -1296,6 +1306,7 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_EV_EXTRA_ENTRIES_PER_PRODUCT_PER_SESSION",
         "LIVE_EV_EXTRA_OPEN_POSITIONS_PER_PRODUCT",
         "LIVE_QUIET_CONTINUATION_ENABLED",
+        "LIVE_CANDIDATE_FUNNEL_DIAGNOSTICS_ENABLED",
         "RUNNER_ENABLED",
         "RUNNER_LOOP_INTERVAL_SECONDS",
         "RUNNER_STATUS_LOG_EVERY_N_CYCLES",

@@ -261,6 +261,8 @@ LIVE_CONDITIONAL_HIGH_PRICE_CEILING_MAX=0.65
 LIVE_EV_TIMING_BYPASS_ENABLED=true
 LIVE_EV_EXTRA_ENTRIES_PER_PRODUCT_PER_SESSION=1
 LIVE_EV_EXTRA_OPEN_POSITIONS_PER_PRODUCT=1
+LIVE_QUIET_CONTINUATION_ENABLED=true
+LIVE_CANDIDATE_FUNNEL_DIAGNOSTICS_ENABLED=true
 """
     )
     failures: list[str] = []
@@ -340,6 +342,10 @@ LIVE_EV_EXTRA_OPEN_POSITIONS_PER_PRODUCT=1
             "live ev extra entries="
             f"{settings.live_ev_extra_entries_per_product_per_session}"
         )
+    if not settings.live_quiet_continuation_enabled:
+        failures.append("live quiet continuation did not parse true")
+    if not settings.live_candidate_funnel_diagnostics_enabled:
+        failures.append("live candidate funnel diagnostics did not parse true")
 
     generic_manager = RiskManager.from_settings(settings)
     live_manager = RiskManager.from_live_settings(settings)

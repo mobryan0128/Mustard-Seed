@@ -558,6 +558,14 @@ class KalshiBotRunner:
                             status.skipped_contract_diagnostics
                         )
                     ),
+                    "candidate_funnel_summary": _candidate_funnel_summary_payload(
+                        contract_scan_snapshot
+                    ),
+                    "candidate_funnel_diagnostics": (
+                        _candidate_funnel_diagnostic_payloads(contract_scan_snapshot)
+                        if self._settings.live_candidate_funnel_diagnostics_enabled
+                        else ()
+                    ),
                     "bias_diagnostics": _bias_diagnostic_payloads(status.bias_diagnostics),
                     "mapped_market_diagnostics": _mapped_market_diagnostic_payloads(
                         status.mapped_market_diagnostics
@@ -749,6 +757,12 @@ class KalshiBotRunner:
             ContractScanner(
                 product_markets=next_product_markets,
                 market_metadata_by_ticker=self._market_metadata_by_ticker,
+                quiet_continuation_enabled=(
+                    self._settings.live_quiet_continuation_enabled
+                ),
+                quiet_continuation_max_required_bps_per_minute=(
+                    self._settings.live_max_required_bps_per_minute
+                ),
             )
             if next_product_markets
             else None
@@ -1495,6 +1509,97 @@ def _skip_reason_payloads(
     diagnostics: tuple[SkipReasonDiagnostic, ...],
 ) -> tuple[dict[str, object], ...]:
     return tuple({"reason": item.reason, "count": item.count} for item in diagnostics)
+
+
+def _candidate_funnel_summary_payload(
+    contract_scan_snapshot: ContractScanSnapshot | None,
+) -> dict[str, object]:
+    if contract_scan_snapshot is None:
+        return {
+            "ranked_contract_count": 0,
+            "skipped_contract_count": 0,
+            "scanner_skip_reasons": (),
+            "quiet_continuation_ranked_count": 0,
+            "quiet_continuation_failed_count": 0,
+            "neutral_bias_count": 0,
+        }
+    skip_counts = Counter(contract.reason for contract in contract_scan_snapshot.skipped_contracts)
+    quiet_ranked = sum(
+        1
+        for contract in contract_scan_snapshot.ranked_contracts
+        if str(getattr(contract, "classification_reason", "")).startswith(
+            "quiet_continuation_"
+        )
+    )
+    quiet_failed = sum(
+        count
+        for reason, count in skip_counts.items()
+        if reason.startswith("quiet_continuation_")
+    )
+    return {
+        "ranked_contract_count": len(contract_scan_snapshot.ranked_contracts),
+        "skipped_contract_count": len(contract_scan_snapshot.skipped_contracts),
+        "scanner_skip_reasons": tuple(
+            {"reason": reason, "count": count}
+            for reason, count in sorted(
+                skip_counts.items(),
+                key=lambda item: (-item[1], item[0]),
+            )
+        ),
+        "quiet_continuation_ranked_count": quiet_ranked,
+        "quiet_continuation_failed_count": quiet_failed,
+        "neutral_bias_count": skip_counts.get("neutral_bias", 0),
+    }
+
+
+def _candidate_funnel_diagnostic_payloads(
+    contract_scan_snapshot: ContractScanSnapshot | None,
+) -> tuple[dict[str, object], ...]:
+    if contract_scan_snapshot is None:
+        return ()
+    ranked_payloads = tuple(
+        {
+            "stage": "scanner_ranked",
+            "product_id": contract.product_id,
+            "market_ticker": contract.market_ticker,
+            "direction": contract.direction,
+            "structure": contract.structure,
+            "confidence": contract.confidence,
+            "classification_reason": contract.classification_reason,
+            "recent_return_bps": contract.recent_return_bps,
+            "lookback_return_bps": contract.lookback_return_bps,
+            "trend_confirmation_status": contract.trend_confirmation_status,
+            "scanner_score_confidence": contract.scanner_score_confidence,
+            "scanner_score_downgrade_reasons": list(
+                contract.scanner_score_downgrade_reasons
+            ),
+            "side_currently_itm": contract.side_currently_itm,
+            "side_needs_cross": contract.side_needs_cross,
+            "required_bps_per_minute": contract.required_bps_per_minute,
+        }
+        for contract in contract_scan_snapshot.ranked_contracts[:10]
+    )
+    skipped_payloads = tuple(
+        {
+            "stage": "scanner_skipped",
+            "product_id": contract.product_id,
+            "market_ticker": contract.market_ticker,
+            "reason": contract.reason,
+            "direction": contract.direction,
+            "structure": contract.structure,
+            "confidence": contract.confidence,
+            "classification_reason": contract.classification_reason,
+            "recent_return_bps": contract.recent_return_bps,
+            "lookback_return_bps": contract.lookback_return_bps,
+            "trend_confirmation_status": contract.trend_confirmation_status,
+            "side_currently_itm": contract.side_currently_itm,
+            "side_needs_cross": contract.side_needs_cross,
+            "required_bps_per_minute": contract.required_bps_per_minute,
+            "feasibility_status": contract.feasibility_status,
+        }
+        for contract in contract_scan_snapshot.skipped_contracts[:10]
+    )
+    return ranked_payloads + skipped_payloads
 
 
 def _skipped_contract_diagnostic_payloads(
