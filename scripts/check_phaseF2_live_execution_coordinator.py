@@ -92,6 +92,7 @@ def main() -> int:
     failures.extend(_validate_entry_segment_budget_blocks_overuse())
     failures.extend(_validate_product_session_cap_blocks_overuse())
     failures.extend(_validate_candidate_funnel_summary_logs_scanner_and_live_counts())
+    failures.extend(_validate_ev_no_high_actual_cost_blocks())
 
     if failures:
         for failure in failures:
@@ -837,6 +838,9 @@ def _validate_ev_no_candidate_a_side_aware_allows() -> list[str]:
                 live_conditional_high_price_ceiling_max=Decimal("0.92"),
                 live_conditional_max_premium_over_midpoint=Decimal("0.90"),
                 live_conditional_max_scanner_premium=Decimal("0.90"),
+                live_ev_max_actual_cost=Decimal("0.95"),
+                live_ev_min_reward_dollars=Decimal("0.05"),
+                live_ev_require_positive_cost_expected_value=False,
             ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
         )
@@ -892,6 +896,9 @@ def _validate_ev_no_candidate_a_side_aware_allows() -> list[str]:
             "ev_no_side_price_interpretation_applied": True,
             "ev_estimated_reward": "0.0900",
             "ev_estimated_risk": "0.91",
+            "ev_actual_cost_status": "within_limit",
+            "ev_reward_status": "within_limit",
+            "ev_cost_expected_value_status": "not_required_negative",
             "ev_score": "0.7800",
             "ev_score_basis": "market_probability_price",
         }
@@ -909,6 +916,15 @@ def _validate_ev_no_candidate_a_needs_cross_blocks() -> list[str]:
         distance_to_target_bps=Decimal("1.000"),
         required_bps_per_minute=Decimal("0.100"),
         expected_reason="needs_cross_blocked",
+    )
+
+
+def _validate_ev_no_high_actual_cost_blocks() -> list[str]:
+    return _expect_ev_no_skip(
+        market_ticker="KXBTC15M-EV-NO-COST",
+        expected_reason="ev_actual_cost_above_limit",
+        expected_ev_block_reason="actual_cost_above_limit",
+        expected_ev_status="blocked",
     )
 
 
@@ -934,6 +950,7 @@ def _validate_ev_no_candidate_a_hard_cost_ceiling_blocks() -> list[str]:
         market_ticker="KXBTC15M-EV-NO-CEILING",
         expected_reason="contextual_high_price_above_ceiling",
         expected_ev_status="allowed",
+        relax_cost_guards=True,
     )
 
 
@@ -948,6 +965,7 @@ def _expect_ev_no_skip(
     yes_bid_size: Decimal = Decimal("100"),
     expected_ev_block_reason: str | None = None,
     expected_ev_status: str | None = None,
+    relax_cost_guards: bool = False,
 ) -> list[str]:
     with TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
@@ -957,6 +975,13 @@ def _expect_ev_no_skip(
                 log_directory=temp_path,
                 log_jsonl_enabled=True,
                 live_ev_filter_enabled=True,
+                live_ev_max_actual_cost=(
+                    Decimal("0.95") if relax_cost_guards else Decimal("0.70")
+                ),
+                live_ev_min_reward_dollars=(
+                    Decimal("0.05") if relax_cost_guards else Decimal("0.30")
+                ),
+                live_ev_require_positive_cost_expected_value=not relax_cost_guards,
             ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
         )
@@ -2450,6 +2475,10 @@ class _Settings:
     live_ev_timing_bypass_enabled: bool = True
     live_ev_extra_entries_per_product_per_session: int = 0
     live_ev_extra_open_positions_per_product: int = 0
+    live_ev_max_actual_cost: Decimal = Decimal("0.70")
+    live_ev_min_reward_dollars: Decimal = Decimal("0.30")
+    live_ev_require_positive_cost_expected_value: bool = True
+    live_ev_exhaustion_block_enabled: bool = True
     live_candidate_funnel_diagnostics_enabled: bool = False
 
 

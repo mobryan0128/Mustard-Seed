@@ -132,6 +132,28 @@ DEFAULT_LIVE_EV_TIMING_BYPASS_ENABLED = True
 DEFAULT_LIVE_EV_EXTRA_ENTRIES_PER_PRODUCT_PER_SESSION = 0
 DEFAULT_LIVE_EV_EXTRA_OPEN_POSITIONS_PER_PRODUCT = 0
 DEFAULT_LIVE_QUIET_CONTINUATION_ENABLED = False
+DEFAULT_LIVE_QUIET_CONTINUATION_MAX_RECENT_BPS = Decimal("6")
+DEFAULT_LIVE_QUIET_CONTINUATION_MAX_3M_ABS_BPS = Decimal("12")
+DEFAULT_LIVE_QUIET_CONTINUATION_MAX_5M_ABS_BPS = Decimal("20")
+DEFAULT_LIVE_QUIET_CONTINUATION_MAX_5M_RANGE_BPS = Decimal("25")
+DEFAULT_LIVE_QUIET_CONTINUATION_BLOCK_DECELERATION = True
+DEFAULT_LIVE_QUIET_CONTINUATION_BLOCK_NEAR_EXTREME = True
+DEFAULT_LIVE_QUIET_CONTINUATION_MIN_DISTANCE_FROM_EXTREME_BPS = Decimal("5")
+DEFAULT_LIVE_EXHAUSTION_GUARD_ENABLED = True
+DEFAULT_LIVE_EXHAUSTION_BURST_3M_BPS = Decimal("20")
+DEFAULT_LIVE_EXHAUSTION_BURST_5M_BPS = Decimal("30")
+DEFAULT_LIVE_EXHAUSTION_NEAR_EXTREME_BPS = Decimal("3")
+DEFAULT_LIVE_EXHAUSTION_DECELERATION_RECENT_BPS = Decimal("8")
+DEFAULT_LIVE_EXHAUSTION_STRICT_PRODUCTS = ("HYPE-USD", "ETH-USD", "XRP-USD")
+DEFAULT_LIVE_EXHAUSTION_STRICT_BURST_3M_BPS = Decimal("15")
+DEFAULT_LIVE_EARLY_MOMENTUM_ENABLED = True
+DEFAULT_LIVE_EARLY_MOMENTUM_MIN_RECENT_BPS = Decimal("15")
+DEFAULT_LIVE_EARLY_MOMENTUM_MAX_3M_BURST_BPS = Decimal("20")
+DEFAULT_LIVE_EARLY_MOMENTUM_MAX_ENTRY_PRICE = Decimal("0.50")
+DEFAULT_LIVE_EV_MAX_ACTUAL_COST = Decimal("0.70")
+DEFAULT_LIVE_EV_MIN_REWARD_DOLLARS = Decimal("0.30")
+DEFAULT_LIVE_EV_REQUIRE_POSITIVE_COST_EXPECTED_VALUE = True
+DEFAULT_LIVE_EV_EXHAUSTION_BLOCK_ENABLED = True
 DEFAULT_LIVE_CANDIDATE_FUNNEL_DIAGNOSTICS_ENABLED = False
 DEFAULT_RUNNER_ENABLED = True
 DEFAULT_RUNNER_LOOP_INTERVAL_SECONDS = 5.0
@@ -289,6 +311,28 @@ class KalshiSettings:
     live_ev_extra_entries_per_product_per_session: int
     live_ev_extra_open_positions_per_product: int
     live_quiet_continuation_enabled: bool
+    live_quiet_continuation_max_recent_bps: Decimal
+    live_quiet_continuation_max_3m_abs_bps: Decimal
+    live_quiet_continuation_max_5m_abs_bps: Decimal
+    live_quiet_continuation_max_5m_range_bps: Decimal
+    live_quiet_continuation_block_deceleration: bool
+    live_quiet_continuation_block_near_extreme: bool
+    live_quiet_continuation_min_distance_from_extreme_bps: Decimal
+    live_exhaustion_guard_enabled: bool
+    live_exhaustion_burst_3m_bps: Decimal
+    live_exhaustion_burst_5m_bps: Decimal
+    live_exhaustion_near_extreme_bps: Decimal
+    live_exhaustion_deceleration_recent_bps: Decimal
+    live_exhaustion_strict_products: tuple[str, ...]
+    live_exhaustion_strict_burst_3m_bps: Decimal
+    live_early_momentum_enabled: bool
+    live_early_momentum_min_recent_bps: Decimal
+    live_early_momentum_max_3m_burst_bps: Decimal
+    live_early_momentum_max_entry_price: Decimal
+    live_ev_max_actual_cost: Decimal
+    live_ev_min_reward_dollars: Decimal
+    live_ev_require_positive_cost_expected_value: bool
+    live_ev_exhaustion_block_enabled: bool
     live_candidate_funnel_diagnostics_enabled: bool
     runner_enabled: bool
     runner_loop_interval_seconds: float
@@ -826,6 +870,117 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         DEFAULT_LIVE_QUIET_CONTINUATION_ENABLED,
         "LIVE_QUIET_CONTINUATION_ENABLED",
     )
+    live_quiet_continuation_max_recent_bps = _parse_positive_decimal(
+        values.get("LIVE_QUIET_CONTINUATION_MAX_RECENT_BPS"),
+        DEFAULT_LIVE_QUIET_CONTINUATION_MAX_RECENT_BPS,
+        "LIVE_QUIET_CONTINUATION_MAX_RECENT_BPS",
+    )
+    live_quiet_continuation_max_3m_abs_bps = _parse_positive_decimal(
+        values.get("LIVE_QUIET_CONTINUATION_MAX_3M_ABS_BPS"),
+        DEFAULT_LIVE_QUIET_CONTINUATION_MAX_3M_ABS_BPS,
+        "LIVE_QUIET_CONTINUATION_MAX_3M_ABS_BPS",
+    )
+    live_quiet_continuation_max_5m_abs_bps = _parse_positive_decimal(
+        values.get("LIVE_QUIET_CONTINUATION_MAX_5M_ABS_BPS"),
+        DEFAULT_LIVE_QUIET_CONTINUATION_MAX_5M_ABS_BPS,
+        "LIVE_QUIET_CONTINUATION_MAX_5M_ABS_BPS",
+    )
+    live_quiet_continuation_max_5m_range_bps = _parse_positive_decimal(
+        values.get("LIVE_QUIET_CONTINUATION_MAX_5M_RANGE_BPS"),
+        DEFAULT_LIVE_QUIET_CONTINUATION_MAX_5M_RANGE_BPS,
+        "LIVE_QUIET_CONTINUATION_MAX_5M_RANGE_BPS",
+    )
+    live_quiet_continuation_block_deceleration = _parse_bool(
+        values.get("LIVE_QUIET_CONTINUATION_BLOCK_DECELERATION"),
+        DEFAULT_LIVE_QUIET_CONTINUATION_BLOCK_DECELERATION,
+        "LIVE_QUIET_CONTINUATION_BLOCK_DECELERATION",
+    )
+    live_quiet_continuation_block_near_extreme = _parse_bool(
+        values.get("LIVE_QUIET_CONTINUATION_BLOCK_NEAR_EXTREME"),
+        DEFAULT_LIVE_QUIET_CONTINUATION_BLOCK_NEAR_EXTREME,
+        "LIVE_QUIET_CONTINUATION_BLOCK_NEAR_EXTREME",
+    )
+    live_quiet_continuation_min_distance_from_extreme_bps = _parse_positive_decimal(
+        values.get("LIVE_QUIET_CONTINUATION_MIN_DISTANCE_FROM_EXTREME_BPS"),
+        DEFAULT_LIVE_QUIET_CONTINUATION_MIN_DISTANCE_FROM_EXTREME_BPS,
+        "LIVE_QUIET_CONTINUATION_MIN_DISTANCE_FROM_EXTREME_BPS",
+    )
+    live_exhaustion_guard_enabled = _parse_bool(
+        values.get("LIVE_EXHAUSTION_GUARD_ENABLED"),
+        DEFAULT_LIVE_EXHAUSTION_GUARD_ENABLED,
+        "LIVE_EXHAUSTION_GUARD_ENABLED",
+    )
+    live_exhaustion_burst_3m_bps = _parse_positive_decimal(
+        values.get("LIVE_EXHAUSTION_BURST_3M_BPS"),
+        DEFAULT_LIVE_EXHAUSTION_BURST_3M_BPS,
+        "LIVE_EXHAUSTION_BURST_3M_BPS",
+    )
+    live_exhaustion_burst_5m_bps = _parse_positive_decimal(
+        values.get("LIVE_EXHAUSTION_BURST_5M_BPS"),
+        DEFAULT_LIVE_EXHAUSTION_BURST_5M_BPS,
+        "LIVE_EXHAUSTION_BURST_5M_BPS",
+    )
+    live_exhaustion_near_extreme_bps = _parse_positive_decimal(
+        values.get("LIVE_EXHAUSTION_NEAR_EXTREME_BPS"),
+        DEFAULT_LIVE_EXHAUSTION_NEAR_EXTREME_BPS,
+        "LIVE_EXHAUSTION_NEAR_EXTREME_BPS",
+    )
+    live_exhaustion_deceleration_recent_bps = _parse_positive_decimal(
+        values.get("LIVE_EXHAUSTION_DECELERATION_RECENT_BPS"),
+        DEFAULT_LIVE_EXHAUSTION_DECELERATION_RECENT_BPS,
+        "LIVE_EXHAUSTION_DECELERATION_RECENT_BPS",
+    )
+    live_exhaustion_strict_products = tuple(
+        dict.fromkeys(
+            item.upper()
+            for item in (
+                _parse_csv(values.get("LIVE_EXHAUSTION_STRICT_PRODUCTS"))
+                or DEFAULT_LIVE_EXHAUSTION_STRICT_PRODUCTS
+            )
+        )
+    )
+    live_exhaustion_strict_burst_3m_bps = _parse_positive_decimal(
+        values.get("LIVE_EXHAUSTION_STRICT_BURST_3M_BPS"),
+        DEFAULT_LIVE_EXHAUSTION_STRICT_BURST_3M_BPS,
+        "LIVE_EXHAUSTION_STRICT_BURST_3M_BPS",
+    )
+    live_early_momentum_enabled = _parse_bool(
+        values.get("LIVE_EARLY_MOMENTUM_ENABLED"),
+        DEFAULT_LIVE_EARLY_MOMENTUM_ENABLED,
+        "LIVE_EARLY_MOMENTUM_ENABLED",
+    )
+    live_early_momentum_min_recent_bps = _parse_positive_decimal(
+        values.get("LIVE_EARLY_MOMENTUM_MIN_RECENT_BPS"),
+        DEFAULT_LIVE_EARLY_MOMENTUM_MIN_RECENT_BPS,
+        "LIVE_EARLY_MOMENTUM_MIN_RECENT_BPS",
+    )
+    live_early_momentum_max_3m_burst_bps = _parse_positive_decimal(
+        values.get("LIVE_EARLY_MOMENTUM_MAX_3M_BURST_BPS"),
+        DEFAULT_LIVE_EARLY_MOMENTUM_MAX_3M_BURST_BPS,
+        "LIVE_EARLY_MOMENTUM_MAX_3M_BURST_BPS",
+    )
+    live_early_momentum_max_entry_price = _parse_price_dollars(
+        values.get("LIVE_EARLY_MOMENTUM_MAX_ENTRY_PRICE"),
+        "LIVE_EARLY_MOMENTUM_MAX_ENTRY_PRICE",
+    ) or DEFAULT_LIVE_EARLY_MOMENTUM_MAX_ENTRY_PRICE
+    live_ev_max_actual_cost = _parse_price_dollars(
+        values.get("LIVE_EV_MAX_ACTUAL_COST"),
+        "LIVE_EV_MAX_ACTUAL_COST",
+    ) or DEFAULT_LIVE_EV_MAX_ACTUAL_COST
+    live_ev_min_reward_dollars = _parse_price_dollars(
+        values.get("LIVE_EV_MIN_REWARD_DOLLARS"),
+        "LIVE_EV_MIN_REWARD_DOLLARS",
+    ) or DEFAULT_LIVE_EV_MIN_REWARD_DOLLARS
+    live_ev_require_positive_cost_expected_value = _parse_bool(
+        values.get("LIVE_EV_REQUIRE_POSITIVE_COST_EXPECTED_VALUE"),
+        DEFAULT_LIVE_EV_REQUIRE_POSITIVE_COST_EXPECTED_VALUE,
+        "LIVE_EV_REQUIRE_POSITIVE_COST_EXPECTED_VALUE",
+    )
+    live_ev_exhaustion_block_enabled = _parse_bool(
+        values.get("LIVE_EV_EXHAUSTION_BLOCK_ENABLED"),
+        DEFAULT_LIVE_EV_EXHAUSTION_BLOCK_ENABLED,
+        "LIVE_EV_EXHAUSTION_BLOCK_ENABLED",
+    )
     live_candidate_funnel_diagnostics_enabled = _parse_bool(
         values.get("LIVE_CANDIDATE_FUNNEL_DIAGNOSTICS_ENABLED"),
         DEFAULT_LIVE_CANDIDATE_FUNNEL_DIAGNOSTICS_ENABLED,
@@ -1128,6 +1283,50 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
             live_ev_extra_open_positions_per_product
         ),
         live_quiet_continuation_enabled=live_quiet_continuation_enabled,
+        live_quiet_continuation_max_recent_bps=(
+            live_quiet_continuation_max_recent_bps
+        ),
+        live_quiet_continuation_max_3m_abs_bps=(
+            live_quiet_continuation_max_3m_abs_bps
+        ),
+        live_quiet_continuation_max_5m_abs_bps=(
+            live_quiet_continuation_max_5m_abs_bps
+        ),
+        live_quiet_continuation_max_5m_range_bps=(
+            live_quiet_continuation_max_5m_range_bps
+        ),
+        live_quiet_continuation_block_deceleration=(
+            live_quiet_continuation_block_deceleration
+        ),
+        live_quiet_continuation_block_near_extreme=(
+            live_quiet_continuation_block_near_extreme
+        ),
+        live_quiet_continuation_min_distance_from_extreme_bps=(
+            live_quiet_continuation_min_distance_from_extreme_bps
+        ),
+        live_exhaustion_guard_enabled=live_exhaustion_guard_enabled,
+        live_exhaustion_burst_3m_bps=live_exhaustion_burst_3m_bps,
+        live_exhaustion_burst_5m_bps=live_exhaustion_burst_5m_bps,
+        live_exhaustion_near_extreme_bps=live_exhaustion_near_extreme_bps,
+        live_exhaustion_deceleration_recent_bps=(
+            live_exhaustion_deceleration_recent_bps
+        ),
+        live_exhaustion_strict_products=live_exhaustion_strict_products,
+        live_exhaustion_strict_burst_3m_bps=(
+            live_exhaustion_strict_burst_3m_bps
+        ),
+        live_early_momentum_enabled=live_early_momentum_enabled,
+        live_early_momentum_min_recent_bps=live_early_momentum_min_recent_bps,
+        live_early_momentum_max_3m_burst_bps=(
+            live_early_momentum_max_3m_burst_bps
+        ),
+        live_early_momentum_max_entry_price=live_early_momentum_max_entry_price,
+        live_ev_max_actual_cost=live_ev_max_actual_cost,
+        live_ev_min_reward_dollars=live_ev_min_reward_dollars,
+        live_ev_require_positive_cost_expected_value=(
+            live_ev_require_positive_cost_expected_value
+        ),
+        live_ev_exhaustion_block_enabled=live_ev_exhaustion_block_enabled,
         live_candidate_funnel_diagnostics_enabled=(
             live_candidate_funnel_diagnostics_enabled
         ),
@@ -1306,6 +1505,28 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_EV_EXTRA_ENTRIES_PER_PRODUCT_PER_SESSION",
         "LIVE_EV_EXTRA_OPEN_POSITIONS_PER_PRODUCT",
         "LIVE_QUIET_CONTINUATION_ENABLED",
+        "LIVE_QUIET_CONTINUATION_MAX_RECENT_BPS",
+        "LIVE_QUIET_CONTINUATION_MAX_3M_ABS_BPS",
+        "LIVE_QUIET_CONTINUATION_MAX_5M_ABS_BPS",
+        "LIVE_QUIET_CONTINUATION_MAX_5M_RANGE_BPS",
+        "LIVE_QUIET_CONTINUATION_BLOCK_DECELERATION",
+        "LIVE_QUIET_CONTINUATION_BLOCK_NEAR_EXTREME",
+        "LIVE_QUIET_CONTINUATION_MIN_DISTANCE_FROM_EXTREME_BPS",
+        "LIVE_EXHAUSTION_GUARD_ENABLED",
+        "LIVE_EXHAUSTION_BURST_3M_BPS",
+        "LIVE_EXHAUSTION_BURST_5M_BPS",
+        "LIVE_EXHAUSTION_NEAR_EXTREME_BPS",
+        "LIVE_EXHAUSTION_DECELERATION_RECENT_BPS",
+        "LIVE_EXHAUSTION_STRICT_PRODUCTS",
+        "LIVE_EXHAUSTION_STRICT_BURST_3M_BPS",
+        "LIVE_EARLY_MOMENTUM_ENABLED",
+        "LIVE_EARLY_MOMENTUM_MIN_RECENT_BPS",
+        "LIVE_EARLY_MOMENTUM_MAX_3M_BURST_BPS",
+        "LIVE_EARLY_MOMENTUM_MAX_ENTRY_PRICE",
+        "LIVE_EV_MAX_ACTUAL_COST",
+        "LIVE_EV_MIN_REWARD_DOLLARS",
+        "LIVE_EV_REQUIRE_POSITIVE_COST_EXPECTED_VALUE",
+        "LIVE_EV_EXHAUSTION_BLOCK_ENABLED",
         "LIVE_CANDIDATE_FUNNEL_DIAGNOSTICS_ENABLED",
         "RUNNER_ENABLED",
         "RUNNER_LOOP_INTERVAL_SECONDS",

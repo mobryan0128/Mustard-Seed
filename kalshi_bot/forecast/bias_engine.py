@@ -70,6 +70,12 @@ class BiasState:
     lookback_abs_bps: Decimal | None = None
     recent_threshold_gap_bps: Decimal | None = None
     lookback_threshold_gap_bps: Decimal | None = None
+    recent_3m_return_bps: Decimal | None = None
+    recent_5m_return_bps: Decimal | None = None
+    recent_3m_range_bps: Decimal | None = None
+    recent_5m_range_bps: Decimal | None = None
+    distance_to_recent_high_bps: Decimal | None = None
+    distance_to_recent_low_bps: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -161,6 +167,29 @@ class BiasEngine:
             lookback_return_bps = _compute_return_bps(history, history[0] if history else None)
             recent_anchor = _recent_anchor(history, self._recent_window)
             recent_return_bps = _compute_return_bps(history, recent_anchor)
+            recent_3m_return_bps = _window_return_bps(
+                history,
+                window=timedelta(minutes=3),
+            )
+            recent_5m_return_bps = _window_return_bps(
+                history,
+                window=timedelta(minutes=5),
+            )
+            recent_3m_range_bps = _window_range_bps(
+                history,
+                window=timedelta(minutes=3),
+            )
+            recent_5m_range_bps = _window_range_bps(
+                history,
+                window=timedelta(minutes=5),
+            )
+            (
+                distance_to_recent_high_bps,
+                distance_to_recent_low_bps,
+            ) = _distance_to_recent_extremes_bps(
+                history,
+                window=timedelta(minutes=5),
+            )
             impulse_diagnostics = _impulse_diagnostics(
                 history,
                 min_abs_bps=self._impulse_min_abs_bps,
@@ -225,6 +254,12 @@ class BiasEngine:
                     lookback_return_bps,
                     threshold_bps=self._chop_threshold_bps,
                 ),
+                recent_3m_return_bps=recent_3m_return_bps,
+                recent_5m_return_bps=recent_5m_return_bps,
+                recent_3m_range_bps=recent_3m_range_bps,
+                recent_5m_range_bps=recent_5m_range_bps,
+                distance_to_recent_high_bps=distance_to_recent_high_bps,
+                distance_to_recent_low_bps=distance_to_recent_low_bps,
             )
 
         self._latest_snapshot = BiasSnapshot(products=products)
@@ -444,6 +479,64 @@ def _compute_return_bps(
     return ((latest.price - anchor.price) / anchor.price * BASIS_POINTS_MULTIPLIER).quantize(
         Decimal("0.001")
     )
+
+
+def _window_return_bps(
+    history: Deque[PriceObservation],
+    *,
+    window: timedelta,
+) -> Decimal | None:
+    return _compute_return_bps(history, _recent_anchor(history, window))
+
+
+def _window_observations(
+    history: Deque[PriceObservation],
+    *,
+    window: timedelta,
+) -> tuple[PriceObservation, ...]:
+    if not history:
+        return ()
+    latest = history[-1]
+    cutoff = latest.observed_at - window
+    return tuple(observation for observation in history if observation.observed_at >= cutoff)
+
+
+def _window_range_bps(
+    history: Deque[PriceObservation],
+    *,
+    window: timedelta,
+) -> Decimal | None:
+    observations = _window_observations(history, window=window)
+    if len(observations) < 2:
+        return None
+    low = min(observation.price for observation in observations)
+    high = max(observation.price for observation in observations)
+    latest = observations[-1].price
+    if latest <= 0:
+        raise BiasEngineError("Latest price must be greater than zero.")
+    return ((high - low) / latest * BASIS_POINTS_MULTIPLIER).quantize(Decimal("0.001"))
+
+
+def _distance_to_recent_extremes_bps(
+    history: Deque[PriceObservation],
+    *,
+    window: timedelta,
+) -> tuple[Decimal | None, Decimal | None]:
+    observations = _window_observations(history, window=window)
+    if len(observations) < 2:
+        return None, None
+    latest = observations[-1].price
+    if latest <= 0:
+        raise BiasEngineError("Latest price must be greater than zero.")
+    low = min(observation.price for observation in observations)
+    high = max(observation.price for observation in observations)
+    distance_to_high = ((high - latest) / latest * BASIS_POINTS_MULTIPLIER).quantize(
+        Decimal("0.001")
+    )
+    distance_to_low = ((latest - low) / latest * BASIS_POINTS_MULTIPLIER).quantize(
+        Decimal("0.001")
+    )
+    return distance_to_high, distance_to_low
 
 
 def _absolute_return_bps(value: Decimal | None) -> Decimal | None:

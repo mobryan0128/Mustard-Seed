@@ -18,6 +18,7 @@ from kalshi_bot.contracts.contract_scanner import (
     ContractScanSnapshot,
     ContractScanner,
     ContractScannerError,
+    scanner_live_settings_kwargs,
 )
 from kalshi_bot.execution.execution_engine import (
     SimulationExecutionEngine,
@@ -94,6 +95,19 @@ class SkippedContractDiagnostic:
     lookback_abs_bps: Decimal | None
     recent_threshold_gap_bps: Decimal | None
     lookback_threshold_gap_bps: Decimal | None
+    recent_3m_return_bps: Decimal | None
+    recent_5m_return_bps: Decimal | None
+    recent_3m_range_bps: Decimal | None
+    recent_5m_range_bps: Decimal | None
+    distance_to_recent_high_bps: Decimal | None
+    distance_to_recent_low_bps: Decimal | None
+    range_expansion_status: str | None
+    momentum_deceleration_status: str | None
+    exhaustion_status: str | None
+    early_momentum_status: str | None
+    late_entry_risk_status: str | None
+    quiet_continuation_allowed_reason: str | None
+    quiet_continuation_block_reason: str | None
 
 
 @dataclass(frozen=True)
@@ -123,6 +137,12 @@ class BiasDiagnostic:
     lookback_abs_bps: Decimal | None
     recent_threshold_gap_bps: Decimal | None
     lookback_threshold_gap_bps: Decimal | None
+    recent_3m_return_bps: Decimal | None
+    recent_5m_return_bps: Decimal | None
+    recent_3m_range_bps: Decimal | None
+    recent_5m_range_bps: Decimal | None
+    distance_to_recent_high_bps: Decimal | None
+    distance_to_recent_low_bps: Decimal | None
 
 
 @dataclass(frozen=True)
@@ -757,12 +777,7 @@ class KalshiBotRunner:
             ContractScanner(
                 product_markets=next_product_markets,
                 market_metadata_by_ticker=self._market_metadata_by_ticker,
-                quiet_continuation_enabled=(
-                    self._settings.live_quiet_continuation_enabled
-                ),
-                quiet_continuation_max_required_bps_per_minute=(
-                    self._settings.live_max_required_bps_per_minute
-                ),
+                **scanner_live_settings_kwargs(self._settings),
             )
             if next_product_markets
             else None
@@ -1382,6 +1397,21 @@ def _skipped_contract_diagnostics(
             lookback_abs_bps=contract.lookback_abs_bps,
             recent_threshold_gap_bps=contract.recent_threshold_gap_bps,
             lookback_threshold_gap_bps=contract.lookback_threshold_gap_bps,
+            recent_3m_return_bps=contract.recent_3m_return_bps,
+            recent_5m_return_bps=contract.recent_5m_return_bps,
+            recent_3m_range_bps=contract.recent_3m_range_bps,
+            recent_5m_range_bps=contract.recent_5m_range_bps,
+            distance_to_recent_high_bps=contract.distance_to_recent_high_bps,
+            distance_to_recent_low_bps=contract.distance_to_recent_low_bps,
+            range_expansion_status=contract.range_expansion_status,
+            momentum_deceleration_status=contract.momentum_deceleration_status,
+            exhaustion_status=contract.exhaustion_status,
+            early_momentum_status=contract.early_momentum_status,
+            late_entry_risk_status=contract.late_entry_risk_status,
+            quiet_continuation_allowed_reason=(
+                contract.quiet_continuation_allowed_reason
+            ),
+            quiet_continuation_block_reason=contract.quiet_continuation_block_reason,
         )
         for contract in contract_scan_snapshot.skipped_contracts[:10]
     )
@@ -1450,6 +1480,24 @@ def _bias_diagnostics(
                 ),
                 lookback_threshold_gap_bps=(
                     state.lookback_threshold_gap_bps if state is not None else None
+                ),
+                recent_3m_return_bps=(
+                    state.recent_3m_return_bps if state is not None else None
+                ),
+                recent_5m_return_bps=(
+                    state.recent_5m_return_bps if state is not None else None
+                ),
+                recent_3m_range_bps=(
+                    state.recent_3m_range_bps if state is not None else None
+                ),
+                recent_5m_range_bps=(
+                    state.recent_5m_range_bps if state is not None else None
+                ),
+                distance_to_recent_high_bps=(
+                    state.distance_to_recent_high_bps if state is not None else None
+                ),
+                distance_to_recent_low_bps=(
+                    state.distance_to_recent_low_bps if state is not None else None
                 ),
             )
         )
@@ -1576,6 +1624,23 @@ def _candidate_funnel_diagnostic_payloads(
             "side_currently_itm": contract.side_currently_itm,
             "side_needs_cross": contract.side_needs_cross,
             "required_bps_per_minute": contract.required_bps_per_minute,
+            "recent_3m_return_bps": contract.recent_3m_return_bps,
+            "recent_5m_return_bps": contract.recent_5m_return_bps,
+            "recent_3m_range_bps": contract.recent_3m_range_bps,
+            "recent_5m_range_bps": contract.recent_5m_range_bps,
+            "distance_to_recent_high_bps": contract.distance_to_recent_high_bps,
+            "distance_to_recent_low_bps": contract.distance_to_recent_low_bps,
+            "range_expansion_status": contract.range_expansion_status,
+            "momentum_deceleration_status": contract.momentum_deceleration_status,
+            "exhaustion_status": contract.exhaustion_status,
+            "early_momentum_status": contract.early_momentum_status,
+            "late_entry_risk_status": contract.late_entry_risk_status,
+            "quiet_continuation_allowed_reason": (
+                contract.quiet_continuation_allowed_reason
+            ),
+            "quiet_continuation_block_reason": (
+                contract.quiet_continuation_block_reason
+            ),
         }
         for contract in contract_scan_snapshot.ranked_contracts[:10]
     )
@@ -1596,6 +1661,23 @@ def _candidate_funnel_diagnostic_payloads(
             "side_needs_cross": contract.side_needs_cross,
             "required_bps_per_minute": contract.required_bps_per_minute,
             "feasibility_status": contract.feasibility_status,
+            "recent_3m_return_bps": contract.recent_3m_return_bps,
+            "recent_5m_return_bps": contract.recent_5m_return_bps,
+            "recent_3m_range_bps": contract.recent_3m_range_bps,
+            "recent_5m_range_bps": contract.recent_5m_range_bps,
+            "distance_to_recent_high_bps": contract.distance_to_recent_high_bps,
+            "distance_to_recent_low_bps": contract.distance_to_recent_low_bps,
+            "range_expansion_status": contract.range_expansion_status,
+            "momentum_deceleration_status": contract.momentum_deceleration_status,
+            "exhaustion_status": contract.exhaustion_status,
+            "early_momentum_status": contract.early_momentum_status,
+            "late_entry_risk_status": contract.late_entry_risk_status,
+            "quiet_continuation_allowed_reason": (
+                contract.quiet_continuation_allowed_reason
+            ),
+            "quiet_continuation_block_reason": (
+                contract.quiet_continuation_block_reason
+            ),
         }
         for contract in contract_scan_snapshot.skipped_contracts[:10]
     )
@@ -1642,6 +1724,21 @@ def _skipped_contract_diagnostic_payloads(
             "lookback_abs_bps": item.lookback_abs_bps,
             "recent_threshold_gap_bps": item.recent_threshold_gap_bps,
             "lookback_threshold_gap_bps": item.lookback_threshold_gap_bps,
+            "recent_3m_return_bps": item.recent_3m_return_bps,
+            "recent_5m_return_bps": item.recent_5m_return_bps,
+            "recent_3m_range_bps": item.recent_3m_range_bps,
+            "recent_5m_range_bps": item.recent_5m_range_bps,
+            "distance_to_recent_high_bps": item.distance_to_recent_high_bps,
+            "distance_to_recent_low_bps": item.distance_to_recent_low_bps,
+            "range_expansion_status": item.range_expansion_status,
+            "momentum_deceleration_status": item.momentum_deceleration_status,
+            "exhaustion_status": item.exhaustion_status,
+            "early_momentum_status": item.early_momentum_status,
+            "late_entry_risk_status": item.late_entry_risk_status,
+            "quiet_continuation_allowed_reason": (
+                item.quiet_continuation_allowed_reason
+            ),
+            "quiet_continuation_block_reason": item.quiet_continuation_block_reason,
         }
         for item in diagnostics
     )
@@ -1675,6 +1772,12 @@ def _bias_diagnostic_payloads(
             "lookback_abs_bps": item.lookback_abs_bps,
             "recent_threshold_gap_bps": item.recent_threshold_gap_bps,
             "lookback_threshold_gap_bps": item.lookback_threshold_gap_bps,
+            "recent_3m_return_bps": item.recent_3m_return_bps,
+            "recent_5m_return_bps": item.recent_5m_return_bps,
+            "recent_3m_range_bps": item.recent_3m_range_bps,
+            "recent_5m_range_bps": item.recent_5m_range_bps,
+            "distance_to_recent_high_bps": item.distance_to_recent_high_bps,
+            "distance_to_recent_low_bps": item.distance_to_recent_low_bps,
         }
         for item in diagnostics
     )

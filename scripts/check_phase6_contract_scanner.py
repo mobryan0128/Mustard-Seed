@@ -104,8 +104,11 @@ def _run_fixtures(scanner: ContractScanner) -> list[str]:
     failures.extend(_validate_neutral_exhaustion_skip_diagnostics())
     failures.extend(_validate_quiet_continuation_disabled_by_default())
     failures.extend(_validate_quiet_continuation_itm_no_cross_ranks())
+    failures.extend(_validate_quiet_continuation_large_burst_blocks())
+    failures.extend(_validate_quiet_continuation_near_extreme_blocks())
     failures.extend(_validate_quiet_continuation_needs_cross_blocks())
     failures.extend(_validate_quiet_continuation_ignores_reversal())
+    failures.extend(_validate_exhaustion_guard_blocks_burst_deceleration())
     return failures
 
 
@@ -1101,6 +1104,59 @@ def _validate_quiet_continuation_needs_cross_blocks() -> list[str]:
     return []
 
 
+def _validate_quiet_continuation_large_burst_blocks() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=5),
+                "target_price": Decimal("99"),
+                "target_price_source": "target_price",
+            }
+        },
+        quiet_continuation_enabled=True,
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=_quiet_continuation_bias_snapshot(
+            recent_3m_return_bps=Decimal("25.000"),
+            recent_5m_return_bps=Decimal("30.000"),
+        ),
+        market_snapshot=_base_market_snapshot(),
+    )
+    if snapshot.ranked_contracts:
+        return [f"quiet burst ranked={snapshot.ranked_contracts}"]
+    skipped = snapshot.skipped_contracts[0]
+    if skipped.reason != "quiet_continuation_3m_burst_too_large":
+        return [f"quiet burst reason={skipped.reason}"]
+    return []
+
+
+def _validate_quiet_continuation_near_extreme_blocks() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=5),
+                "target_price": Decimal("99"),
+                "target_price_source": "target_price",
+            }
+        },
+        quiet_continuation_enabled=True,
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=_quiet_continuation_bias_snapshot(
+            distance_to_recent_high_bps=Decimal("2.000"),
+        ),
+        market_snapshot=_base_market_snapshot(),
+    )
+    if snapshot.ranked_contracts:
+        return [f"quiet near extreme ranked={snapshot.ranked_contracts}"]
+    skipped = snapshot.skipped_contracts[0]
+    if skipped.reason != "quiet_continuation_near_recent_extreme":
+        return [f"quiet near extreme reason={skipped.reason}"]
+    return []
+
+
 def _validate_quiet_continuation_ignores_reversal() -> list[str]:
     scanner = ContractScanner(
         product_markets={"BTC-USD": ("KXBTC-1",)},
@@ -1122,6 +1178,61 @@ def _validate_quiet_continuation_ignores_reversal() -> list[str]:
     skipped = snapshot.skipped_contracts[0]
     if skipped.reason != "neutral_bias":
         return [f"quiet reversal reason={skipped.reason}"]
+    return []
+
+
+def _validate_exhaustion_guard_blocks_burst_deceleration() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"HYPE-USD": ("KXHYPE-1",)},
+        market_metadata_by_ticker={
+            "KXHYPE-1": {
+                "close_time": _future_iso(minutes=5),
+                "target_price": Decimal("99"),
+                "target_price_source": "target_price",
+            }
+        },
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=BiasSnapshot(
+            products={
+                "HYPE-USD": BiasState(
+                    product_id="HYPE-USD",
+                    direction="up",
+                    confidence=70,
+                    structure="trend",
+                    risk_flags=BiasRiskFlags(
+                        insufficient_history=False,
+                        stale_data=False,
+                        time_sync_failed=False,
+                    ),
+                    latest_price=Decimal("100"),
+                    lookback_return_bps=Decimal("40.000"),
+                    recent_return_bps=Decimal("4.000"),
+                    recent_3m_return_bps=Decimal("18.000"),
+                    recent_5m_return_bps=Decimal("25.000"),
+                    recent_5m_range_bps=Decimal("35.000"),
+                    distance_to_recent_high_bps=Decimal("1.000"),
+                    distance_to_recent_low_bps=Decimal("30.000"),
+                    observation_count=50,
+                    as_of="2026-04-23T12:00:00+00:00",
+                    classification_reason="aligned_trend",
+                    chop_threshold_bps=Decimal("10"),
+                )
+            }
+        ),
+        market_snapshot=MarketStateSnapshot(
+            tickers={
+                "KXHYPE-1": _base_market_snapshot().tickers["KXBTC-1"],
+            },
+            orderbooks={},
+            last_sequence_by_sid={},
+        ),
+    )
+    if snapshot.ranked_contracts:
+        return [f"exhaustion ranked={snapshot.ranked_contracts}"]
+    skipped = snapshot.skipped_contracts[0]
+    if skipped.reason != "exhaustion_guard_blocked":
+        return [f"exhaustion reason={skipped.reason}"]
     return []
 
 
@@ -1164,7 +1275,14 @@ def _base_bias_snapshot() -> BiasSnapshot:
     )
 
 
-def _quiet_continuation_bias_snapshot(*, structure: str = "exhaustion") -> BiasSnapshot:
+def _quiet_continuation_bias_snapshot(
+    *,
+    structure: str = "exhaustion",
+    recent_3m_return_bps: Decimal = Decimal("8.000"),
+    recent_5m_return_bps: Decimal = Decimal("12.000"),
+    recent_5m_range_bps: Decimal = Decimal("15.000"),
+    distance_to_recent_high_bps: Decimal = Decimal("10.000"),
+) -> BiasSnapshot:
     return BiasSnapshot(
         products={
             "BTC-USD": BiasState(
@@ -1190,6 +1308,12 @@ def _quiet_continuation_bias_snapshot(*, structure: str = "exhaustion") -> BiasS
                 lookback_abs_bps=Decimal("30.000"),
                 recent_threshold_gap_bps=Decimal("-5.000"),
                 lookback_threshold_gap_bps=Decimal("20.000"),
+                recent_3m_return_bps=recent_3m_return_bps,
+                recent_5m_return_bps=recent_5m_return_bps,
+                recent_3m_range_bps=Decimal("12.000"),
+                recent_5m_range_bps=recent_5m_range_bps,
+                distance_to_recent_high_bps=distance_to_recent_high_bps,
+                distance_to_recent_low_bps=Decimal("20.000"),
             )
         }
     )

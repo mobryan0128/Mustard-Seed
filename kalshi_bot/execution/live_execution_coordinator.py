@@ -171,6 +171,10 @@ class EVFilterStatus:
     estimated_reward: Decimal | None
     estimated_risk: Decimal | None
     cost_expected_value: Decimal | None
+    actual_cost_status: str | None
+    reward_status: str | None
+    cost_expected_value_status: str | None
+    ev_exhaustion_status: str | None
     score: Decimal | None
     score_basis: str | None
     matched_candidate: str | None
@@ -444,6 +448,22 @@ class LiveExecutionCoordinator:
                     "required_bps_per_minute": getattr(
                         contract,
                         "required_bps_per_minute",
+                        None,
+                    ),
+                    "exhaustion_status": getattr(contract, "exhaustion_status", None),
+                    "early_momentum_status": getattr(
+                        contract,
+                        "early_momentum_status",
+                        None,
+                    ),
+                    "late_entry_risk_status": getattr(
+                        contract,
+                        "late_entry_risk_status",
+                        None,
+                    ),
+                    "quiet_continuation_block_reason": getattr(
+                        contract,
+                        "quiet_continuation_block_reason",
                         None,
                     ),
                 }
@@ -2706,6 +2726,20 @@ def _mid_price_confirmation_status(
             price_band_max=band_max,
             block_reason=None,
         )
+    if (
+        getattr(settings, "live_early_momentum_enabled", True)
+        and getattr(contract, "early_momentum_status", None) == "confirmed"
+        and getattr(contract, "exhaustion_status", None) != "blocked"
+        and pricing.intent_price_dollars
+        <= getattr(settings, "live_early_momentum_max_entry_price", Decimal("0.50"))
+    ):
+        return MidPriceConfirmationStatus(
+            allowed=True,
+            status="allowed_early_momentum",
+            price_band_min=band_min,
+            price_band_max=band_max,
+            block_reason=None,
+        )
     if reversal_cross_hold.status == "confirmed":
         return MidPriceConfirmationStatus(
             allowed=True,
@@ -2759,6 +2793,10 @@ def _ev_filter_status(
             estimated_reward=None,
             estimated_risk=None,
             cost_expected_value=None,
+            actual_cost_status=None,
+            reward_status=None,
+            cost_expected_value_status=None,
+            ev_exhaustion_status=None,
             score=None,
             score_basis=None,
             matched_candidate=None,
@@ -2905,16 +2943,67 @@ def _ev_filter_status(
         if probability is not None
         else None
     )
+    actual_cost_status = (
+        "within_limit"
+        if cost_price <= getattr(settings, "live_ev_max_actual_cost", Decimal("0.70"))
+        else "above_limit"
+    )
+    reward_status = (
+        "within_limit"
+        if estimated_reward
+        >= getattr(settings, "live_ev_min_reward_dollars", Decimal("0.30"))
+        else "below_limit"
+    )
+    if cost_expected_value is None:
+        cost_expected_value_status = "missing"
+    elif (
+        getattr(settings, "live_ev_require_positive_cost_expected_value", True)
+        and cost_expected_value < Decimal("0")
+    ):
+        cost_expected_value_status = "negative"
+    elif cost_expected_value < Decimal("0"):
+        cost_expected_value_status = "not_required_negative"
+    else:
+        cost_expected_value_status = "non_negative"
+    ev_exhaustion_status = getattr(contract, "exhaustion_status", None)
+    exhaustion_ok = not (
+        getattr(settings, "live_ev_exhaustion_block_enabled", True)
+        and ev_exhaustion_status == "blocked"
+    )
+    actual_cost_ok = actual_cost_status == "within_limit"
+    reward_ok = reward_status == "within_limit"
+    cost_ev_ok = cost_expected_value_status in {
+        "non_negative",
+        "not_required_negative",
+    }
     min_ev = getattr(settings, "live_min_expected_value", Decimal("0.00"))
     score_ok = score is not None and score >= min_ev
-    if score_ok:
+    if score_ok and actual_cost_ok and reward_ok and cost_ev_ok and exhaustion_ok:
         matched.append("ev_score_at_or_above_minimum")
 
     missing = tuple(
         condition for condition in required_conditions if condition not in matched
     )
-    if not score_ok or not (candidate_a_match or candidate_b_match):
-        block_reason = f"missing_{missing[0]}" if missing else "candidate_not_matched"
+    if (
+        not score_ok
+        or not actual_cost_ok
+        or not reward_ok
+        or not cost_ev_ok
+        or not exhaustion_ok
+        or not (candidate_a_match or candidate_b_match)
+    ):
+        if not (candidate_a_match or candidate_b_match):
+            block_reason = f"missing_{missing[0]}" if missing else "candidate_not_matched"
+        elif not actual_cost_ok:
+            block_reason = "actual_cost_above_limit"
+        elif not reward_ok:
+            block_reason = "reward_below_limit"
+        elif not cost_ev_ok:
+            block_reason = "negative_cost_expected_value"
+        elif not exhaustion_ok:
+            block_reason = "exhaustion_blocked"
+        else:
+            block_reason = "candidate_not_matched"
         return EVFilterStatus(
             allowed=False,
             status="blocked",
@@ -2931,6 +3020,10 @@ def _ev_filter_status(
             estimated_reward=estimated_reward,
             estimated_risk=estimated_risk,
             cost_expected_value=cost_expected_value,
+            actual_cost_status=actual_cost_status,
+            reward_status=reward_status,
+            cost_expected_value_status=cost_expected_value_status,
+            ev_exhaustion_status=ev_exhaustion_status,
             score=score,
             score_basis="market_probability_price",
             matched_candidate=matched_candidate,
@@ -2958,6 +3051,10 @@ def _ev_filter_status(
         estimated_reward=estimated_reward,
         estimated_risk=estimated_risk,
         cost_expected_value=cost_expected_value,
+        actual_cost_status=actual_cost_status,
+        reward_status=reward_status,
+        cost_expected_value_status=cost_expected_value_status,
+        ev_exhaustion_status=ev_exhaustion_status,
         score=score,
         score_basis="market_probability_price",
         matched_candidate=matched_candidate,
@@ -3064,6 +3161,13 @@ def _ev_filter_skip_reason(
         return "required_bps_per_minute_too_high"
     if ev_filter.block_reason == "missing_liquidity_present":
         return "executable_price_no_visible_liquidity"
+    if ev_filter.block_reason in {
+        "actual_cost_above_limit",
+        "reward_below_limit",
+        "negative_cost_expected_value",
+        "exhaustion_blocked",
+    }:
+        return f"ev_{ev_filter.block_reason}"
     return ev_filter.reason
 
 
@@ -3777,6 +3881,10 @@ def _ev_filter_payload(status: EVFilterStatus | None) -> dict[str, object]:
             "ev_estimated_reward": None,
             "ev_estimated_risk": None,
             "ev_cost_expected_value": None,
+            "ev_actual_cost_status": None,
+            "ev_reward_status": None,
+            "ev_cost_expected_value_status": None,
+            "ev_exhaustion_status": None,
             "ev_score": None,
             "ev_score_basis": None,
             "ev_block_reason": None,
@@ -3804,6 +3912,10 @@ def _ev_filter_payload(status: EVFilterStatus | None) -> dict[str, object]:
         "ev_estimated_reward": status.estimated_reward,
         "ev_estimated_risk": status.estimated_risk,
         "ev_cost_expected_value": status.cost_expected_value,
+        "ev_actual_cost_status": status.actual_cost_status,
+        "ev_reward_status": status.reward_status,
+        "ev_cost_expected_value_status": status.cost_expected_value_status,
+        "ev_exhaustion_status": status.ev_exhaustion_status,
         "ev_score": status.score,
         "ev_score_basis": status.score_basis,
         "ev_block_reason": status.block_reason,
@@ -3884,6 +3996,54 @@ def _signal_diagnostic_payload(contract: ScannedContract) -> dict[str, object]:
         "lookback_threshold_gap_bps": getattr(
             contract,
             "lookback_threshold_gap_bps",
+            None,
+        ),
+        "recent_3m_return_bps": getattr(contract, "recent_3m_return_bps", None),
+        "recent_5m_return_bps": getattr(contract, "recent_5m_return_bps", None),
+        "recent_3m_range_bps": getattr(contract, "recent_3m_range_bps", None),
+        "recent_5m_range_bps": getattr(contract, "recent_5m_range_bps", None),
+        "distance_to_recent_high_bps": getattr(
+            contract,
+            "distance_to_recent_high_bps",
+            None,
+        ),
+        "distance_to_recent_low_bps": getattr(
+            contract,
+            "distance_to_recent_low_bps",
+            None,
+        ),
+        "range_expansion_status": getattr(contract, "range_expansion_status", None),
+        "momentum_deceleration_status": getattr(
+            contract,
+            "momentum_deceleration_status",
+            None,
+        ),
+        "exhaustion_status": getattr(contract, "exhaustion_status", None),
+        "early_momentum_status": getattr(contract, "early_momentum_status", None),
+        "late_entry_risk_status": getattr(contract, "late_entry_risk_status", None),
+        "quiet_continuation_allowed_reason": getattr(
+            contract,
+            "quiet_continuation_allowed_reason",
+            None,
+        ),
+        "quiet_continuation_block_reason": getattr(
+            contract,
+            "quiet_continuation_block_reason",
+            None,
+        ),
+        "mean_reversion_candidate_status": getattr(
+            contract,
+            "mean_reversion_candidate_status",
+            None,
+        ),
+        "reversal_pullback_vs_true_reversal_status": getattr(
+            contract,
+            "reversal_pullback_vs_true_reversal_status",
+            None,
+        ),
+        "reversal_safe_low_price_status": getattr(
+            contract,
+            "reversal_safe_low_price_status",
             None,
         ),
     }
@@ -3969,6 +4129,66 @@ def _contract_scan_skip_diagnostics_payload(
                 "reversal_confirmation_status": getattr(
                     contract,
                     "reversal_confirmation_status",
+                    None,
+                ),
+                "recent_3m_return_bps": getattr(contract, "recent_3m_return_bps", None),
+                "recent_5m_return_bps": getattr(contract, "recent_5m_return_bps", None),
+                "recent_3m_range_bps": getattr(contract, "recent_3m_range_bps", None),
+                "recent_5m_range_bps": getattr(contract, "recent_5m_range_bps", None),
+                "distance_to_recent_high_bps": getattr(
+                    contract,
+                    "distance_to_recent_high_bps",
+                    None,
+                ),
+                "distance_to_recent_low_bps": getattr(
+                    contract,
+                    "distance_to_recent_low_bps",
+                    None,
+                ),
+                "range_expansion_status": getattr(
+                    contract,
+                    "range_expansion_status",
+                    None,
+                ),
+                "momentum_deceleration_status": getattr(
+                    contract,
+                    "momentum_deceleration_status",
+                    None,
+                ),
+                "exhaustion_status": getattr(contract, "exhaustion_status", None),
+                "early_momentum_status": getattr(
+                    contract,
+                    "early_momentum_status",
+                    None,
+                ),
+                "late_entry_risk_status": getattr(
+                    contract,
+                    "late_entry_risk_status",
+                    None,
+                ),
+                "quiet_continuation_allowed_reason": getattr(
+                    contract,
+                    "quiet_continuation_allowed_reason",
+                    None,
+                ),
+                "quiet_continuation_block_reason": getattr(
+                    contract,
+                    "quiet_continuation_block_reason",
+                    None,
+                ),
+                "mean_reversion_candidate_status": getattr(
+                    contract,
+                    "mean_reversion_candidate_status",
+                    None,
+                ),
+                "reversal_pullback_vs_true_reversal_status": getattr(
+                    contract,
+                    "reversal_pullback_vs_true_reversal_status",
+                    None,
+                ),
+                "reversal_safe_low_price_status": getattr(
+                    contract,
+                    "reversal_safe_low_price_status",
                     None,
                 ),
             }

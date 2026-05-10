@@ -103,6 +103,22 @@ class ScannedContract:
     lookback_abs_bps: Decimal | None = None
     recent_threshold_gap_bps: Decimal | None = None
     lookback_threshold_gap_bps: Decimal | None = None
+    recent_3m_return_bps: Decimal | None = None
+    recent_5m_return_bps: Decimal | None = None
+    recent_3m_range_bps: Decimal | None = None
+    recent_5m_range_bps: Decimal | None = None
+    distance_to_recent_high_bps: Decimal | None = None
+    distance_to_recent_low_bps: Decimal | None = None
+    range_expansion_status: str | None = None
+    momentum_deceleration_status: str | None = None
+    exhaustion_status: str | None = None
+    early_momentum_status: str | None = None
+    late_entry_risk_status: str | None = None
+    quiet_continuation_allowed_reason: str | None = None
+    quiet_continuation_block_reason: str | None = None
+    mean_reversion_candidate_status: str | None = None
+    reversal_pullback_vs_true_reversal_status: str | None = None
+    reversal_safe_low_price_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -149,6 +165,22 @@ class SkippedContract:
     lookback_abs_bps: Decimal | None = None
     recent_threshold_gap_bps: Decimal | None = None
     lookback_threshold_gap_bps: Decimal | None = None
+    recent_3m_return_bps: Decimal | None = None
+    recent_5m_return_bps: Decimal | None = None
+    recent_3m_range_bps: Decimal | None = None
+    recent_5m_range_bps: Decimal | None = None
+    distance_to_recent_high_bps: Decimal | None = None
+    distance_to_recent_low_bps: Decimal | None = None
+    range_expansion_status: str | None = None
+    momentum_deceleration_status: str | None = None
+    exhaustion_status: str | None = None
+    early_momentum_status: str | None = None
+    late_entry_risk_status: str | None = None
+    quiet_continuation_allowed_reason: str | None = None
+    quiet_continuation_block_reason: str | None = None
+    mean_reversion_candidate_status: str | None = None
+    reversal_pullback_vs_true_reversal_status: str | None = None
+    reversal_safe_low_price_status: str | None = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +201,27 @@ class ContractScanner:
         market_metadata_by_ticker: Mapping[str, Mapping[str, object]] | None = None,
         quiet_continuation_enabled: bool = False,
         quiet_continuation_max_required_bps_per_minute: Decimal = Decimal("0.25"),
+        quiet_continuation_max_recent_bps: Decimal = Decimal("6"),
+        quiet_continuation_max_3m_abs_bps: Decimal = Decimal("12"),
+        quiet_continuation_max_5m_abs_bps: Decimal = Decimal("20"),
+        quiet_continuation_max_5m_range_bps: Decimal = Decimal("25"),
+        quiet_continuation_block_deceleration: bool = True,
+        quiet_continuation_block_near_extreme: bool = True,
+        quiet_continuation_min_distance_from_extreme_bps: Decimal = Decimal("5"),
+        exhaustion_guard_enabled: bool = True,
+        exhaustion_burst_3m_bps: Decimal = Decimal("20"),
+        exhaustion_burst_5m_bps: Decimal = Decimal("30"),
+        exhaustion_near_extreme_bps: Decimal = Decimal("3"),
+        exhaustion_deceleration_recent_bps: Decimal = Decimal("8"),
+        exhaustion_strict_products: tuple[str, ...] = (
+            "HYPE-USD",
+            "ETH-USD",
+            "XRP-USD",
+        ),
+        exhaustion_strict_burst_3m_bps: Decimal = Decimal("15"),
+        early_momentum_enabled: bool = True,
+        early_momentum_min_recent_bps: Decimal = Decimal("15"),
+        early_momentum_max_3m_burst_bps: Decimal = Decimal("20"),
     ) -> None:
         normalized = {
             product_id.strip(): tuple(
@@ -190,6 +243,41 @@ class ContractScanner:
         self._quiet_continuation_max_required_bps_per_minute = Decimal(
             str(quiet_continuation_max_required_bps_per_minute)
         )
+        self._quiet_continuation_max_recent_bps = Decimal(
+            str(quiet_continuation_max_recent_bps)
+        )
+        self._quiet_continuation_max_3m_abs_bps = Decimal(
+            str(quiet_continuation_max_3m_abs_bps)
+        )
+        self._quiet_continuation_max_5m_abs_bps = Decimal(
+            str(quiet_continuation_max_5m_abs_bps)
+        )
+        self._quiet_continuation_max_5m_range_bps = Decimal(
+            str(quiet_continuation_max_5m_range_bps)
+        )
+        self._quiet_continuation_block_deceleration = quiet_continuation_block_deceleration
+        self._quiet_continuation_block_near_extreme = quiet_continuation_block_near_extreme
+        self._quiet_continuation_min_distance_from_extreme_bps = Decimal(
+            str(quiet_continuation_min_distance_from_extreme_bps)
+        )
+        self._exhaustion_guard_enabled = exhaustion_guard_enabled
+        self._exhaustion_burst_3m_bps = Decimal(str(exhaustion_burst_3m_bps))
+        self._exhaustion_burst_5m_bps = Decimal(str(exhaustion_burst_5m_bps))
+        self._exhaustion_near_extreme_bps = Decimal(str(exhaustion_near_extreme_bps))
+        self._exhaustion_deceleration_recent_bps = Decimal(
+            str(exhaustion_deceleration_recent_bps)
+        )
+        self._exhaustion_strict_products = tuple(
+            dict.fromkeys(product.upper() for product in exhaustion_strict_products)
+        )
+        self._exhaustion_strict_burst_3m_bps = Decimal(
+            str(exhaustion_strict_burst_3m_bps)
+        )
+        self._early_momentum_enabled = early_momentum_enabled
+        self._early_momentum_min_recent_bps = Decimal(str(early_momentum_min_recent_bps))
+        self._early_momentum_max_3m_burst_bps = Decimal(
+            str(early_momentum_max_3m_burst_bps)
+        )
 
     @classmethod
     def from_settings(cls, settings: KalshiSettings) -> "ContractScanner":
@@ -197,10 +285,7 @@ class ContractScanner:
             raise ContractScannerError("CONTRACT_SCANNER_PRODUCT_MARKETS_JSON is required.")
         return cls(
             product_markets=settings.contract_scanner_product_markets,
-            quiet_continuation_enabled=settings.live_quiet_continuation_enabled,
-            quiet_continuation_max_required_bps_per_minute=(
-                settings.live_max_required_bps_per_minute
-            ),
+            **scanner_live_settings_kwargs(settings),
         )
 
     def scan(
@@ -264,6 +349,11 @@ class ContractScanner:
                             ),
                         )
                         if quiet_skip_reason is None:
+                            quiet_skip_reason = self._quiet_continuation_signal_block_reason(
+                                product_id=product_id,
+                                bias_state=quiet_bias_state,
+                            )
+                        if quiet_skip_reason is None:
                             effective_bias_state = quiet_bias_state
                             skip_reason = None
                         else:
@@ -282,6 +372,11 @@ class ContractScanner:
                                     side_currently_itm=quiet_feasibility.side_currently_itm,
                                     side_needs_cross=quiet_feasibility.side_needs_cross,
                                     feasibility_status=quiet_feasibility.feasibility_status,
+                                    **self._signal_quality_fields(
+                                        product_id=product_id,
+                                        bias_state=quiet_bias_state,
+                                        quiet_continuation_block_reason=quiet_skip_reason,
+                                    ),
                                     **_bias_diagnostic_fields(quiet_bias_state),
                                 )
                             )
@@ -296,6 +391,10 @@ class ContractScanner:
                                 reason=skip_reason,
                                 contract_open_time=_optional_str_metadata(metadata, "open_time"),
                                 contract_close_time=_optional_str_metadata(metadata, "close_time"),
+                                **self._signal_quality_fields(
+                                    product_id=product_id,
+                                    bias_state=bias_state,
+                                ),
                                 **_bias_diagnostic_fields(bias_state),
                             )
                         )
@@ -340,6 +439,10 @@ class ContractScanner:
                     feasibility=feasibility,
                     signal_conflict_flags=signal_conflict_flags,
                 )
+                signal_quality_fields = self._signal_quality_fields(
+                    product_id=product_id,
+                    bias_state=effective_bias_state,
+                )
                 if feasibility_skip_reason is not None:
                     skipped_contracts.append(
                         SkippedContract(
@@ -360,6 +463,37 @@ class ContractScanner:
                             trend_confirmation_status=trend_confirmation_status,
                             signal_conflict_flags=signal_conflict_flags,
                             scanner_score_downgrade_reasons=(),
+                            **signal_quality_fields,
+                            **_bias_diagnostic_fields(effective_bias_state),
+                        )
+                    )
+                    continue
+                exhaustion_skip_reason = self._exhaustion_skip_reason(
+                    bias_state=effective_bias_state,
+                    feasibility=feasibility,
+                    signal_quality_fields=signal_quality_fields,
+                )
+                if exhaustion_skip_reason is not None:
+                    skipped_contracts.append(
+                        SkippedContract(
+                            product_id=product_id,
+                            market_ticker=market_ticker,
+                            reason=exhaustion_skip_reason,
+                            contract_open_time=_optional_str_metadata(metadata, "open_time"),
+                            contract_close_time=_optional_str_metadata(metadata, "close_time"),
+                            target_price=feasibility.target_price,
+                            target_price_source=feasibility.target_price_source,
+                            distance_to_target_bps=feasibility.distance_to_target_bps,
+                            time_remaining_seconds=feasibility.time_remaining_seconds,
+                            required_bps_per_minute=feasibility.required_bps_per_minute,
+                            side_currently_itm=feasibility.side_currently_itm,
+                            side_needs_cross=feasibility.side_needs_cross,
+                            feasibility_status=feasibility.feasibility_status,
+                            reversal_confirmation_status=reversal_confirmation_status,
+                            trend_confirmation_status=trend_confirmation_status,
+                            signal_conflict_flags=signal_conflict_flags,
+                            scanner_score_downgrade_reasons=("exhaustion_guard_blocked",),
+                            **signal_quality_fields,
                             **_bias_diagnostic_fields(effective_bias_state),
                         )
                     )
@@ -425,6 +559,7 @@ class ContractScanner:
                         contract_open_time=_optional_str_metadata(metadata, "open_time"),
                         contract_close_time=_optional_str_metadata(metadata, "close_time"),
                         contract_time_remaining_seconds=feasibility.time_remaining_seconds,
+                        **signal_quality_fields,
                         **_bias_threshold_diagnostic_fields(effective_bias_state),
                     )
                 )
@@ -435,6 +570,339 @@ class ContractScanner:
             ranked_contracts=tuple(ranked_contracts),
             skipped_contracts=tuple(skipped_contracts),
         )
+
+    def _signal_quality_fields(
+        self,
+        *,
+        product_id: str,
+        bias_state,  # noqa: ANN001
+        quiet_continuation_block_reason: str | None = None,
+    ) -> dict[str, object]:
+        if bias_state is None:
+            return {}
+        direction = getattr(bias_state, "direction", None)
+        range_status = _range_expansion_status(
+            getattr(bias_state, "recent_5m_range_bps", None),
+            threshold_bps=self._exhaustion_burst_5m_bps,
+        )
+        deceleration_status = _momentum_deceleration_status(
+            bias_state=bias_state,
+            direction=direction,
+            burst_3m_bps=self._product_exhaustion_burst_3m(product_id),
+            deceleration_recent_bps=self._exhaustion_deceleration_recent_bps,
+        )
+        near_extreme = _near_recent_extreme(
+            bias_state=bias_state,
+            direction=direction,
+            threshold_bps=self._exhaustion_near_extreme_bps,
+        )
+        exhaustion_status = _exhaustion_status(
+            guard_enabled=self._exhaustion_guard_enabled,
+            range_expansion_status=range_status,
+            momentum_deceleration_status=deceleration_status,
+            near_extreme=near_extreme,
+        )
+        early_status = _early_momentum_status(
+            enabled=self._early_momentum_enabled,
+            bias_state=bias_state,
+            direction=direction,
+            min_recent_bps=self._early_momentum_min_recent_bps,
+            max_3m_burst_bps=self._early_momentum_max_3m_burst_bps,
+            exhaustion_status=exhaustion_status,
+        )
+        late_entry_status = (
+            "exhaustion_risk"
+            if exhaustion_status == "blocked"
+            else "near_recent_extreme"
+            if near_extreme
+            else "clear"
+        )
+        quiet_allowed_reason = None
+        if str(getattr(bias_state, "classification_reason", "")).startswith(
+            "quiet_continuation_"
+        ) and quiet_continuation_block_reason is None:
+            quiet_allowed_reason = "stable_itm_no_cross"
+        return {
+            "range_expansion_status": range_status,
+            "momentum_deceleration_status": deceleration_status,
+            "exhaustion_status": exhaustion_status,
+            "early_momentum_status": early_status,
+            "late_entry_risk_status": late_entry_status,
+            "quiet_continuation_allowed_reason": quiet_allowed_reason,
+            "quiet_continuation_block_reason": quiet_continuation_block_reason,
+            "mean_reversion_candidate_status": _mean_reversion_candidate_status(
+                bias_state
+            ),
+            "reversal_pullback_vs_true_reversal_status": (
+                _reversal_pullback_vs_true_reversal_status(bias_state)
+            ),
+            "reversal_safe_low_price_status": "not_evaluated",
+        }
+
+    def _quiet_continuation_signal_block_reason(
+        self,
+        *,
+        product_id: str,
+        bias_state,  # noqa: ANN001
+    ) -> str | None:
+        direction = getattr(bias_state, "direction", None)
+        recent_return = _decimal_or_none(getattr(bias_state, "recent_return_bps", None))
+        recent_3m_return = _decimal_or_none(
+            getattr(bias_state, "recent_3m_return_bps", None)
+        )
+        recent_5m_return = _decimal_or_none(
+            getattr(bias_state, "recent_5m_return_bps", None)
+        )
+        recent_5m_range = _decimal_or_none(
+            getattr(bias_state, "recent_5m_range_bps", None)
+        )
+        direction_sign = _direction_sign(direction)
+        if direction_sign == 0:
+            return "quiet_continuation_direction_missing"
+        if recent_return is None:
+            return "quiet_continuation_recent_return_missing"
+        if abs(recent_return) > self._quiet_continuation_max_recent_bps:
+            return "quiet_continuation_recent_move_too_large"
+        if _sign(recent_return) not in {0, direction_sign} and abs(
+            recent_return
+        ) >= IMPULSE_CONFIRMATION_RETURN_BPS:
+            return "quiet_continuation_recent_opposite"
+        if (
+            recent_3m_return is not None
+            and _aligned_abs(recent_3m_return, direction) is not None
+            and _aligned_abs(recent_3m_return, direction)
+            > self._quiet_continuation_max_3m_abs_bps
+        ):
+            return "quiet_continuation_3m_burst_too_large"
+        if (
+            recent_5m_return is not None
+            and _aligned_abs(recent_5m_return, direction) is not None
+            and _aligned_abs(recent_5m_return, direction)
+            > self._quiet_continuation_max_5m_abs_bps
+        ):
+            return "quiet_continuation_5m_burst_too_large"
+        if (
+            recent_5m_range is not None
+            and recent_5m_range > self._quiet_continuation_max_5m_range_bps
+        ):
+            return "quiet_continuation_range_expanded"
+        if self._quiet_continuation_block_deceleration and (
+            _momentum_deceleration_status(
+                bias_state=bias_state,
+                direction=direction,
+                burst_3m_bps=self._product_exhaustion_burst_3m(product_id),
+                deceleration_recent_bps=self._exhaustion_deceleration_recent_bps,
+            )
+            == "decelerating_after_burst"
+        ):
+            return "quiet_continuation_decelerating_after_burst"
+        if self._quiet_continuation_block_near_extreme and _near_recent_extreme(
+            bias_state=bias_state,
+            direction=direction,
+            threshold_bps=self._quiet_continuation_min_distance_from_extreme_bps,
+        ):
+            return "quiet_continuation_near_recent_extreme"
+        return None
+
+    def _exhaustion_skip_reason(
+        self,
+        *,
+        bias_state,  # noqa: ANN001
+        feasibility: TargetFeasibility,
+        signal_quality_fields: Mapping[str, object],
+    ) -> str | None:
+        if not self._exhaustion_guard_enabled:
+            return None
+        if getattr(bias_state, "structure", None) != "trend":
+            return None
+        if bool(feasibility.side_needs_cross):
+            return None
+        if signal_quality_fields.get("exhaustion_status") == "blocked":
+            return "exhaustion_guard_blocked"
+        return None
+
+    def _product_exhaustion_burst_3m(self, product_id: str) -> Decimal:
+        if product_id.upper() in self._exhaustion_strict_products:
+            return self._exhaustion_strict_burst_3m_bps
+        return self._exhaustion_burst_3m_bps
+
+
+def scanner_live_settings_kwargs(settings: KalshiSettings) -> dict[str, object]:
+    return {
+        "quiet_continuation_enabled": settings.live_quiet_continuation_enabled,
+        "quiet_continuation_max_required_bps_per_minute": (
+            settings.live_max_required_bps_per_minute
+        ),
+        "quiet_continuation_max_recent_bps": (
+            settings.live_quiet_continuation_max_recent_bps
+        ),
+        "quiet_continuation_max_3m_abs_bps": (
+            settings.live_quiet_continuation_max_3m_abs_bps
+        ),
+        "quiet_continuation_max_5m_abs_bps": (
+            settings.live_quiet_continuation_max_5m_abs_bps
+        ),
+        "quiet_continuation_max_5m_range_bps": (
+            settings.live_quiet_continuation_max_5m_range_bps
+        ),
+        "quiet_continuation_block_deceleration": (
+            settings.live_quiet_continuation_block_deceleration
+        ),
+        "quiet_continuation_block_near_extreme": (
+            settings.live_quiet_continuation_block_near_extreme
+        ),
+        "quiet_continuation_min_distance_from_extreme_bps": (
+            settings.live_quiet_continuation_min_distance_from_extreme_bps
+        ),
+        "exhaustion_guard_enabled": settings.live_exhaustion_guard_enabled,
+        "exhaustion_burst_3m_bps": settings.live_exhaustion_burst_3m_bps,
+        "exhaustion_burst_5m_bps": settings.live_exhaustion_burst_5m_bps,
+        "exhaustion_near_extreme_bps": settings.live_exhaustion_near_extreme_bps,
+        "exhaustion_deceleration_recent_bps": (
+            settings.live_exhaustion_deceleration_recent_bps
+        ),
+        "exhaustion_strict_products": settings.live_exhaustion_strict_products,
+        "exhaustion_strict_burst_3m_bps": (
+            settings.live_exhaustion_strict_burst_3m_bps
+        ),
+        "early_momentum_enabled": settings.live_early_momentum_enabled,
+        "early_momentum_min_recent_bps": settings.live_early_momentum_min_recent_bps,
+        "early_momentum_max_3m_burst_bps": (
+            settings.live_early_momentum_max_3m_burst_bps
+        ),
+    }
+
+
+def _range_expansion_status(
+    recent_range_bps: Decimal | None,
+    *,
+    threshold_bps: Decimal,
+) -> str:
+    if recent_range_bps is None:
+        return "missing"
+    if recent_range_bps > threshold_bps:
+        return "expanded"
+    return "normal"
+
+
+def _momentum_deceleration_status(
+    *,
+    bias_state,  # noqa: ANN001
+    direction: str | None,
+    burst_3m_bps: Decimal,
+    deceleration_recent_bps: Decimal,
+) -> str:
+    recent_return = _decimal_or_none(getattr(bias_state, "recent_return_bps", None))
+    recent_3m_return = _decimal_or_none(
+        getattr(bias_state, "recent_3m_return_bps", None)
+    )
+    if recent_return is None or recent_3m_return is None:
+        return "missing"
+    aligned_3m = _aligned_abs(recent_3m_return, direction)
+    if aligned_3m is None or aligned_3m <= burst_3m_bps:
+        return "not_bursting"
+    direction_sign = _direction_sign(direction)
+    if _sign(recent_return) != direction_sign or abs(recent_return) <= deceleration_recent_bps:
+        return "decelerating_after_burst"
+    return "still_moving"
+
+
+def _exhaustion_status(
+    *,
+    guard_enabled: bool,
+    range_expansion_status: str,
+    momentum_deceleration_status: str,
+    near_extreme: bool,
+) -> str:
+    if not guard_enabled:
+        return "disabled"
+    if momentum_deceleration_status == "decelerating_after_burst":
+        return "blocked"
+    if range_expansion_status == "expanded" and near_extreme:
+        return "blocked"
+    if range_expansion_status == "missing" or momentum_deceleration_status == "missing":
+        return "missing_diagnostics"
+    return "clear"
+
+
+def _early_momentum_status(
+    *,
+    enabled: bool,
+    bias_state,  # noqa: ANN001
+    direction: str | None,
+    min_recent_bps: Decimal,
+    max_3m_burst_bps: Decimal,
+    exhaustion_status: str,
+) -> str:
+    if not enabled:
+        return "disabled"
+    if getattr(bias_state, "structure", None) != "trend":
+        return "not_trend"
+    recent_return = _decimal_or_none(getattr(bias_state, "recent_return_bps", None))
+    recent_3m_return = _decimal_or_none(
+        getattr(bias_state, "recent_3m_return_bps", None)
+    )
+    aligned_recent = _aligned_abs(recent_return, direction)
+    aligned_3m = _aligned_abs(recent_3m_return, direction)
+    if aligned_recent is None or aligned_recent < min_recent_bps:
+        return "recent_momentum_too_weak"
+    if aligned_3m is not None and aligned_3m > max_3m_burst_bps:
+        return "three_minute_burst_too_large"
+    if exhaustion_status == "blocked":
+        return "exhaustion_blocked"
+    return "confirmed"
+
+
+def _near_recent_extreme(
+    *,
+    bias_state,  # noqa: ANN001
+    direction: str | None,
+    threshold_bps: Decimal,
+) -> bool:
+    if direction == "up":
+        distance = _decimal_or_none(
+            getattr(bias_state, "distance_to_recent_high_bps", None)
+        )
+    elif direction == "down":
+        distance = _decimal_or_none(
+            getattr(bias_state, "distance_to_recent_low_bps", None)
+        )
+    else:
+        return False
+    return distance is not None and distance <= threshold_bps
+
+
+def _aligned_abs(value: Decimal | None, direction: str | None) -> Decimal | None:
+    if value is None:
+        return None
+    direction_sign = _direction_sign(direction)
+    if direction_sign == 0 or _sign(value) != direction_sign:
+        return None
+    return abs(value)
+
+
+def _decimal_or_none(value: object) -> Decimal | None:
+    if value is None:
+        return None
+    return Decimal(str(value))
+
+
+def _mean_reversion_candidate_status(bias_state) -> str:  # noqa: ANN001
+    if getattr(bias_state, "structure", None) != "reversal":
+        return "not_reversal"
+    return "diagnostic_only"
+
+
+def _reversal_pullback_vs_true_reversal_status(bias_state) -> str:  # noqa: ANN001
+    if getattr(bias_state, "structure", None) != "reversal":
+        return "not_reversal"
+    recent_return = _decimal_or_none(getattr(bias_state, "recent_return_bps", None))
+    impulse_return = _decimal_or_none(getattr(bias_state, "impulse_return_bps", None))
+    if recent_return is None:
+        return "recent_return_missing"
+    if impulse_return is not None and _sign(recent_return) != _sign(impulse_return):
+        return "pullback_or_retest"
+    return "unconfirmed_true_reversal"
 
 
 def _skip_reason(bias_state, ticker_state: TickerState) -> str | None:
@@ -543,6 +1011,20 @@ def _bias_diagnostic_fields(bias_state) -> dict[str, object]:  # noqa: ANN001
             "lookback_threshold_gap_bps",
             None,
         ),
+        "recent_3m_return_bps": getattr(bias_state, "recent_3m_return_bps", None),
+        "recent_5m_return_bps": getattr(bias_state, "recent_5m_return_bps", None),
+        "recent_3m_range_bps": getattr(bias_state, "recent_3m_range_bps", None),
+        "recent_5m_range_bps": getattr(bias_state, "recent_5m_range_bps", None),
+        "distance_to_recent_high_bps": getattr(
+            bias_state,
+            "distance_to_recent_high_bps",
+            None,
+        ),
+        "distance_to_recent_low_bps": getattr(
+            bias_state,
+            "distance_to_recent_low_bps",
+            None,
+        ),
     }
 
 
@@ -564,6 +1046,20 @@ def _bias_threshold_diagnostic_fields(bias_state) -> dict[str, object]:  # noqa:
         "lookback_threshold_gap_bps": getattr(
             bias_state,
             "lookback_threshold_gap_bps",
+            None,
+        ),
+        "recent_3m_return_bps": getattr(bias_state, "recent_3m_return_bps", None),
+        "recent_5m_return_bps": getattr(bias_state, "recent_5m_return_bps", None),
+        "recent_3m_range_bps": getattr(bias_state, "recent_3m_range_bps", None),
+        "recent_5m_range_bps": getattr(bias_state, "recent_5m_range_bps", None),
+        "distance_to_recent_high_bps": getattr(
+            bias_state,
+            "distance_to_recent_high_bps",
+            None,
+        ),
+        "distance_to_recent_low_bps": getattr(
+            bias_state,
+            "distance_to_recent_low_bps",
             None,
         ),
     }
