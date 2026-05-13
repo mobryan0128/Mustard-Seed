@@ -783,6 +783,9 @@ def _validate_ev_candidate_a_allows_five_to_three() -> list[str]:
                 log_directory=temp_path,
                 log_jsonl_enabled=True,
                 live_ev_filter_enabled=True,
+                live_ev_price_max_itm_no_cross_by_product={
+                    "BTC-USD": Decimal("0.60")
+                },
             ),
             risk_manager=_FixedEntryRiskManager(stake_dollars=Decimal("3.00")),
         )
@@ -821,6 +824,14 @@ def _validate_ev_candidate_a_allows_five_to_three() -> list[str]:
             failures.append(f"ev candidate A segment={payload.get('entry_segment')}")
         if payload.get("ev_filter_status") != "allowed":
             failures.append(f"ev candidate A status={payload.get('ev_filter_status')}")
+        if payload.get("ev_product_price_cap_used") != "0.60":
+            failures.append(
+                f"ev candidate A cap={payload.get('ev_product_price_cap_used')}"
+            )
+        if payload.get("ev_product_price_cap_source") != "product:BTC-USD":
+            failures.append(
+                f"ev candidate A cap source={payload.get('ev_product_price_cap_source')}"
+            )
         return failures
 
 
@@ -2453,6 +2464,7 @@ class _Settings:
     live_ev_filter_enabled: bool = False
     live_min_expected_value: Decimal = Decimal("0.00")
     live_ev_price_max_itm_no_cross: Decimal = Decimal("0.70")
+    live_ev_price_max_itm_no_cross_by_product: dict[str, Decimal] | None = None
     live_ev_price_max_needs_cross: Decimal = Decimal("0.30")
     live_ev_required_bps_max: Decimal = Decimal("0.25")
     live_ev_allowed_segments: tuple[str, ...] = ("10_to_5", "5_to_3")

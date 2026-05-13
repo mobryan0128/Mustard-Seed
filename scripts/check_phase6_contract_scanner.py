@@ -109,6 +109,10 @@ def _run_fixtures(scanner: ContractScanner) -> list[str]:
     failures.extend(_validate_quiet_continuation_needs_cross_blocks())
     failures.extend(_validate_quiet_continuation_ignores_reversal())
     failures.extend(_validate_exhaustion_guard_blocks_burst_deceleration())
+    failures.extend(_validate_weak_momentum_stabilization_allows_stable_itm())
+    failures.extend(_validate_weak_momentum_stabilization_blocks_near_strike_chop())
+    failures.extend(_validate_mini_exhaustion_downgrades_without_hard_block())
+    failures.extend(_validate_noise_cross_ignored_when_configured())
     return failures
 
 
@@ -1236,6 +1240,134 @@ def _validate_exhaustion_guard_blocks_burst_deceleration() -> list[str]:
     return []
 
 
+def _validate_weak_momentum_stabilization_allows_stable_itm() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=5),
+                "target_price": Decimal("99"),
+                "target_price_source": "target_price",
+            }
+        },
+        quiet_continuation_enabled=True,
+        weak_momentum_stabilization_min_distance=Decimal("-5"),
+        weak_momentum_max_range=Decimal("20"),
+        weak_momentum_max_price=Decimal("0.50"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=_quiet_continuation_bias_snapshot(),
+        market_snapshot=_base_market_snapshot(),
+    )
+    if len(snapshot.ranked_contracts) != 1:
+        return [f"weak stabilization ranked={snapshot.ranked_contracts}"]
+    contract = snapshot.ranked_contracts[0]
+    failures: list[str] = []
+    if contract.weak_momentum_stabilization_status != "allowed":
+        failures.append(
+            "weak stabilization status="
+            f"{contract.weak_momentum_stabilization_status}"
+        )
+    if contract.weak_momentum_stabilization_reason != "stable_itm_weak_momentum":
+        failures.append(
+            "weak stabilization reason="
+            f"{contract.weak_momentum_stabilization_reason}"
+        )
+    if "trend_weak_recent_return" in contract.scanner_score_downgrade_reasons:
+        failures.append(
+            f"weak stabilization downgrade={contract.scanner_score_downgrade_reasons}"
+        )
+    if "weak_momentum_stabilized" not in contract.scanner_score_bonus_reasons:
+        failures.append(f"weak stabilization bonuses={contract.scanner_score_bonus_reasons}")
+    return failures
+
+
+def _validate_weak_momentum_stabilization_blocks_near_strike_chop() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=5),
+                "target_price": Decimal("99.98"),
+                "target_price_source": "target_price",
+            }
+        },
+        quiet_continuation_enabled=True,
+        weak_momentum_stabilization_min_distance=Decimal("-5"),
+        weak_momentum_max_range=Decimal("20"),
+        weak_momentum_max_price=Decimal("0.50"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=_quiet_continuation_bias_snapshot(),
+        market_snapshot=_base_market_snapshot(),
+    )
+    if snapshot.ranked_contracts:
+        return [f"weak stabilization near-strike ranked={snapshot.ranked_contracts}"]
+    skipped = snapshot.skipped_contracts[0]
+    if skipped.reason != "weak_momentum_stabilization_distance_not_deep_enough_itm":
+        return [f"weak stabilization near-strike reason={skipped.reason}"]
+    return []
+
+
+def _validate_mini_exhaustion_downgrades_without_hard_block() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=5),
+                "target_price": Decimal("99.98"),
+                "target_price_source": "target_price",
+            }
+        },
+        mini_exhaustion_enabled=True,
+        mini_exhaustion_3m_bps=Decimal("12"),
+        mini_exhaustion_range_bps=Decimal("25"),
+        mini_exhaustion_recent_bps=Decimal("6"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=_mini_exhaustion_bias_snapshot(),
+        market_snapshot=_base_market_snapshot(),
+    )
+    if len(snapshot.ranked_contracts) != 1:
+        return [f"mini exhaustion ranked={snapshot.ranked_contracts}"]
+    contract = snapshot.ranked_contracts[0]
+    failures: list[str] = []
+    if contract.mini_exhaustion_status != "flagged":
+        failures.append(f"mini exhaustion status={contract.mini_exhaustion_status}")
+    if "mini_exhaustion" not in contract.scanner_score_downgrade_reasons:
+        failures.append(f"mini exhaustion downgrades={contract.scanner_score_downgrade_reasons}")
+    return failures
+
+
+def _validate_noise_cross_ignored_when_configured() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker={
+            "KXBTC-1": {
+                "close_time": _future_iso(minutes=5),
+                "target_price": Decimal("100.02"),
+                "target_price_source": "target_price",
+            }
+        },
+        min_cross_distance_bps=Decimal("3"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=_mini_exhaustion_bias_snapshot(),
+        market_snapshot=_base_market_snapshot(),
+    )
+    if len(snapshot.ranked_contracts) != 1:
+        return [f"noise cross ranked={snapshot.ranked_contracts}"]
+    contract = snapshot.ranked_contracts[0]
+    failures: list[str] = []
+    if contract.feasibility_status != "noise_cross_ignored":
+        failures.append(f"noise cross status={contract.feasibility_status}")
+    if contract.side_needs_cross is not False:
+        failures.append(f"noise cross side_needs_cross={contract.side_needs_cross}")
+    if contract.required_bps_per_minute != Decimal("0.000"):
+        failures.append(f"noise cross required={contract.required_bps_per_minute}")
+    return failures
+
+
 def _base_bias_snapshot() -> BiasSnapshot:
     return BiasSnapshot(
         products={
@@ -1271,6 +1403,43 @@ def _base_bias_snapshot() -> BiasSnapshot:
                 observation_count=45,
                 as_of="2026-04-23T12:00:05+00:00",
             ),
+        }
+    )
+
+
+def _mini_exhaustion_bias_snapshot() -> BiasSnapshot:
+    return BiasSnapshot(
+        products={
+            "BTC-USD": BiasState(
+                product_id="BTC-USD",
+                direction="up",
+                confidence=40,
+                structure="trend",
+                risk_flags=BiasRiskFlags(
+                    insufficient_history=False,
+                    stale_data=False,
+                    time_sync_failed=False,
+                ),
+                latest_price=Decimal("100"),
+                lookback_return_bps=Decimal("30.000"),
+                recent_return_bps=Decimal("7.000"),
+                observation_count=50,
+                as_of="2026-04-23T12:00:00+00:00",
+                classification_reason="aligned_trend",
+                chop_threshold_bps=Decimal("10"),
+                recent_window_seconds=60,
+                lookback_window_seconds=1800,
+                recent_abs_bps=Decimal("7.000"),
+                lookback_abs_bps=Decimal("30.000"),
+                recent_threshold_gap_bps=Decimal("-3.000"),
+                lookback_threshold_gap_bps=Decimal("20.000"),
+                recent_3m_return_bps=Decimal("10.000"),
+                recent_5m_return_bps=Decimal("12.000"),
+                recent_3m_range_bps=Decimal("12.000"),
+                recent_5m_range_bps=Decimal("30.000"),
+                distance_to_recent_high_bps=Decimal("10.000"),
+                distance_to_recent_low_bps=Decimal("20.000"),
+            )
         }
     )
 

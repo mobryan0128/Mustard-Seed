@@ -155,6 +155,16 @@ DEFAULT_LIVE_EV_MIN_REWARD_DOLLARS = Decimal("0.30")
 DEFAULT_LIVE_EV_REQUIRE_POSITIVE_COST_EXPECTED_VALUE = True
 DEFAULT_LIVE_EV_EXHAUSTION_BLOCK_ENABLED = True
 DEFAULT_LIVE_CANDIDATE_FUNNEL_DIAGNOSTICS_ENABLED = False
+DEFAULT_LIVE_WEAK_MOMENTUM_STABILIZATION_MIN_DISTANCE: Decimal | None = None
+DEFAULT_LIVE_WEAK_MOMENTUM_MAX_RANGE: Decimal | None = None
+DEFAULT_LIVE_WEAK_MOMENTUM_MAX_PRICE: Decimal | None = None
+DEFAULT_LIVE_MINI_EXHAUSTION_ENABLED = False
+DEFAULT_LIVE_MINI_EXHAUSTION_3M_BPS = Decimal("12")
+DEFAULT_LIVE_MINI_EXHAUSTION_RANGE_BPS = Decimal("25")
+DEFAULT_LIVE_MINI_EXHAUSTION_RECENT_BPS = Decimal("6")
+DEFAULT_LIVE_BIAS_RECENT_RETURN_MIN: Decimal | None = None
+DEFAULT_LIVE_BIAS_LOOKBACK_RETURN_MIN: Decimal | None = None
+DEFAULT_LIVE_MIN_CROSS_DISTANCE_BPS = Decimal("0")
 DEFAULT_RUNNER_ENABLED = True
 DEFAULT_RUNNER_LOOP_INTERVAL_SECONDS = 5.0
 DEFAULT_RUNNER_STATUS_LOG_EVERY_N_CYCLES = 1
@@ -292,6 +302,7 @@ class KalshiSettings:
     live_ev_filter_enabled: bool
     live_min_expected_value: Decimal
     live_ev_price_max_itm_no_cross: Decimal
+    live_ev_price_max_itm_no_cross_by_product: dict[str, Decimal]
     live_ev_price_max_needs_cross: Decimal
     live_ev_required_bps_max: Decimal
     live_ev_allowed_segments: tuple[str, ...]
@@ -334,6 +345,16 @@ class KalshiSettings:
     live_ev_require_positive_cost_expected_value: bool
     live_ev_exhaustion_block_enabled: bool
     live_candidate_funnel_diagnostics_enabled: bool
+    live_weak_momentum_stabilization_min_distance: Decimal | None
+    live_weak_momentum_max_range: Decimal | None
+    live_weak_momentum_max_price: Decimal | None
+    live_mini_exhaustion_enabled: bool
+    live_mini_exhaustion_3m_bps: Decimal
+    live_mini_exhaustion_range_bps: Decimal
+    live_mini_exhaustion_recent_bps: Decimal
+    live_bias_recent_return_min: Decimal | None
+    live_bias_lookback_return_min: Decimal | None
+    live_min_cross_distance_bps: Decimal
     runner_enabled: bool
     runner_loop_interval_seconds: float
     runner_status_log_every_n_cycles: int
@@ -782,6 +803,11 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         values.get("LIVE_EV_PRICE_MAX_ITM_NO_CROSS"),
         "LIVE_EV_PRICE_MAX_ITM_NO_CROSS",
     ) or DEFAULT_LIVE_EV_PRICE_MAX_ITM_NO_CROSS
+    live_ev_price_max_itm_no_cross_by_product = _parse_product_price_caps(
+        values,
+        prefix="LIVE_EV_PRICE_MAX_ITM_NO_CROSS",
+        products=DEFAULT_CRYPTO_FEED_PRODUCTS,
+    )
     live_ev_price_max_needs_cross = _parse_price_dollars(
         values.get("LIVE_EV_PRICE_MAX_NEEDS_CROSS"),
         "LIVE_EV_PRICE_MAX_NEEDS_CROSS",
@@ -985,6 +1011,51 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         values.get("LIVE_CANDIDATE_FUNNEL_DIAGNOSTICS_ENABLED"),
         DEFAULT_LIVE_CANDIDATE_FUNNEL_DIAGNOSTICS_ENABLED,
         "LIVE_CANDIDATE_FUNNEL_DIAGNOSTICS_ENABLED",
+    )
+    live_weak_momentum_stabilization_min_distance = _parse_optional_decimal(
+        values.get("LIVE_WEAK_MOMENTUM_STABILIZATION_MIN_DISTANCE"),
+        "LIVE_WEAK_MOMENTUM_STABILIZATION_MIN_DISTANCE",
+    )
+    live_weak_momentum_max_range = _parse_optional_positive_decimal(
+        values.get("LIVE_WEAK_MOMENTUM_MAX_RANGE"),
+        "LIVE_WEAK_MOMENTUM_MAX_RANGE",
+    )
+    live_weak_momentum_max_price = _parse_price_dollars(
+        values.get("LIVE_WEAK_MOMENTUM_MAX_PRICE"),
+        "LIVE_WEAK_MOMENTUM_MAX_PRICE",
+    )
+    live_mini_exhaustion_enabled = _parse_bool(
+        values.get("LIVE_MINI_EXHAUSTION_ENABLED"),
+        DEFAULT_LIVE_MINI_EXHAUSTION_ENABLED,
+        "LIVE_MINI_EXHAUSTION_ENABLED",
+    )
+    live_mini_exhaustion_3m_bps = _parse_positive_decimal(
+        values.get("LIVE_MINI_EXHAUSTION_3M_BPS"),
+        DEFAULT_LIVE_MINI_EXHAUSTION_3M_BPS,
+        "LIVE_MINI_EXHAUSTION_3M_BPS",
+    )
+    live_mini_exhaustion_range_bps = _parse_positive_decimal(
+        values.get("LIVE_MINI_EXHAUSTION_RANGE_BPS"),
+        DEFAULT_LIVE_MINI_EXHAUSTION_RANGE_BPS,
+        "LIVE_MINI_EXHAUSTION_RANGE_BPS",
+    )
+    live_mini_exhaustion_recent_bps = _parse_positive_decimal(
+        values.get("LIVE_MINI_EXHAUSTION_RECENT_BPS"),
+        DEFAULT_LIVE_MINI_EXHAUSTION_RECENT_BPS,
+        "LIVE_MINI_EXHAUSTION_RECENT_BPS",
+    )
+    live_bias_recent_return_min = _parse_optional_positive_decimal(
+        values.get("LIVE_BIAS_RECENT_RETURN_MIN"),
+        "LIVE_BIAS_RECENT_RETURN_MIN",
+    )
+    live_bias_lookback_return_min = _parse_optional_positive_decimal(
+        values.get("LIVE_BIAS_LOOKBACK_RETURN_MIN"),
+        "LIVE_BIAS_LOOKBACK_RETURN_MIN",
+    )
+    live_min_cross_distance_bps = _parse_non_negative_decimal(
+        values.get("LIVE_MIN_CROSS_DISTANCE_BPS"),
+        DEFAULT_LIVE_MIN_CROSS_DISTANCE_BPS,
+        "LIVE_MIN_CROSS_DISTANCE_BPS",
     )
     runner_enabled = _parse_bool(
         values.get("RUNNER_ENABLED"),
@@ -1242,6 +1313,9 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_ev_filter_enabled=live_ev_filter_enabled,
         live_min_expected_value=live_min_expected_value,
         live_ev_price_max_itm_no_cross=live_ev_price_max_itm_no_cross,
+        live_ev_price_max_itm_no_cross_by_product=(
+            live_ev_price_max_itm_no_cross_by_product
+        ),
         live_ev_price_max_needs_cross=live_ev_price_max_needs_cross,
         live_ev_required_bps_max=live_ev_required_bps_max,
         live_ev_allowed_segments=live_ev_allowed_segments,
@@ -1330,6 +1404,18 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_candidate_funnel_diagnostics_enabled=(
             live_candidate_funnel_diagnostics_enabled
         ),
+        live_weak_momentum_stabilization_min_distance=(
+            live_weak_momentum_stabilization_min_distance
+        ),
+        live_weak_momentum_max_range=live_weak_momentum_max_range,
+        live_weak_momentum_max_price=live_weak_momentum_max_price,
+        live_mini_exhaustion_enabled=live_mini_exhaustion_enabled,
+        live_mini_exhaustion_3m_bps=live_mini_exhaustion_3m_bps,
+        live_mini_exhaustion_range_bps=live_mini_exhaustion_range_bps,
+        live_mini_exhaustion_recent_bps=live_mini_exhaustion_recent_bps,
+        live_bias_recent_return_min=live_bias_recent_return_min,
+        live_bias_lookback_return_min=live_bias_lookback_return_min,
+        live_min_cross_distance_bps=live_min_cross_distance_bps,
         runner_enabled=runner_enabled,
         runner_loop_interval_seconds=runner_loop_interval_seconds,
         runner_status_log_every_n_cycles=runner_status_log_every_n_cycles,
@@ -1486,6 +1572,13 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_EV_FILTER_ENABLED",
         "LIVE_MIN_EXPECTED_VALUE",
         "LIVE_EV_PRICE_MAX_ITM_NO_CROSS",
+        "LIVE_EV_PRICE_MAX_ITM_NO_CROSS_BTC",
+        "LIVE_EV_PRICE_MAX_ITM_NO_CROSS_DOGE",
+        "LIVE_EV_PRICE_MAX_ITM_NO_CROSS_ETH",
+        "LIVE_EV_PRICE_MAX_ITM_NO_CROSS_SOL",
+        "LIVE_EV_PRICE_MAX_ITM_NO_CROSS_XRP",
+        "LIVE_EV_PRICE_MAX_ITM_NO_CROSS_HYPE",
+        "LIVE_EV_PRICE_MAX_ITM_NO_CROSS_BNB",
         "LIVE_EV_PRICE_MAX_NEEDS_CROSS",
         "LIVE_EV_REQUIRED_BPS_MAX",
         "LIVE_EV_ALLOWED_SEGMENTS",
@@ -1528,6 +1621,16 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_EV_REQUIRE_POSITIVE_COST_EXPECTED_VALUE",
         "LIVE_EV_EXHAUSTION_BLOCK_ENABLED",
         "LIVE_CANDIDATE_FUNNEL_DIAGNOSTICS_ENABLED",
+        "LIVE_WEAK_MOMENTUM_STABILIZATION_MIN_DISTANCE",
+        "LIVE_WEAK_MOMENTUM_MAX_RANGE",
+        "LIVE_WEAK_MOMENTUM_MAX_PRICE",
+        "LIVE_MINI_EXHAUSTION_ENABLED",
+        "LIVE_MINI_EXHAUSTION_3M_BPS",
+        "LIVE_MINI_EXHAUSTION_RANGE_BPS",
+        "LIVE_MINI_EXHAUSTION_RECENT_BPS",
+        "LIVE_BIAS_RECENT_RETURN_MIN",
+        "LIVE_BIAS_LOOKBACK_RETURN_MIN",
+        "LIVE_MIN_CROSS_DISTANCE_BPS",
         "RUNNER_ENABLED",
         "RUNNER_LOOP_INTERVAL_SECONDS",
         "RUNNER_STATUS_LOG_EVERY_N_CYCLES",
@@ -1668,6 +1771,22 @@ def _parse_price_dollars(value: str | None, key: str) -> Decimal | None:
     return parsed.quantize(Decimal("0.0001"))
 
 
+def _parse_product_price_caps(
+    values: dict[str, str],
+    *,
+    prefix: str,
+    products: tuple[str, ...],
+) -> dict[str, Decimal]:
+    caps: dict[str, Decimal] = {}
+    for product in products:
+        product_key = product.split("-", maxsplit=1)[0].upper()
+        env_key = f"{prefix}_{product_key}"
+        parsed = _parse_price_dollars(values.get(env_key), env_key)
+        if parsed is not None:
+            caps[product.upper()] = parsed
+    return caps
+
+
 def _parse_positive_decimal(value: str | None, default: Decimal, key: str) -> Decimal:
     if value is None or not value.strip():
         return default
@@ -1677,6 +1796,24 @@ def _parse_positive_decimal(value: str | None, default: Decimal, key: str) -> De
         raise SettingsError(f"{key} must be a valid decimal string.") from exc
     if parsed <= 0:
         raise SettingsError(f"{key} must be greater than zero.")
+    return parsed
+
+
+def _parse_optional_decimal(value: str | None, key: str) -> Decimal | None:
+    if value is None or not value.strip():
+        return None
+    try:
+        return Decimal(value.strip())
+    except (InvalidOperation, ValueError) as exc:
+        raise SettingsError(f"{key} must be a valid decimal string.") from exc
+
+
+def _parse_optional_positive_decimal(value: str | None, key: str) -> Decimal | None:
+    parsed = _parse_optional_decimal(value, key)
+    if parsed is None:
+        return None
+    if parsed <= 0:
+        raise SettingsError(f"{key} must be greater than zero when provided.")
     return parsed
 
 

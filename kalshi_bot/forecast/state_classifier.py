@@ -28,6 +28,8 @@ def classify_bias_state(
     insufficient_history: bool,
     stale_data: bool,
     time_sync_failed: bool,
+    bias_recent_return_min: Decimal | None = None,
+    bias_lookback_return_min: Decimal | None = None,
 ) -> BiasClassification:
     """Classify rolling returns into a deterministic bias state."""
 
@@ -43,6 +45,23 @@ def classify_bias_state(
     abs_lookback = abs(lookback_return_bps)
     abs_recent = abs(recent_return_bps)
     signs_match = _sign(lookback_return_bps) == _sign(recent_return_bps)
+
+    if _relaxed_aligned_trend(
+        lookback_return_bps=lookback_return_bps,
+        recent_return_bps=recent_return_bps,
+        abs_lookback=abs_lookback,
+        abs_recent=abs_recent,
+        chop_threshold_bps=chop_threshold_bps,
+        bias_recent_return_min=bias_recent_return_min,
+        bias_lookback_return_min=bias_lookback_return_min,
+    ):
+        direction = "up" if recent_return_bps > 0 else "down"
+        return BiasClassification(
+            direction=direction,
+            structure="trend",
+            confidence=40,
+            classification_reason="bias_relaxed_aligned_slow_trend",
+        )
 
     if abs_lookback <= chop_threshold_bps and abs_recent <= chop_threshold_bps:
         return BiasClassification(
@@ -108,3 +127,24 @@ def _sign(value: Decimal) -> int:
     if value < 0:
         return -1
     return 0
+
+
+def _relaxed_aligned_trend(
+    *,
+    lookback_return_bps: Decimal,
+    recent_return_bps: Decimal,
+    abs_lookback: Decimal,
+    abs_recent: Decimal,
+    chop_threshold_bps: Decimal,
+    bias_recent_return_min: Decimal | None,
+    bias_lookback_return_min: Decimal | None,
+) -> bool:
+    if bias_recent_return_min is None or bias_lookback_return_min is None:
+        return False
+    if abs_recent > chop_threshold_bps:
+        return False
+    recent_sign = _sign(recent_return_bps)
+    lookback_sign = _sign(lookback_return_bps)
+    if recent_sign == 0 or recent_sign != lookback_sign:
+        return False
+    return abs_recent >= bias_recent_return_min and abs_lookback >= bias_lookback_return_min

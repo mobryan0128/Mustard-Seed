@@ -98,6 +98,8 @@ class BiasEngine:
         stale_data_seconds: int,
         chop_threshold_bps: int | Decimal,
         impulse_min_abs_bps: Decimal,
+        bias_recent_return_min: Decimal | None = None,
+        bias_lookback_return_min: Decimal | None = None,
     ) -> None:
         normalized_products = tuple(
             dict.fromkeys(product.strip() for product in products if product.strip())
@@ -125,6 +127,16 @@ class BiasEngine:
         self._stale_data = timedelta(seconds=stale_data_seconds)
         self._chop_threshold_bps = Decimal(str(chop_threshold_bps))
         self._impulse_min_abs_bps = Decimal(str(impulse_min_abs_bps))
+        self._bias_recent_return_min = (
+            Decimal(str(bias_recent_return_min))
+            if bias_recent_return_min is not None
+            else None
+        )
+        self._bias_lookback_return_min = (
+            Decimal(str(bias_lookback_return_min))
+            if bias_lookback_return_min is not None
+            else None
+        )
         self._history: dict[str, Deque[PriceObservation]] = {
             product: deque() for product in self._products
         }
@@ -140,6 +152,8 @@ class BiasEngine:
             stale_data_seconds=settings.bias_stale_data_seconds,
             chop_threshold_bps=settings.bias_chop_threshold_bps,
             impulse_min_abs_bps=settings.bias_impulse_min_abs_bps,
+            bias_recent_return_min=settings.live_bias_recent_return_min,
+            bias_lookback_return_min=settings.live_bias_lookback_return_min,
         )
 
     def ingest(
@@ -218,6 +232,10 @@ class BiasEngine:
                 insufficient_history=risk_flags.insufficient_history,
                 stale_data=risk_flags.stale_data,
                 time_sync_failed=risk_flags.time_sync_failed,
+                bias_recent_return_min=self._product_bias_recent_return_min(product_id),
+                bias_lookback_return_min=self._product_bias_lookback_return_min(
+                    product_id
+                ),
             )
             classification = _apply_impulse_bias_override(
                 classification=classification,
@@ -267,6 +285,14 @@ class BiasEngine:
 
     def snapshot(self) -> BiasSnapshot:
         return self._latest_snapshot
+
+    def _product_bias_recent_return_min(self, product_id: str) -> Decimal | None:
+        _ = product_id
+        return self._bias_recent_return_min
+
+    def _product_bias_lookback_return_min(self, product_id: str) -> Decimal | None:
+        _ = product_id
+        return self._bias_lookback_return_min
 
     def _append_observation(
         self,

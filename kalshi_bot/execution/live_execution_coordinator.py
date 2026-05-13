@@ -162,6 +162,8 @@ class EVFilterStatus:
     block_reason: str | None
     cost_price: Decimal | None
     market_probability_price: Decimal | None
+    product_price_cap_used: Decimal | None
+    product_price_cap_source: str | None
     price_limit_basis: str | None
     side_price_basis: str | None
     opposite_price: Decimal | None
@@ -308,6 +310,7 @@ class LiveExecutionCoordinator:
         ] = {}
         self._entry_segment_counts: dict[tuple[str, str], int] = {}
         self._entry_count_by_product_session: dict[tuple[str, str], int] = {}
+        self._live_intent_diagnostics_by_client_order_id: dict[str, dict[str, object]] = {}
 
     @property
     def live_position_ledger(self) -> dict[str, LivePositionRecord]:
@@ -966,48 +969,52 @@ class LiveExecutionCoordinator:
                 reason="live_intent_created",
                 contract=contract,
             )
+            intent_payload = {
+                "cycle_number": cycle_number,
+                "scan_source": scan_source,
+                "product_id": intent.product_id,
+                "ticker": intent.ticker,
+                "side": intent.side,
+                "action": intent.action,
+                "price_dollars": intent.price_dollars,
+                "count": intent.count,
+                "stake_dollars": intent.stake_dollars,
+                "direction": intent.direction,
+                "structure": contract.structure,
+                "confidence": intent.confidence,
+                "risk_approval_source": intent.risk_approval_source,
+                "impulse_detected": getattr(contract, "impulse_detected", None),
+                "impulse_direction": getattr(contract, "impulse_direction", None),
+                "impulse_return_bps": getattr(contract, "impulse_return_bps", None),
+                "recent_return_bps": getattr(contract, "recent_return_bps", None),
+                "lookback_return_bps": getattr(contract, "lookback_return_bps", None),
+                "risk_flags": dict(getattr(contract, "risk_flags", ()) or ()),
+                "bias_as_of": getattr(contract, "bias_as_of", None),
+                **_target_feasibility_payload(contract),
+                **_signal_diagnostic_payload(contract),
+                "contract_open_time": getattr(contract, "contract_open_time", None),
+                "contract_close_time": getattr(contract, "contract_close_time", None),
+                **_end_window_payload(end_window),
+                **_itm_persistence_payload(itm_persistence),
+                **_reversal_cross_hold_payload(reversal_cross_hold),
+                **_entry_segment_payload(entry_segment),
+                **_flip_persistence_payload(flip_persistence),
+                **_retry_persistence_payload(retry_persistence),
+                **_product_session_pacing_payload(product_session_pacing),
+                **_execution_pricing_payload(pricing),
+                **_mid_price_confirmation_payload(mid_price_confirmation),
+                **_execution_safety_payload(safety),
+                **_ev_filter_payload(ev_filter),
+                **_composite_quality_payload(composite_quality),
+                "intent_count": intent.count,
+            }
+            self._live_intent_diagnostics_by_client_order_id[
+                intent.client_order_id
+            ] = dict(intent_payload)
             self._log_and_record(
                 event_type="live_intent_created",
                 identifier=intent.client_order_id,
-                payload={
-                    "cycle_number": cycle_number,
-                    "scan_source": scan_source,
-                    "product_id": intent.product_id,
-                    "ticker": intent.ticker,
-                    "side": intent.side,
-                    "action": intent.action,
-                    "price_dollars": intent.price_dollars,
-                    "count": intent.count,
-                    "stake_dollars": intent.stake_dollars,
-                    "direction": intent.direction,
-                    "structure": contract.structure,
-                    "confidence": intent.confidence,
-                    "risk_approval_source": intent.risk_approval_source,
-                    "impulse_detected": getattr(contract, "impulse_detected", None),
-                    "impulse_direction": getattr(contract, "impulse_direction", None),
-                    "impulse_return_bps": getattr(contract, "impulse_return_bps", None),
-                    "recent_return_bps": getattr(contract, "recent_return_bps", None),
-                    "lookback_return_bps": getattr(contract, "lookback_return_bps", None),
-                    "risk_flags": dict(getattr(contract, "risk_flags", ()) or ()),
-                    "bias_as_of": getattr(contract, "bias_as_of", None),
-                    **_target_feasibility_payload(contract),
-                    **_signal_diagnostic_payload(contract),
-                    "contract_open_time": getattr(contract, "contract_open_time", None),
-                    "contract_close_time": getattr(contract, "contract_close_time", None),
-                    **_end_window_payload(end_window),
-                    **_itm_persistence_payload(itm_persistence),
-                    **_reversal_cross_hold_payload(reversal_cross_hold),
-                    **_entry_segment_payload(entry_segment),
-                    **_flip_persistence_payload(flip_persistence),
-                    **_retry_persistence_payload(retry_persistence),
-                    **_product_session_pacing_payload(product_session_pacing),
-                    **_execution_pricing_payload(pricing),
-                    **_mid_price_confirmation_payload(mid_price_confirmation),
-                    **_execution_safety_payload(safety),
-                    **_ev_filter_payload(ev_filter),
-                    **_composite_quality_payload(composite_quality),
-                    "intent_count": intent.count,
-                },
+                payload=intent_payload,
             )
             self._record_live_entry_memory(contract)
             self._record_entry_pacing(contract, entry_segment=entry_segment)
@@ -2211,10 +2218,17 @@ class LiveExecutionCoordinator:
 
         previous_filled_count = previous.filled_count if previous is not None else Decimal("0")
         if record.filled_count > 0 and previous_filled_count <= 0:
+            opened_payload = {
+                **_live_position_record_payload(record),
+                **self._live_intent_diagnostics_by_client_order_id.get(
+                    record.client_order_id,
+                    {},
+                ),
+            }
             self._log_and_record(
                 event_type="live_position_opened",
                 identifier=record.client_order_id,
-                payload=_live_position_record_payload(record),
+                payload=opened_payload,
             )
         return record
 
@@ -2784,6 +2798,8 @@ def _ev_filter_status(
             block_reason=None,
             cost_price=None,
             market_probability_price=None,
+            product_price_cap_used=None,
+            product_price_cap_source=None,
             price_limit_basis=None,
             side_price_basis=None,
             opposite_price=None,
@@ -2847,10 +2863,12 @@ def _ev_filter_status(
     required_bps_ok = (
         required_bps_decimal is not None and required_bps_decimal <= required_bps_limit
     )
-    price_limit = getattr(
+    (
+        price_limit,
+        product_price_cap_source,
+    ) = _ev_price_max_itm_no_cross_for_product(
+        contract.product_id,
         settings,
-        "live_ev_price_max_itm_no_cross",
-        Decimal("0.70"),
     )
     entry_price_ok = (
         market_probability_price is not None
@@ -3011,6 +3029,8 @@ def _ev_filter_status(
             block_reason=block_reason,
             cost_price=cost_price,
             market_probability_price=market_probability_price,
+            product_price_cap_used=price_limit,
+            product_price_cap_source=product_price_cap_source,
             price_limit_basis=price_limit_basis,
             side_price_basis=side_price_basis,
             opposite_price=opposite_price,
@@ -3042,6 +3062,8 @@ def _ev_filter_status(
         block_reason=None,
         cost_price=cost_price,
         market_probability_price=market_probability_price,
+        product_price_cap_used=price_limit,
+        product_price_cap_source=product_price_cap_source,
         price_limit_basis=price_limit_basis,
         side_price_basis=side_price_basis,
         opposite_price=opposite_price,
@@ -3065,6 +3087,33 @@ def _ev_filter_status(
         required_conditions=required_conditions,
         matched_conditions=tuple(dict.fromkeys(matched)),
     )
+
+
+def _ev_price_max_itm_no_cross_for_product(
+    product_id: str,
+    settings: KalshiSettings,
+) -> tuple[Decimal, str]:
+    product_caps = getattr(settings, "live_ev_price_max_itm_no_cross_by_product", {})
+    normalized_product = _normalize_product_id(product_id)
+    base_product = normalized_product.split("-", maxsplit=1)[0]
+    cap = None
+    if product_caps:
+        normalized_caps = {
+            _normalize_product_id(key): value for key, value in product_caps.items()
+        }
+        cap = normalized_caps.get(normalized_product)
+        if cap is None:
+            cap = normalized_caps.get(base_product)
+    if cap is not None:
+        return (cap, f"product:{normalized_product}")
+    return (
+        getattr(settings, "live_ev_price_max_itm_no_cross", Decimal("0.70")),
+        "global",
+    )
+
+
+def _normalize_product_id(product_id: str) -> str:
+    return str(product_id).strip().upper().replace("_", "-")
 
 
 def _ev_price_basis(
@@ -3872,6 +3921,8 @@ def _ev_filter_payload(status: EVFilterStatus | None) -> dict[str, object]:
             "ev_filter_reason": None,
             "ev_cost_price": None,
             "ev_market_probability_price": None,
+            "ev_product_price_cap_used": None,
+            "ev_product_price_cap_source": None,
             "ev_price_limit_basis": None,
             "ev_side_price_basis": None,
             "ev_opposite_price": None,
@@ -3901,6 +3952,8 @@ def _ev_filter_payload(status: EVFilterStatus | None) -> dict[str, object]:
         "ev_filter_reason": status.reason,
         "ev_cost_price": status.cost_price,
         "ev_market_probability_price": status.market_probability_price,
+        "ev_product_price_cap_used": status.product_price_cap_used,
+        "ev_product_price_cap_source": status.product_price_cap_source,
         "ev_price_limit_basis": status.price_limit_basis,
         "ev_side_price_basis": status.side_price_basis,
         "ev_opposite_price": status.opposite_price,
@@ -3982,6 +4035,7 @@ def _signal_diagnostic_payload(contract: ScannedContract) -> dict[str, object]:
             "confirmed_trend"
             in (getattr(contract, "scanner_score_bonus_reasons", ()) or ())
         ),
+        "state_classification": getattr(contract, "classification_reason", None),
         "classification_reason": getattr(contract, "classification_reason", None),
         "chop_threshold_bps": getattr(contract, "chop_threshold_bps", None),
         "recent_window_seconds": getattr(contract, "recent_window_seconds", None),
@@ -4046,6 +4100,24 @@ def _signal_diagnostic_payload(contract: ScannedContract) -> dict[str, object]:
             "reversal_safe_low_price_status",
             None,
         ),
+        "weak_momentum_stabilization_status": getattr(
+            contract,
+            "weak_momentum_stabilization_status",
+            None,
+        ),
+        "weak_momentum_stabilization_reason": getattr(
+            contract,
+            "weak_momentum_stabilization_reason",
+            None,
+        ),
+        "stabilization_reason": getattr(
+            contract,
+            "weak_momentum_stabilization_reason",
+            None,
+        ),
+        "mini_exhaustion_status": getattr(contract, "mini_exhaustion_status", None),
+        "mini_exhaustion_reason": getattr(contract, "mini_exhaustion_reason", None),
+        "decay_ratio": getattr(contract, "decay_ratio", None),
     }
 
 
@@ -4080,6 +4152,11 @@ def _contract_scan_skip_diagnostics_payload(
                 "impulse_detected": getattr(contract, "impulse_detected", None),
                 "risk_flags": dict(getattr(contract, "risk_flags", ()) or ()),
                 "classification_reason": getattr(
+                    contract,
+                    "classification_reason",
+                    None,
+                ),
+                "state_classification": getattr(
                     contract,
                     "classification_reason",
                     None,
@@ -4191,6 +4268,32 @@ def _contract_scan_skip_diagnostics_payload(
                     "reversal_safe_low_price_status",
                     None,
                 ),
+                "weak_momentum_stabilization_status": getattr(
+                    contract,
+                    "weak_momentum_stabilization_status",
+                    None,
+                ),
+                "weak_momentum_stabilization_reason": getattr(
+                    contract,
+                    "weak_momentum_stabilization_reason",
+                    None,
+                ),
+                "stabilization_reason": getattr(
+                    contract,
+                    "weak_momentum_stabilization_reason",
+                    None,
+                ),
+                "mini_exhaustion_status": getattr(
+                    contract,
+                    "mini_exhaustion_status",
+                    None,
+                ),
+                "mini_exhaustion_reason": getattr(
+                    contract,
+                    "mini_exhaustion_reason",
+                    None,
+                ),
+                "decay_ratio": getattr(contract, "decay_ratio", None),
             }
             for contract in snapshot.skipped_contracts[:10]
         ],

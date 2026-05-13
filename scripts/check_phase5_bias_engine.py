@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -187,6 +187,7 @@ def run_offline_fixtures(settings) -> list[str]:
     failures.extend(_run_stale_impulse_no_override_case(settings, now))
     failures.extend(_run_insufficient_history_impulse_no_override_case(settings, now))
     failures.extend(_run_exhaustion_impulse_no_override_case(settings, now))
+    failures.extend(_run_bias_relaxation_case(settings, now))
     return failures
 
 
@@ -262,6 +263,55 @@ def _run_case(
         state.lookback_return_bps
     ):
         failures.append(f"{case_name}: lookback_abs_bps={state.lookback_abs_bps}")
+    return failures
+
+
+def _run_bias_relaxation_case(settings, now: datetime) -> list[str]:
+    relaxed_settings = replace(
+        settings,
+        live_bias_recent_return_min=Decimal("2"),
+        live_bias_lookback_return_min=Decimal("8"),
+    )
+    failures = _run_case(
+        relaxed_settings,
+        case_name="bias_relaxed_aligned_slow_trend",
+        observations=_series(
+            now,
+            count=25,
+            step_seconds=5,
+            prices=_linear_prices("100", "100.12"),
+        ),
+        expected_direction="up",
+        expected_structure="trend",
+        expected_confidence=40,
+    )
+    engine = BiasEngine.from_settings(relaxed_settings)
+    product_id = relaxed_settings.bias_products[0]
+    snapshot = None
+    for observed_at, price in _series(
+        now,
+        count=25,
+        step_seconds=5,
+        prices=_linear_prices("100", "100.12"),
+    ):
+        snapshot = engine.ingest(
+            FixtureFeedSnapshot(
+                products={
+                    product_id: FixturePriceState(
+                        product_id=product_id,
+                        price=price,
+                        source_timestamp=observed_at.isoformat(),
+                    )
+                }
+            )
+        )
+    assert snapshot is not None
+    state = snapshot.products[product_id]
+    if state.classification_reason != "bias_relaxed_aligned_slow_trend":
+        failures.append(
+            "bias_relaxed_aligned_slow_trend: reason="
+            f"{state.classification_reason}"
+        )
     return failures
 
 

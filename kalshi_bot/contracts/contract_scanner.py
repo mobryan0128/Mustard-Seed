@@ -119,6 +119,11 @@ class ScannedContract:
     mean_reversion_candidate_status: str | None = None
     reversal_pullback_vs_true_reversal_status: str | None = None
     reversal_safe_low_price_status: str | None = None
+    weak_momentum_stabilization_status: str | None = None
+    weak_momentum_stabilization_reason: str | None = None
+    mini_exhaustion_status: str | None = None
+    mini_exhaustion_reason: str | None = None
+    decay_ratio: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -181,6 +186,11 @@ class SkippedContract:
     mean_reversion_candidate_status: str | None = None
     reversal_pullback_vs_true_reversal_status: str | None = None
     reversal_safe_low_price_status: str | None = None
+    weak_momentum_stabilization_status: str | None = None
+    weak_momentum_stabilization_reason: str | None = None
+    mini_exhaustion_status: str | None = None
+    mini_exhaustion_reason: str | None = None
+    decay_ratio: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -222,6 +232,14 @@ class ContractScanner:
         early_momentum_enabled: bool = True,
         early_momentum_min_recent_bps: Decimal = Decimal("15"),
         early_momentum_max_3m_burst_bps: Decimal = Decimal("20"),
+        weak_momentum_stabilization_min_distance: Decimal | None = None,
+        weak_momentum_max_range: Decimal | None = None,
+        weak_momentum_max_price: Decimal | None = None,
+        mini_exhaustion_enabled: bool = False,
+        mini_exhaustion_3m_bps: Decimal = Decimal("12"),
+        mini_exhaustion_range_bps: Decimal = Decimal("25"),
+        mini_exhaustion_recent_bps: Decimal = Decimal("6"),
+        min_cross_distance_bps: Decimal = Decimal("0"),
     ) -> None:
         normalized = {
             product_id.strip(): tuple(
@@ -278,6 +296,26 @@ class ContractScanner:
         self._early_momentum_max_3m_burst_bps = Decimal(
             str(early_momentum_max_3m_burst_bps)
         )
+        self._weak_momentum_stabilization_min_distance = (
+            Decimal(str(weak_momentum_stabilization_min_distance))
+            if weak_momentum_stabilization_min_distance is not None
+            else None
+        )
+        self._weak_momentum_max_range = (
+            Decimal(str(weak_momentum_max_range))
+            if weak_momentum_max_range is not None
+            else None
+        )
+        self._weak_momentum_max_price = (
+            Decimal(str(weak_momentum_max_price))
+            if weak_momentum_max_price is not None
+            else None
+        )
+        self._mini_exhaustion_enabled = mini_exhaustion_enabled
+        self._mini_exhaustion_3m_bps = Decimal(str(mini_exhaustion_3m_bps))
+        self._mini_exhaustion_range_bps = Decimal(str(mini_exhaustion_range_bps))
+        self._mini_exhaustion_recent_bps = Decimal(str(mini_exhaustion_recent_bps))
+        self._min_cross_distance_bps = Decimal(str(min_cross_distance_bps))
 
     @classmethod
     def from_settings(cls, settings: KalshiSettings) -> "ContractScanner":
@@ -341,7 +379,11 @@ class ContractScanner:
                             target_price=_optional_decimal_metadata(metadata, "target_price"),
                             target_price_source=_optional_str_metadata(metadata, "target_price_source"),
                             close_time=_optional_str_metadata(metadata, "close_time"),
+                            min_cross_distance_bps=self._product_min_cross_distance_bps(
+                                product_id
+                            ),
                         )
+                        quiet_midpoint = _quote_midpoint(ticker_state)
                         quiet_skip_reason = _quiet_continuation_skip_reason(
                             quiet_feasibility,
                             max_required_bps_per_minute=(
@@ -353,6 +395,20 @@ class ContractScanner:
                                 product_id=product_id,
                                 bias_state=quiet_bias_state,
                             )
+                        if quiet_skip_reason is None:
+                            quiet_weak_status = self._weak_momentum_stabilization_status(
+                                product_id=product_id,
+                                bias_state=quiet_bias_state,
+                                feasibility=quiet_feasibility,
+                                entry_price=quiet_midpoint,
+                            )
+                            if (
+                                quiet_weak_status[0] != "disabled"
+                                and quiet_weak_status[0] != "allowed"
+                            ):
+                                quiet_skip_reason = (
+                                    f"weak_momentum_stabilization_{quiet_weak_status[1]}"
+                                )
                         if quiet_skip_reason is None:
                             effective_bias_state = quiet_bias_state
                             skip_reason = None
@@ -375,6 +431,8 @@ class ContractScanner:
                                     **self._signal_quality_fields(
                                         product_id=product_id,
                                         bias_state=quiet_bias_state,
+                                        feasibility=quiet_feasibility,
+                                        entry_price=quiet_midpoint,
                                         quiet_continuation_block_reason=quiet_skip_reason,
                                     ),
                                     **_bias_diagnostic_fields(quiet_bias_state),
@@ -421,7 +479,11 @@ class ContractScanner:
                     target_price=_optional_decimal_metadata(metadata, "target_price"),
                     target_price_source=_optional_str_metadata(metadata, "target_price_source"),
                     close_time=_optional_str_metadata(metadata, "close_time"),
+                    min_cross_distance_bps=self._product_min_cross_distance_bps(
+                        product_id
+                    ),
                 )
+                midpoint = _quote_midpoint(ticker_state)
                 signal_conflict_flags = _signal_conflict_flags(
                     direction=effective_bias_state.direction,
                     impulse_return_bps=getattr(effective_bias_state, "impulse_return_bps", None),
@@ -442,6 +504,8 @@ class ContractScanner:
                 signal_quality_fields = self._signal_quality_fields(
                     product_id=product_id,
                     bias_state=effective_bias_state,
+                    feasibility=feasibility,
+                    entry_price=midpoint,
                 )
                 if feasibility_skip_reason is not None:
                     skipped_contracts.append(
@@ -498,9 +562,6 @@ class ContractScanner:
                         )
                     )
                     continue
-                midpoint = ((ticker_state.yes_bid_dollars + ticker_state.yes_ask_dollars) / TWO_DECIMAL).quantize(
-                    Decimal("0.001")
-                )
                 (
                     score_confidence,
                     score_downgrade_reasons,
@@ -512,6 +573,12 @@ class ContractScanner:
                     reversal_confirmation_status=reversal_confirmation_status,
                     trend_confirmation_status=trend_confirmation_status,
                     signal_conflict_flags=signal_conflict_flags,
+                    weak_momentum_stabilization_status=signal_quality_fields.get(
+                        "weak_momentum_stabilization_status"
+                    ),
+                    mini_exhaustion_status=signal_quality_fields.get(
+                        "mini_exhaustion_status"
+                    ),
                 )
                 score = score_contract(
                     confidence=score_confidence,
@@ -576,6 +643,8 @@ class ContractScanner:
         *,
         product_id: str,
         bias_state,  # noqa: ANN001
+        feasibility: TargetFeasibility | None = None,
+        entry_price: Decimal | None = None,
         quiet_continuation_block_reason: str | None = None,
     ) -> dict[str, object]:
         if bias_state is None:
@@ -622,6 +691,17 @@ class ContractScanner:
             "quiet_continuation_"
         ) and quiet_continuation_block_reason is None:
             quiet_allowed_reason = "stable_itm_no_cross"
+        weak_status, weak_reason = self._weak_momentum_stabilization_status(
+            product_id=product_id,
+            bias_state=bias_state,
+            feasibility=feasibility,
+            entry_price=entry_price,
+        )
+        mini_status, mini_reason = self._mini_exhaustion_status(
+            product_id=product_id,
+            bias_state=bias_state,
+            feasibility=feasibility,
+        )
         return {
             "range_expansion_status": range_status,
             "momentum_deceleration_status": deceleration_status,
@@ -637,6 +717,11 @@ class ContractScanner:
                 _reversal_pullback_vs_true_reversal_status(bias_state)
             ),
             "reversal_safe_low_price_status": "not_evaluated",
+            "weak_momentum_stabilization_status": weak_status,
+            "weak_momentum_stabilization_reason": weak_reason,
+            "mini_exhaustion_status": mini_status,
+            "mini_exhaustion_reason": mini_reason,
+            "decay_ratio": _decay_ratio(bias_state, direction=direction),
         }
 
     def _quiet_continuation_signal_block_reason(
@@ -726,6 +811,116 @@ class ContractScanner:
             return self._exhaustion_strict_burst_3m_bps
         return self._exhaustion_burst_3m_bps
 
+    def _weak_momentum_stabilization_status(
+        self,
+        *,
+        product_id: str,
+        bias_state,  # noqa: ANN001
+        feasibility: TargetFeasibility | None,
+        entry_price: Decimal | None,
+    ) -> tuple[str, str | None]:
+        min_distance, max_range, max_price = self._product_weak_momentum_thresholds(
+            product_id
+        )
+        if min_distance is None or max_range is None or max_price is None:
+            return ("disabled", None)
+        if feasibility is None:
+            return ("blocked", "feasibility_missing")
+        if not bool(feasibility.side_currently_itm) or bool(feasibility.side_needs_cross):
+            return ("blocked", "not_stable_itm_no_cross")
+        if feasibility.distance_to_target_bps is None:
+            return ("blocked", "distance_missing")
+        if feasibility.distance_to_target_bps > min_distance:
+            return ("blocked", "distance_not_deep_enough_itm")
+        if entry_price is None:
+            return ("blocked", "entry_price_missing")
+        if entry_price > max_price:
+            return ("blocked", "entry_price_above_limit")
+        direction = getattr(bias_state, "direction", None)
+        direction_sign = _direction_sign(direction)
+        if direction_sign == 0:
+            return ("blocked", "direction_missing")
+        recent_return = _decimal_or_none(getattr(bias_state, "recent_return_bps", None))
+        if recent_return is None:
+            return ("blocked", "recent_return_missing")
+        if _sign(recent_return) not in {0, direction_sign}:
+            return ("blocked", "recent_return_opposite")
+        if abs(recent_return) > self._quiet_continuation_max_recent_bps:
+            return ("blocked", "recent_return_too_large")
+        recent_5m_range = _decimal_or_none(
+            getattr(bias_state, "recent_5m_range_bps", None)
+        )
+        if recent_5m_range is None:
+            return ("blocked", "recent_5m_range_missing")
+        if recent_5m_range > max_range:
+            return ("blocked", "recent_5m_range_too_large")
+        return ("allowed", "stable_itm_weak_momentum")
+
+    def _mini_exhaustion_status(
+        self,
+        *,
+        product_id: str,
+        bias_state,  # noqa: ANN001
+        feasibility: TargetFeasibility | None,
+    ) -> tuple[str, str | None]:
+        enabled, max_3m, min_range, min_recent = self._product_mini_exhaustion_thresholds(
+            product_id
+        )
+        if not enabled:
+            return ("disabled", None)
+        if getattr(bias_state, "structure", None) != "trend":
+            return ("not_applicable", "not_trend")
+        if feasibility is None or feasibility.distance_to_target_bps is None:
+            return ("clear", "distance_missing")
+        if abs(feasibility.distance_to_target_bps) > NEEDS_CROSS_SOFT_DISTANCE_BPS:
+            return ("clear", "not_near_strike")
+        direction = getattr(bias_state, "direction", None)
+        recent_return = _decimal_or_none(getattr(bias_state, "recent_return_bps", None))
+        recent_3m_return = _decimal_or_none(
+            getattr(bias_state, "recent_3m_return_bps", None)
+        )
+        recent_5m_range = _decimal_or_none(
+            getattr(bias_state, "recent_5m_range_bps", None)
+        )
+        aligned_recent = _aligned_abs(recent_return, direction)
+        aligned_3m = _aligned_abs(recent_3m_return, direction)
+        if aligned_recent is None or aligned_3m is None or recent_5m_range is None:
+            return ("clear", "momentum_diagnostics_missing")
+        if aligned_3m > max_3m:
+            return ("clear", "three_minute_move_above_moderate_limit")
+        if aligned_recent < min_recent:
+            return ("clear", "recent_spike_below_threshold")
+        if recent_5m_range < min_range:
+            return ("clear", "range_below_threshold")
+        return ("flagged", "near_strike_recent_spike_elevated_range")
+
+    def _product_weak_momentum_thresholds(
+        self,
+        product_id: str,
+    ) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
+        _ = product_id
+        return (
+            self._weak_momentum_stabilization_min_distance,
+            self._weak_momentum_max_range,
+            self._weak_momentum_max_price,
+        )
+
+    def _product_mini_exhaustion_thresholds(
+        self,
+        product_id: str,
+    ) -> tuple[bool, Decimal, Decimal, Decimal]:
+        _ = product_id
+        return (
+            self._mini_exhaustion_enabled,
+            self._mini_exhaustion_3m_bps,
+            self._mini_exhaustion_range_bps,
+            self._mini_exhaustion_recent_bps,
+        )
+
+    def _product_min_cross_distance_bps(self, product_id: str) -> Decimal:
+        _ = product_id
+        return self._min_cross_distance_bps
+
 
 def scanner_live_settings_kwargs(settings: KalshiSettings) -> dict[str, object]:
     return {
@@ -770,6 +965,16 @@ def scanner_live_settings_kwargs(settings: KalshiSettings) -> dict[str, object]:
         "early_momentum_max_3m_burst_bps": (
             settings.live_early_momentum_max_3m_burst_bps
         ),
+        "weak_momentum_stabilization_min_distance": (
+            settings.live_weak_momentum_stabilization_min_distance
+        ),
+        "weak_momentum_max_range": settings.live_weak_momentum_max_range,
+        "weak_momentum_max_price": settings.live_weak_momentum_max_price,
+        "mini_exhaustion_enabled": settings.live_mini_exhaustion_enabled,
+        "mini_exhaustion_3m_bps": settings.live_mini_exhaustion_3m_bps,
+        "mini_exhaustion_range_bps": settings.live_mini_exhaustion_range_bps,
+        "mini_exhaustion_recent_bps": settings.live_mini_exhaustion_recent_bps,
+        "min_cross_distance_bps": settings.live_min_cross_distance_bps,
     }
 
 
@@ -885,6 +1090,26 @@ def _decimal_or_none(value: object) -> Decimal | None:
     if value is None:
         return None
     return Decimal(str(value))
+
+
+def _decay_ratio(bias_state, *, direction: str | None) -> Decimal | None:  # noqa: ANN001
+    recent_return = _decimal_or_none(getattr(bias_state, "recent_return_bps", None))
+    recent_3m_return = _decimal_or_none(
+        getattr(bias_state, "recent_3m_return_bps", None)
+    )
+    aligned_recent = _aligned_abs(recent_return, direction)
+    aligned_3m = _aligned_abs(recent_3m_return, direction)
+    if aligned_recent is None or aligned_3m is None or aligned_3m <= Decimal("0"):
+        return None
+    return (aligned_recent / aligned_3m).quantize(Decimal("0.001"))
+
+
+def _quote_midpoint(ticker_state: TickerState) -> Decimal:
+    assert ticker_state.yes_bid_dollars is not None
+    assert ticker_state.yes_ask_dollars is not None
+    return ((ticker_state.yes_bid_dollars + ticker_state.yes_ask_dollars) / TWO_DECIMAL).quantize(
+        Decimal("0.001")
+    )
 
 
 def _mean_reversion_candidate_status(bias_state) -> str:  # noqa: ANN001
@@ -1171,6 +1396,7 @@ def _target_feasibility(
     target_price: Decimal | None,
     target_price_source: str | None,
     close_time: str | None,
+    min_cross_distance_bps: Decimal = Decimal("0"),
 ) -> TargetFeasibility:
     time_remaining_seconds = _time_remaining_seconds(close_time)
     if current_spot_price is None:
@@ -1236,21 +1462,33 @@ def _target_feasibility(
         distance_to_target / current_spot_price * BASIS_POINTS_MULTIPLIER
     ).quantize(Decimal("0.001"))
     side_needs_cross = distance_to_target > Decimal("0")
-    required_bps_per_minute = _required_bps_per_minute(
-        distance_to_target_bps=distance_to_target_bps,
-        time_remaining_seconds=time_remaining_seconds,
+    noise_cross_ignored = (
+        side_needs_cross
+        and min_cross_distance_bps > Decimal("0")
+        and distance_to_target_bps <= min_cross_distance_bps
+    )
+    effective_side_needs_cross = side_needs_cross and not noise_cross_ignored
+    required_bps_per_minute = (
+        Decimal("0.000")
+        if noise_cross_ignored
+        else _required_bps_per_minute(
+            distance_to_target_bps=distance_to_target_bps,
+            time_remaining_seconds=time_remaining_seconds,
+        )
     )
     if time_remaining_seconds is None:
         feasibility_status = "time_remaining_missing"
     elif time_remaining_seconds <= 0:
         feasibility_status = "time_remaining_elapsed"
     elif (
-        side_needs_cross
+        effective_side_needs_cross
         and time_remaining_seconds <= UNREALISTIC_LATE_CROSS_SECONDS
         and distance_to_target_bps >= UNREALISTIC_LATE_CROSS_DISTANCE_BPS
     ):
         feasibility_status = "unrealistic_late_cross"
-    elif side_needs_cross:
+    elif noise_cross_ignored:
+        feasibility_status = "noise_cross_ignored"
+    elif effective_side_needs_cross:
         feasibility_status = "needs_cross"
     else:
         feasibility_status = "currently_itm"
@@ -1263,8 +1501,8 @@ def _target_feasibility(
         distance_to_target_bps=distance_to_target_bps,
         time_remaining_seconds=time_remaining_seconds,
         required_bps_per_minute=required_bps_per_minute,
-        side_currently_itm=not side_needs_cross,
-        side_needs_cross=side_needs_cross,
+        side_currently_itm=not effective_side_needs_cross,
+        side_needs_cross=effective_side_needs_cross,
         feasibility_status=feasibility_status,
     )
 
@@ -1424,6 +1662,8 @@ def _scanner_score_confidence(
     reversal_confirmation_status: str,
     trend_confirmation_status: str,
     signal_conflict_flags: tuple[tuple[str, bool], ...],
+    weak_momentum_stabilization_status: object = None,
+    mini_exhaustion_status: object = None,
 ) -> tuple[int, tuple[str, ...], tuple[str, ...]]:
     confidence = int(bias_state.confidence)
     downgrade_reasons: list[str] = []
@@ -1466,16 +1706,26 @@ def _scanner_score_confidence(
     }:
         confidence = min(confidence, SCORE_DOWNGRADE_CONFLICT_CONFIDENCE)
         downgrade_reasons.append(f"reversal_{reversal_confirmation_status}")
-    if trend_confirmation_status in {
+    trend_downgrade_statuses = {
         "recent_return_missing",
         "lookback_return_missing",
         "recent_direction_mismatch",
         "lookback_direction_mismatch",
-        "weak_recent_return",
         "large_cross_required",
-    }:
+    }
+    if (
+        trend_confirmation_status == "weak_recent_return"
+        and weak_momentum_stabilization_status != "allowed"
+    ):
+        trend_downgrade_statuses.add("weak_recent_return")
+    elif trend_confirmation_status == "weak_recent_return":
+        bonus_reasons.append("weak_momentum_stabilized")
+    if trend_confirmation_status in trend_downgrade_statuses:
         confidence = min(confidence, SCORE_DOWNGRADE_CONFLICT_CONFIDENCE)
         downgrade_reasons.append(f"trend_{trend_confirmation_status}")
+    if mini_exhaustion_status == "flagged":
+        confidence = min(confidence, SCORE_DOWNGRADE_CONFLICT_CONFIDENCE)
+        downgrade_reasons.append("mini_exhaustion")
     if trend_confirmation_status == "confirmed" and not downgrade_reasons:
         confidence = min(
             SCORE_MAX_CONFIDENCE,
