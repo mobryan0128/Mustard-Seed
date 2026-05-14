@@ -1238,6 +1238,8 @@ def _settings(
         live_exhaustion_deceleration_recent_bps=Decimal("8"),
         live_exhaustion_strict_products=("HYPE-USD", "ETH-USD", "XRP-USD"),
         live_exhaustion_strict_burst_3m_bps=Decimal("15"),
+        live_exhaustion_progression_override_enabled=False,
+        live_exhaustion_progression_min_aligned_cycles=2,
         live_early_momentum_enabled=True,
         live_early_momentum_min_recent_bps=Decimal("15"),
         live_early_momentum_max_3m_burst_bps=Decimal("20"),

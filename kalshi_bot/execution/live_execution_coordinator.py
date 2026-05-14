@@ -4072,9 +4072,62 @@ def _signal_diagnostic_payload(contract: ScannedContract) -> dict[str, object]:
             "momentum_deceleration_status",
             None,
         ),
+        "exhaustion_base_status": getattr(contract, "exhaustion_base_status", None),
+        "exhaustion_base_reason": getattr(contract, "exhaustion_base_reason", None),
         "exhaustion_status": getattr(contract, "exhaustion_status", None),
+        "exhaustion_guard_decision": getattr(
+            contract,
+            "exhaustion_guard_decision",
+            None,
+        ),
+        "exhaustion_progression_status": getattr(
+            contract,
+            "exhaustion_progression_status",
+            None,
+        ),
+        "exhaustion_progression_reason": getattr(
+            contract,
+            "exhaustion_progression_reason",
+            None,
+        ),
+        "exhaustion_progression_sample_count": getattr(
+            contract,
+            "exhaustion_progression_sample_count",
+            None,
+        ),
+        "exhaustion_progression_aligned_count": getattr(
+            contract,
+            "exhaustion_progression_aligned_count",
+            None,
+        ),
+        "exhaustion_progression_matched_conditions": list(
+            getattr(contract, "exhaustion_progression_matched_conditions", ()) or ()
+        ),
+        "exhaustion_progression_failed_conditions": list(
+            getattr(contract, "exhaustion_progression_failed_conditions", ()) or ()
+        ),
+        "exhaustion_progression_context_source": getattr(
+            contract,
+            "exhaustion_progression_context_source",
+            None,
+        ),
+        "exhaustion_progression_override_enabled": getattr(
+            contract,
+            "exhaustion_progression_override_enabled",
+            None,
+        ),
         "early_momentum_status": getattr(contract, "early_momentum_status", None),
         "late_entry_risk_status": getattr(contract, "late_entry_risk_status", None),
+        "quiet_continuation_enabled": getattr(
+            contract,
+            "quiet_continuation_enabled",
+            None,
+        ),
+        "quiet_continuation_thresholds_active": getattr(
+            contract,
+            "quiet_continuation_thresholds_active",
+            None,
+        ),
         "quiet_continuation_allowed_reason": getattr(
             contract,
             "quiet_continuation_allowed_reason",
@@ -4110,6 +4163,11 @@ def _signal_diagnostic_payload(contract: ScannedContract) -> dict[str, object]:
             "weak_momentum_stabilization_reason",
             None,
         ),
+        "weak_momentum_stabilization_config_status": getattr(
+            contract,
+            "weak_momentum_stabilization_config_status",
+            None,
+        ),
         "stabilization_reason": getattr(
             contract,
             "weak_momentum_stabilization_reason",
@@ -4117,6 +4175,16 @@ def _signal_diagnostic_payload(contract: ScannedContract) -> dict[str, object]:
         ),
         "mini_exhaustion_status": getattr(contract, "mini_exhaustion_status", None),
         "mini_exhaustion_reason": getattr(contract, "mini_exhaustion_reason", None),
+        "mini_exhaustion_enabled": getattr(
+            contract,
+            "mini_exhaustion_enabled",
+            None,
+        ),
+        "mini_exhaustion_thresholds_active": getattr(
+            contract,
+            "mini_exhaustion_thresholds_active",
+            None,
+        ),
         "decay_ratio": getattr(contract, "decay_ratio", None),
     }
 
@@ -4232,7 +4300,68 @@ def _contract_scan_skip_diagnostics_payload(
                     "momentum_deceleration_status",
                     None,
                 ),
+                "exhaustion_base_status": getattr(
+                    contract,
+                    "exhaustion_base_status",
+                    None,
+                ),
+                "exhaustion_base_reason": getattr(
+                    contract,
+                    "exhaustion_base_reason",
+                    None,
+                ),
                 "exhaustion_status": getattr(contract, "exhaustion_status", None),
+                "exhaustion_guard_decision": getattr(
+                    contract,
+                    "exhaustion_guard_decision",
+                    None,
+                ),
+                "exhaustion_progression_status": getattr(
+                    contract,
+                    "exhaustion_progression_status",
+                    None,
+                ),
+                "exhaustion_progression_reason": getattr(
+                    contract,
+                    "exhaustion_progression_reason",
+                    None,
+                ),
+                "exhaustion_progression_sample_count": getattr(
+                    contract,
+                    "exhaustion_progression_sample_count",
+                    None,
+                ),
+                "exhaustion_progression_aligned_count": getattr(
+                    contract,
+                    "exhaustion_progression_aligned_count",
+                    None,
+                ),
+                "exhaustion_progression_matched_conditions": list(
+                    getattr(
+                        contract,
+                        "exhaustion_progression_matched_conditions",
+                        (),
+                    )
+                    or ()
+                ),
+                "exhaustion_progression_failed_conditions": list(
+                    getattr(
+                        contract,
+                        "exhaustion_progression_failed_conditions",
+                        (),
+                    )
+                    or ()
+                ),
+                "exhaustion_progression_context_source": getattr(
+                    contract,
+                    "exhaustion_progression_context_source",
+                    None,
+                ),
+                "exhaustion_progression_override_enabled": getattr(
+                    contract,
+                    "exhaustion_progression_override_enabled",
+                    None,
+                ),
                 "early_momentum_status": getattr(
                     contract,
                     "early_momentum_status",
@@ -4241,6 +4370,16 @@ def _contract_scan_skip_diagnostics_payload(
                 "late_entry_risk_status": getattr(
                     contract,
                     "late_entry_risk_status",
+                    None,
+                ),
+                "quiet_continuation_enabled": getattr(
+                    contract,
+                    "quiet_continuation_enabled",
+                    None,
+                ),
+                "quiet_continuation_thresholds_active": getattr(
+                    contract,
+                    "quiet_continuation_thresholds_active",
                     None,
                 ),
                 "quiet_continuation_allowed_reason": getattr(
@@ -4278,6 +4417,11 @@ def _contract_scan_skip_diagnostics_payload(
                     "weak_momentum_stabilization_reason",
                     None,
                 ),
+                "weak_momentum_stabilization_config_status": getattr(
+                    contract,
+                    "weak_momentum_stabilization_config_status",
+                    None,
+                ),
                 "stabilization_reason": getattr(
                     contract,
                     "weak_momentum_stabilization_reason",
@@ -4291,6 +4435,16 @@ def _contract_scan_skip_diagnostics_payload(
                 "mini_exhaustion_reason": getattr(
                     contract,
                     "mini_exhaustion_reason",
+                    None,
+                ),
+                "mini_exhaustion_enabled": getattr(
+                    contract,
+                    "mini_exhaustion_enabled",
+                    None,
+                ),
+                "mini_exhaustion_thresholds_active": getattr(
+                    contract,
+                    "mini_exhaustion_thresholds_active",
                     None,
                 ),
                 "decay_ratio": getattr(contract, "decay_ratio", None),

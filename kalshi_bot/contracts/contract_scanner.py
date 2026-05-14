@@ -111,9 +111,22 @@ class ScannedContract:
     distance_to_recent_low_bps: Decimal | None = None
     range_expansion_status: str | None = None
     momentum_deceleration_status: str | None = None
+    exhaustion_base_status: str | None = None
+    exhaustion_base_reason: str | None = None
     exhaustion_status: str | None = None
+    exhaustion_guard_decision: str | None = None
+    exhaustion_progression_status: str | None = None
+    exhaustion_progression_reason: str | None = None
+    exhaustion_progression_sample_count: int | None = None
+    exhaustion_progression_aligned_count: int | None = None
+    exhaustion_progression_matched_conditions: tuple[str, ...] = ()
+    exhaustion_progression_failed_conditions: tuple[str, ...] = ()
+    exhaustion_progression_context_source: str | None = None
+    exhaustion_progression_override_enabled: bool | None = None
     early_momentum_status: str | None = None
     late_entry_risk_status: str | None = None
+    quiet_continuation_enabled: bool | None = None
+    quiet_continuation_thresholds_active: bool | None = None
     quiet_continuation_allowed_reason: str | None = None
     quiet_continuation_block_reason: str | None = None
     mean_reversion_candidate_status: str | None = None
@@ -121,8 +134,11 @@ class ScannedContract:
     reversal_safe_low_price_status: str | None = None
     weak_momentum_stabilization_status: str | None = None
     weak_momentum_stabilization_reason: str | None = None
+    weak_momentum_stabilization_config_status: str | None = None
     mini_exhaustion_status: str | None = None
     mini_exhaustion_reason: str | None = None
+    mini_exhaustion_enabled: bool | None = None
+    mini_exhaustion_thresholds_active: bool | None = None
     decay_ratio: Decimal | None = None
 
 
@@ -178,9 +194,22 @@ class SkippedContract:
     distance_to_recent_low_bps: Decimal | None = None
     range_expansion_status: str | None = None
     momentum_deceleration_status: str | None = None
+    exhaustion_base_status: str | None = None
+    exhaustion_base_reason: str | None = None
     exhaustion_status: str | None = None
+    exhaustion_guard_decision: str | None = None
+    exhaustion_progression_status: str | None = None
+    exhaustion_progression_reason: str | None = None
+    exhaustion_progression_sample_count: int | None = None
+    exhaustion_progression_aligned_count: int | None = None
+    exhaustion_progression_matched_conditions: tuple[str, ...] = ()
+    exhaustion_progression_failed_conditions: tuple[str, ...] = ()
+    exhaustion_progression_context_source: str | None = None
+    exhaustion_progression_override_enabled: bool | None = None
     early_momentum_status: str | None = None
     late_entry_risk_status: str | None = None
+    quiet_continuation_enabled: bool | None = None
+    quiet_continuation_thresholds_active: bool | None = None
     quiet_continuation_allowed_reason: str | None = None
     quiet_continuation_block_reason: str | None = None
     mean_reversion_candidate_status: str | None = None
@@ -188,8 +217,11 @@ class SkippedContract:
     reversal_safe_low_price_status: str | None = None
     weak_momentum_stabilization_status: str | None = None
     weak_momentum_stabilization_reason: str | None = None
+    weak_momentum_stabilization_config_status: str | None = None
     mini_exhaustion_status: str | None = None
     mini_exhaustion_reason: str | None = None
+    mini_exhaustion_enabled: bool | None = None
+    mini_exhaustion_thresholds_active: bool | None = None
     decay_ratio: Decimal | None = None
 
 
@@ -199,6 +231,37 @@ class ContractScanSnapshot:
 
     ranked_contracts: tuple[ScannedContract, ...]
     skipped_contracts: tuple[SkippedContract, ...]
+
+
+@dataclass(frozen=True)
+class ExhaustionProgressionSample:
+    """Minimal per-product context used to verify sustained continuation."""
+
+    product_id: str
+    direction: str | None
+    structure: str | None
+    classification_reason: str | None
+    recent_return_bps: Decimal | None
+    recent_3m_return_bps: Decimal | None
+    lookback_return_bps: Decimal | None
+    recent_5m_range_bps: Decimal | None
+    distance_to_recent_high_bps: Decimal | None
+    distance_to_recent_low_bps: Decimal | None
+    cycle_number: int | None
+    source: str | None
+
+
+@dataclass(frozen=True)
+class ExhaustionProgressionDecision:
+    """Decision details for downgrading an exhaustion hard block to caution."""
+
+    status: str
+    reason: str | None
+    sample_count: int
+    aligned_count: int
+    matched_conditions: tuple[str, ...]
+    failed_conditions: tuple[str, ...]
+    context_source: str | None
 
 
 class ContractScanner:
@@ -229,6 +292,8 @@ class ContractScanner:
             "XRP-USD",
         ),
         exhaustion_strict_burst_3m_bps: Decimal = Decimal("15"),
+        exhaustion_progression_override_enabled: bool = False,
+        exhaustion_progression_min_aligned_cycles: int = 2,
         early_momentum_enabled: bool = True,
         early_momentum_min_recent_bps: Decimal = Decimal("15"),
         early_momentum_max_3m_burst_bps: Decimal = Decimal("20"),
@@ -291,6 +356,13 @@ class ContractScanner:
         self._exhaustion_strict_burst_3m_bps = Decimal(
             str(exhaustion_strict_burst_3m_bps)
         )
+        self._exhaustion_progression_override_enabled = (
+            exhaustion_progression_override_enabled
+        )
+        self._exhaustion_progression_min_aligned_cycles = max(
+            1,
+            int(exhaustion_progression_min_aligned_cycles),
+        )
         self._early_momentum_enabled = early_momentum_enabled
         self._early_momentum_min_recent_bps = Decimal(str(early_momentum_min_recent_bps))
         self._early_momentum_max_3m_burst_bps = Decimal(
@@ -331,9 +403,13 @@ class ContractScanner:
         *,
         bias_snapshot: BiasSnapshot,
         market_snapshot: MarketStateSnapshot,
+        progression_context_by_product: (
+            Mapping[str, tuple[ExhaustionProgressionSample, ...]] | None
+        ) = None,
     ) -> ContractScanSnapshot:
         ranked_contracts: list[ScannedContract] = []
         skipped_contracts: list[SkippedContract] = []
+        progression_context_by_product = progression_context_by_product or {}
 
         for product_id, market_tickers in self._product_markets.items():
             bias_state = bias_snapshot.products.get(product_id)
@@ -434,6 +510,12 @@ class ContractScanner:
                                         feasibility=quiet_feasibility,
                                         entry_price=quiet_midpoint,
                                         quiet_continuation_block_reason=quiet_skip_reason,
+                                        progression_context=(
+                                            progression_context_by_product.get(
+                                                product_id,
+                                                (),
+                                            )
+                                        ),
                                     ),
                                     **_bias_diagnostic_fields(quiet_bias_state),
                                 )
@@ -452,6 +534,12 @@ class ContractScanner:
                                 **self._signal_quality_fields(
                                     product_id=product_id,
                                     bias_state=bias_state,
+                                    progression_context=(
+                                        progression_context_by_product.get(
+                                            product_id,
+                                            (),
+                                        )
+                                    ),
                                 ),
                                 **_bias_diagnostic_fields(bias_state),
                             )
@@ -506,6 +594,10 @@ class ContractScanner:
                     bias_state=effective_bias_state,
                     feasibility=feasibility,
                     entry_price=midpoint,
+                    progression_context=progression_context_by_product.get(
+                        product_id,
+                        (),
+                    ),
                 )
                 if feasibility_skip_reason is not None:
                     skipped_contracts.append(
@@ -579,6 +671,9 @@ class ContractScanner:
                     mini_exhaustion_status=signal_quality_fields.get(
                         "mini_exhaustion_status"
                     ),
+                    exhaustion_status=signal_quality_fields.get(
+                        "exhaustion_status"
+                    ),
                 )
                 score = score_contract(
                     confidence=score_confidence,
@@ -646,6 +741,7 @@ class ContractScanner:
         feasibility: TargetFeasibility | None = None,
         entry_price: Decimal | None = None,
         quiet_continuation_block_reason: str | None = None,
+        progression_context: tuple[ExhaustionProgressionSample, ...] = (),
     ) -> dict[str, object]:
         if bias_state is None:
             return {}
@@ -665,26 +761,16 @@ class ContractScanner:
             direction=direction,
             threshold_bps=self._exhaustion_near_extreme_bps,
         )
-        exhaustion_status = _exhaustion_status(
+        exhaustion_base_status = _exhaustion_status(
             guard_enabled=self._exhaustion_guard_enabled,
             range_expansion_status=range_status,
             momentum_deceleration_status=deceleration_status,
             near_extreme=near_extreme,
         )
-        early_status = _early_momentum_status(
-            enabled=self._early_momentum_enabled,
-            bias_state=bias_state,
-            direction=direction,
-            min_recent_bps=self._early_momentum_min_recent_bps,
-            max_3m_burst_bps=self._early_momentum_max_3m_burst_bps,
-            exhaustion_status=exhaustion_status,
-        )
-        late_entry_status = (
-            "exhaustion_risk"
-            if exhaustion_status == "blocked"
-            else "near_recent_extreme"
-            if near_extreme
-            else "clear"
+        exhaustion_base_reason = _exhaustion_base_reason(
+            range_expansion_status=range_status,
+            momentum_deceleration_status=deceleration_status,
+            near_extreme=near_extreme,
         )
         quiet_allowed_reason = None
         if str(getattr(bias_state, "classification_reason", "")).startswith(
@@ -702,12 +788,82 @@ class ContractScanner:
             bias_state=bias_state,
             feasibility=feasibility,
         )
+        progression_decision = _exhaustion_progression_decision(
+            enabled=self._exhaustion_progression_override_enabled,
+            min_aligned_cycles=self._exhaustion_progression_min_aligned_cycles,
+            product_id=product_id,
+            bias_state=bias_state,
+            feasibility=feasibility,
+            base_status=exhaustion_base_status,
+            base_reason=exhaustion_base_reason,
+            near_extreme=near_extreme,
+            mini_exhaustion_status=mini_status,
+            progression_context=progression_context,
+        )
+        exhaustion_status = (
+            "progression_caution"
+            if progression_decision.status == "allowed"
+            else exhaustion_base_status
+        )
+        early_status = _early_momentum_status(
+            enabled=self._early_momentum_enabled,
+            bias_state=bias_state,
+            direction=direction,
+            min_recent_bps=self._early_momentum_min_recent_bps,
+            max_3m_burst_bps=self._early_momentum_max_3m_burst_bps,
+            exhaustion_status=exhaustion_status,
+        )
+        late_entry_status = (
+            "exhaustion_risk"
+            if exhaustion_status == "blocked"
+            else "exhaustion_progression_caution"
+            if exhaustion_status == "progression_caution"
+            else "near_recent_extreme"
+            if near_extreme
+            else "clear"
+        )
+        exhaustion_guard_decision = (
+            "disabled"
+            if exhaustion_base_status == "disabled"
+            else "overridden_to_caution"
+            if exhaustion_status == "progression_caution"
+            else "hard_blocked"
+            if exhaustion_status == "blocked"
+            else "clear"
+        )
         return {
             "range_expansion_status": range_status,
             "momentum_deceleration_status": deceleration_status,
+            "exhaustion_base_status": exhaustion_base_status,
+            "exhaustion_base_reason": exhaustion_base_reason,
             "exhaustion_status": exhaustion_status,
+            "exhaustion_guard_decision": exhaustion_guard_decision,
+            "exhaustion_progression_status": progression_decision.status,
+            "exhaustion_progression_reason": progression_decision.reason,
+            "exhaustion_progression_sample_count": (
+                progression_decision.sample_count
+            ),
+            "exhaustion_progression_aligned_count": (
+                progression_decision.aligned_count
+            ),
+            "exhaustion_progression_matched_conditions": (
+                progression_decision.matched_conditions
+            ),
+            "exhaustion_progression_failed_conditions": (
+                progression_decision.failed_conditions
+            ),
+            "exhaustion_progression_context_source": (
+                progression_decision.context_source
+            ),
+            "exhaustion_progression_override_enabled": (
+                self._exhaustion_progression_override_enabled
+            ),
             "early_momentum_status": early_status,
             "late_entry_risk_status": late_entry_status,
+            "quiet_continuation_enabled": self._quiet_continuation_enabled,
+            "quiet_continuation_thresholds_active": (
+                self._quiet_continuation_enabled
+            ),
             "quiet_continuation_allowed_reason": quiet_allowed_reason,
             "quiet_continuation_block_reason": quiet_continuation_block_reason,
             "mean_reversion_candidate_status": _mean_reversion_candidate_status(
@@ -719,8 +875,16 @@ class ContractScanner:
             "reversal_safe_low_price_status": "not_evaluated",
             "weak_momentum_stabilization_status": weak_status,
             "weak_momentum_stabilization_reason": weak_reason,
+            "weak_momentum_stabilization_config_status": (
+                "active"
+                if self._product_weak_momentum_thresholds(product_id).count(None)
+                == 0
+                else "disabled"
+            ),
             "mini_exhaustion_status": mini_status,
             "mini_exhaustion_reason": mini_reason,
+            "mini_exhaustion_enabled": self._mini_exhaustion_enabled,
+            "mini_exhaustion_thresholds_active": self._mini_exhaustion_enabled,
             "decay_ratio": _decay_ratio(bias_state, direction=direction),
         }
 
@@ -960,6 +1124,12 @@ def scanner_live_settings_kwargs(settings: KalshiSettings) -> dict[str, object]:
         "exhaustion_strict_burst_3m_bps": (
             settings.live_exhaustion_strict_burst_3m_bps
         ),
+        "exhaustion_progression_override_enabled": (
+            settings.live_exhaustion_progression_override_enabled
+        ),
+        "exhaustion_progression_min_aligned_cycles": (
+            settings.live_exhaustion_progression_min_aligned_cycles
+        ),
         "early_momentum_enabled": settings.live_early_momentum_enabled,
         "early_momentum_min_recent_bps": settings.live_early_momentum_min_recent_bps,
         "early_momentum_max_3m_burst_bps": (
@@ -1028,6 +1198,267 @@ def _exhaustion_status(
     if range_expansion_status == "missing" or momentum_deceleration_status == "missing":
         return "missing_diagnostics"
     return "clear"
+
+
+def _exhaustion_base_reason(
+    *,
+    range_expansion_status: str,
+    momentum_deceleration_status: str,
+    near_extreme: bool,
+) -> str | None:
+    if momentum_deceleration_status == "decelerating_after_burst":
+        return "decelerating_after_burst"
+    if range_expansion_status == "expanded" and near_extreme:
+        return "expanded_range_near_extreme"
+    if range_expansion_status == "missing" or momentum_deceleration_status == "missing":
+        return "missing_diagnostics"
+    return None
+
+
+def exhaustion_progression_sample_from_bias(
+    *,
+    product_id: str,
+    bias_state,  # noqa: ANN001
+    cycle_number: int | None,
+    source: str,
+) -> ExhaustionProgressionSample:
+    return ExhaustionProgressionSample(
+        product_id=product_id,
+        direction=getattr(bias_state, "direction", None),
+        structure=getattr(bias_state, "structure", None),
+        classification_reason=getattr(bias_state, "classification_reason", None),
+        recent_return_bps=_decimal_or_none(
+            getattr(bias_state, "recent_return_bps", None)
+        ),
+        recent_3m_return_bps=_decimal_or_none(
+            getattr(bias_state, "recent_3m_return_bps", None)
+        ),
+        lookback_return_bps=_decimal_or_none(
+            getattr(bias_state, "lookback_return_bps", None)
+        ),
+        recent_5m_range_bps=_decimal_or_none(
+            getattr(bias_state, "recent_5m_range_bps", None)
+        ),
+        distance_to_recent_high_bps=_decimal_or_none(
+            getattr(bias_state, "distance_to_recent_high_bps", None)
+        ),
+        distance_to_recent_low_bps=_decimal_or_none(
+            getattr(bias_state, "distance_to_recent_low_bps", None)
+        ),
+        cycle_number=cycle_number,
+        source=source,
+    )
+
+
+def _exhaustion_progression_decision(
+    *,
+    enabled: bool,
+    min_aligned_cycles: int,
+    product_id: str,
+    bias_state,  # noqa: ANN001
+    feasibility: TargetFeasibility | None,
+    base_status: str,
+    base_reason: str | None,
+    near_extreme: bool,
+    mini_exhaustion_status: str,
+    progression_context: tuple[ExhaustionProgressionSample, ...],
+) -> ExhaustionProgressionDecision:
+    if not enabled:
+        return _progression_decision(
+            "disabled",
+            "feature_disabled",
+            progression_context,
+            aligned_count=0,
+        )
+    if base_status != "blocked":
+        return _progression_decision(
+            "not_applicable",
+            "base_not_blocked",
+            progression_context,
+            aligned_count=0,
+        )
+    if getattr(bias_state, "structure", None) != "trend":
+        return _progression_decision(
+            "not_applicable",
+            "not_trend",
+            progression_context,
+            aligned_count=0,
+        )
+    current_sample = exhaustion_progression_sample_from_bias(
+        product_id=product_id,
+        bias_state=bias_state,
+        cycle_number=None,
+        source="current_scan",
+    )
+    samples = tuple(progression_context) + (current_sample,)
+    direction = getattr(bias_state, "direction", None)
+    direction_sign = _direction_sign(direction)
+    aligned_samples = tuple(
+        sample
+        for sample in samples
+        if _progression_sample_is_aligned(
+            sample,
+            product_id=product_id,
+            direction=direction,
+        )
+    )
+    matched: list[str] = []
+    failed: list[str] = []
+    if direction_sign == 0:
+        failed.append("direction_missing")
+    else:
+        matched.append("direction_present")
+    if feasibility is None:
+        failed.append("feasibility_missing")
+    elif not bool(feasibility.side_currently_itm) or bool(feasibility.side_needs_cross):
+        failed.append("not_stable_itm_no_cross")
+    else:
+        matched.append("stable_itm_no_cross")
+    required_bps = (
+        None
+        if feasibility is None or feasibility.required_bps_per_minute is None
+        else Decimal(str(feasibility.required_bps_per_minute))
+    )
+    if required_bps is None:
+        failed.append("required_bps_missing")
+    elif required_bps > Decimal("0"):
+        failed.append("required_bps_positive")
+    else:
+        matched.append("non_positive_required_bps")
+    if mini_exhaustion_status == "flagged":
+        failed.append("mini_exhaustion_flagged")
+    else:
+        matched.append("mini_exhaustion_not_flagged")
+    if len(aligned_samples) < min_aligned_cycles:
+        failed.append("insufficient_aligned_progression_samples")
+    else:
+        matched.append("aligned_progression_samples")
+    recent_return = _decimal_or_none(getattr(bias_state, "recent_return_bps", None))
+    if recent_return is None:
+        failed.append("recent_return_missing")
+    elif _sign(recent_return) not in {0, direction_sign}:
+        failed.append("recent_return_opposite")
+    else:
+        matched.append("recent_return_aligned_or_flat")
+    recent_3m_return = _decimal_or_none(
+        getattr(bias_state, "recent_3m_return_bps", None)
+    )
+    if _aligned_abs(recent_3m_return, direction) is None:
+        failed.append("recent_3m_return_not_aligned")
+    else:
+        matched.append("recent_3m_return_aligned")
+    lookback_return = _decimal_or_none(
+        getattr(bias_state, "lookback_return_bps", None)
+    )
+    if _aligned_abs(lookback_return, direction) is None:
+        failed.append("lookback_return_not_aligned")
+    else:
+        matched.append("lookback_return_aligned")
+    current_range = _decimal_or_none(
+        getattr(bias_state, "recent_5m_range_bps", None)
+    )
+    previous_range = _latest_non_null(
+        sample.recent_5m_range_bps for sample in progression_context
+    )
+    if current_range is None or previous_range is None:
+        failed.append("range_progression_missing")
+    elif current_range > previous_range:
+        failed.append("range_accelerating")
+    else:
+        matched.append("range_not_accelerating")
+    current_distance = _progression_extreme_distance(current_sample, direction=direction)
+    previous_distance = _latest_non_null(
+        _progression_extreme_distance(sample, direction=direction)
+        for sample in progression_context
+    )
+    if current_distance is None or previous_distance is None:
+        failed.append("extreme_distance_progression_missing")
+    elif current_distance < previous_distance:
+        failed.append("extreme_distance_worsening")
+    else:
+        matched.append("extreme_distance_not_worsening")
+    if failed:
+        return ExhaustionProgressionDecision(
+            status="blocked",
+            reason=failed[0],
+            sample_count=len(samples),
+            aligned_count=len(aligned_samples),
+            matched_conditions=tuple(dict.fromkeys(matched)),
+            failed_conditions=tuple(dict.fromkeys(failed)),
+            context_source=_progression_context_source(samples),
+        )
+    return ExhaustionProgressionDecision(
+        status="allowed",
+        reason="sustained_itm_no_cross_progression",
+        sample_count=len(samples),
+        aligned_count=len(aligned_samples),
+        matched_conditions=tuple(dict.fromkeys(matched)),
+        failed_conditions=(),
+        context_source=_progression_context_source(samples),
+    )
+
+
+def _progression_decision(
+    status: str,
+    reason: str | None,
+    samples: tuple[ExhaustionProgressionSample, ...],
+    *,
+    aligned_count: int,
+) -> ExhaustionProgressionDecision:
+    return ExhaustionProgressionDecision(
+        status=status,
+        reason=reason,
+        sample_count=len(samples),
+        aligned_count=aligned_count,
+        matched_conditions=(),
+        failed_conditions=(),
+        context_source=_progression_context_source(samples),
+    )
+
+
+def _progression_sample_is_aligned(
+    sample: ExhaustionProgressionSample,
+    *,
+    product_id: str,
+    direction: str | None,
+) -> bool:
+    classification_reason = sample.classification_reason or ""
+    return (
+        sample.product_id == product_id
+        and sample.direction == direction
+        and sample.structure == "trend"
+        and not classification_reason.startswith("reversal")
+    )
+
+
+def _progression_extreme_distance(
+    sample: ExhaustionProgressionSample,
+    *,
+    direction: str | None,
+) -> Decimal | None:
+    if direction == "up":
+        return sample.distance_to_recent_high_bps
+    if direction == "down":
+        return sample.distance_to_recent_low_bps
+    return None
+
+
+def _latest_non_null(values) -> Decimal | None:  # noqa: ANN001
+    for value in reversed(tuple(values)):
+        if value is not None:
+            return Decimal(str(value))
+    return None
+
+
+def _progression_context_source(
+    samples: tuple[ExhaustionProgressionSample, ...],
+) -> str | None:
+    sources = tuple(
+        dict.fromkeys(sample.source for sample in samples if sample.source is not None)
+    )
+    if not sources:
+        return None
+    return ",".join(sources)
 
 
 def _early_momentum_status(
@@ -1664,6 +2095,7 @@ def _scanner_score_confidence(
     signal_conflict_flags: tuple[tuple[str, bool], ...],
     weak_momentum_stabilization_status: object = None,
     mini_exhaustion_status: object = None,
+    exhaustion_status: object = None,
 ) -> tuple[int, tuple[str, ...], tuple[str, ...]]:
     confidence = int(bias_state.confidence)
     downgrade_reasons: list[str] = []
@@ -1726,6 +2158,9 @@ def _scanner_score_confidence(
     if mini_exhaustion_status == "flagged":
         confidence = min(confidence, SCORE_DOWNGRADE_CONFLICT_CONFIDENCE)
         downgrade_reasons.append("mini_exhaustion")
+    if exhaustion_status == "progression_caution":
+        confidence = min(confidence, SCORE_DOWNGRADE_CONFLICT_CONFIDENCE)
+        downgrade_reasons.append("exhaustion_progression_caution")
     if trend_confirmation_status == "confirmed" and not downgrade_reasons:
         confidence = min(
             SCORE_MAX_CONFIDENCE,

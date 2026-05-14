@@ -93,6 +93,7 @@ def main() -> int:
     failures.extend(_validate_product_session_cap_blocks_overuse())
     failures.extend(_validate_candidate_funnel_summary_logs_scanner_and_live_counts())
     failures.extend(_validate_ev_no_high_actual_cost_blocks())
+    failures.extend(_validate_progression_caution_still_runs_ev_cost_gate())
 
     if failures:
         for failure in failures:
@@ -939,6 +940,16 @@ def _validate_ev_no_high_actual_cost_blocks() -> list[str]:
     )
 
 
+def _validate_progression_caution_still_runs_ev_cost_gate() -> list[str]:
+    return _expect_ev_no_skip(
+        market_ticker="KXBTC15M-EV-PROGRESSION-COST",
+        expected_reason="ev_actual_cost_above_limit",
+        expected_ev_block_reason="actual_cost_above_limit",
+        expected_ev_status="blocked",
+        exhaustion_status="progression_caution",
+    )
+
+
 def _validate_ev_no_candidate_a_required_bps_blocks() -> list[str]:
     return _expect_ev_no_skip(
         market_ticker="KXBTC15M-EV-NO-BPS",
@@ -977,6 +988,7 @@ def _expect_ev_no_skip(
     expected_ev_block_reason: str | None = None,
     expected_ev_status: str | None = None,
     relax_cost_guards: bool = False,
+    exhaustion_status: str | None = None,
 ) -> list[str]:
     with TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
@@ -1021,6 +1033,7 @@ def _expect_ev_no_skip(
                     lookback_return_bps=Decimal("-25.000"),
                     impulse_direction="down",
                     impulse_return_bps=Decimal("-18.000"),
+                    exhaustion_status=exhaustion_status,
                     contract_close_time=_future_time(minutes=7),
                     contract_time_remaining_seconds=420,
                 )
@@ -2240,6 +2253,7 @@ def _contract(
     structure: str = "trend",
     reversal_confirmation_status: str = "not_reversal",
     trend_confirmation_status: str = "confirmed",
+    exhaustion_status: str | None = None,
     contract_time_remaining_seconds: int | None = 120,
 ) -> ScannedContract:
     return ScannedContract(
@@ -2281,6 +2295,7 @@ def _contract(
         feasibility_status=feasibility_status,
         reversal_confirmation_status=reversal_confirmation_status,
         trend_confirmation_status=trend_confirmation_status,
+        exhaustion_status=exhaustion_status,
         signal_conflict_flags=(("impulse_direction_conflict", False),),
         scanner_score_confidence=confidence,
         scanner_score_downgrade_reasons=(),

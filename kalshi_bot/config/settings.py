@@ -146,6 +146,8 @@ DEFAULT_LIVE_EXHAUSTION_NEAR_EXTREME_BPS = Decimal("3")
 DEFAULT_LIVE_EXHAUSTION_DECELERATION_RECENT_BPS = Decimal("8")
 DEFAULT_LIVE_EXHAUSTION_STRICT_PRODUCTS = ("HYPE-USD", "ETH-USD", "XRP-USD")
 DEFAULT_LIVE_EXHAUSTION_STRICT_BURST_3M_BPS = Decimal("15")
+DEFAULT_LIVE_EXHAUSTION_PROGRESSION_OVERRIDE_ENABLED = False
+DEFAULT_LIVE_EXHAUSTION_PROGRESSION_MIN_ALIGNED_CYCLES = 2
 DEFAULT_LIVE_EARLY_MOMENTUM_ENABLED = True
 DEFAULT_LIVE_EARLY_MOMENTUM_MIN_RECENT_BPS = Decimal("15")
 DEFAULT_LIVE_EARLY_MOMENTUM_MAX_3M_BURST_BPS = Decimal("20")
@@ -336,6 +338,8 @@ class KalshiSettings:
     live_exhaustion_deceleration_recent_bps: Decimal
     live_exhaustion_strict_products: tuple[str, ...]
     live_exhaustion_strict_burst_3m_bps: Decimal
+    live_exhaustion_progression_override_enabled: bool
+    live_exhaustion_progression_min_aligned_cycles: int
     live_early_momentum_enabled: bool
     live_early_momentum_min_recent_bps: Decimal
     live_early_momentum_max_3m_burst_bps: Decimal
@@ -970,6 +974,16 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         DEFAULT_LIVE_EXHAUSTION_STRICT_BURST_3M_BPS,
         "LIVE_EXHAUSTION_STRICT_BURST_3M_BPS",
     )
+    live_exhaustion_progression_override_enabled = _parse_bool(
+        values.get("LIVE_EXHAUSTION_PROGRESSION_OVERRIDE_ENABLED"),
+        DEFAULT_LIVE_EXHAUSTION_PROGRESSION_OVERRIDE_ENABLED,
+        "LIVE_EXHAUSTION_PROGRESSION_OVERRIDE_ENABLED",
+    )
+    live_exhaustion_progression_min_aligned_cycles = _parse_positive_int(
+        values.get("LIVE_EXHAUSTION_PROGRESSION_MIN_ALIGNED_CYCLES"),
+        DEFAULT_LIVE_EXHAUSTION_PROGRESSION_MIN_ALIGNED_CYCLES,
+        "LIVE_EXHAUSTION_PROGRESSION_MIN_ALIGNED_CYCLES",
+    )
     live_early_momentum_enabled = _parse_bool(
         values.get("LIVE_EARLY_MOMENTUM_ENABLED"),
         DEFAULT_LIVE_EARLY_MOMENTUM_ENABLED,
@@ -1389,6 +1403,12 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_exhaustion_strict_burst_3m_bps=(
             live_exhaustion_strict_burst_3m_bps
         ),
+        live_exhaustion_progression_override_enabled=(
+            live_exhaustion_progression_override_enabled
+        ),
+        live_exhaustion_progression_min_aligned_cycles=(
+            live_exhaustion_progression_min_aligned_cycles
+        ),
         live_early_momentum_enabled=live_early_momentum_enabled,
         live_early_momentum_min_recent_bps=live_early_momentum_min_recent_bps,
         live_early_momentum_max_3m_burst_bps=(
@@ -1612,6 +1632,8 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_EXHAUSTION_DECELERATION_RECENT_BPS",
         "LIVE_EXHAUSTION_STRICT_PRODUCTS",
         "LIVE_EXHAUSTION_STRICT_BURST_3M_BPS",
+        "LIVE_EXHAUSTION_PROGRESSION_OVERRIDE_ENABLED",
+        "LIVE_EXHAUSTION_PROGRESSION_MIN_ALIGNED_CYCLES",
         "LIVE_EARLY_MOMENTUM_ENABLED",
         "LIVE_EARLY_MOMENTUM_MIN_RECENT_BPS",
         "LIVE_EARLY_MOMENTUM_MAX_3M_BURST_BPS",

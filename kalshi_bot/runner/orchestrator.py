@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -18,6 +18,8 @@ from kalshi_bot.contracts.contract_scanner import (
     ContractScanSnapshot,
     ContractScanner,
     ContractScannerError,
+    ExhaustionProgressionSample,
+    exhaustion_progression_sample_from_bias,
     scanner_live_settings_kwargs,
 )
 from kalshi_bot.execution.execution_engine import (
@@ -103,9 +105,22 @@ class SkippedContractDiagnostic:
     distance_to_recent_low_bps: Decimal | None
     range_expansion_status: str | None
     momentum_deceleration_status: str | None
+    exhaustion_base_status: str | None
+    exhaustion_base_reason: str | None
     exhaustion_status: str | None
+    exhaustion_guard_decision: str | None
+    exhaustion_progression_status: str | None
+    exhaustion_progression_reason: str | None
+    exhaustion_progression_sample_count: int | None
+    exhaustion_progression_aligned_count: int | None
+    exhaustion_progression_matched_conditions: tuple[str, ...]
+    exhaustion_progression_failed_conditions: tuple[str, ...]
+    exhaustion_progression_context_source: str | None
+    exhaustion_progression_override_enabled: bool | None
     early_momentum_status: str | None
     late_entry_risk_status: str | None
+    quiet_continuation_enabled: bool | None
+    quiet_continuation_thresholds_active: bool | None
     quiet_continuation_allowed_reason: str | None
     quiet_continuation_block_reason: str | None
 
@@ -251,6 +266,10 @@ class KalshiBotRunner:
         )
         self._market_tickers = _flatten_product_markets(self._active_product_markets)
         self._market_metadata_by_ticker: dict[str, dict[str, object]] = {}
+        self._exhaustion_progression_history_by_product: dict[
+            str,
+            deque[ExhaustionProgressionSample],
+        ] = {}
 
     @classmethod
     def from_settings(cls, settings: KalshiSettings) -> "KalshiBotRunner":
@@ -482,6 +501,11 @@ class KalshiBotRunner:
         contract_scan_snapshot = self._scan_contracts(
             bias_snapshot=bias_snapshot,
             market_snapshot=market_snapshot,
+        )
+        self._record_exhaustion_progression_samples(
+            cycle_number=cycle_number,
+            bias_snapshot=bias_snapshot,
+            source="normal_cycle",
         )
         simulation_snapshot = _empty_simulation_snapshot()
         if self._simulation_engine is not None:
@@ -889,7 +913,43 @@ class KalshiBotRunner:
         return self._contract_scanner.scan(
             bias_snapshot=bias_snapshot,
             market_snapshot=market_snapshot,
+            progression_context_by_product=(
+                self._exhaustion_progression_context_by_product()
+            ),
         )
+
+    def _record_exhaustion_progression_samples(
+        self,
+        *,
+        cycle_number: int,
+        bias_snapshot: BiasSnapshot,
+        source: str,
+    ) -> None:
+        if not self._settings.live_exhaustion_progression_override_enabled:
+            return
+        for product_id, bias_state in bias_snapshot.products.items():
+            history = self._exhaustion_progression_history_by_product.setdefault(
+                product_id,
+                deque(maxlen=3),
+            )
+            history.append(
+                exhaustion_progression_sample_from_bias(
+                    product_id=product_id,
+                    bias_state=bias_state,
+                    cycle_number=cycle_number,
+                    source=source,
+                )
+            )
+
+    def _exhaustion_progression_context_by_product(
+        self,
+    ) -> dict[str, tuple[ExhaustionProgressionSample, ...]]:
+        if not self._settings.live_exhaustion_progression_override_enabled:
+            return {}
+        return {
+            product_id: tuple(history)
+            for product_id, history in self._exhaustion_progression_history_by_product.items()
+        }
 
     def _status(
         self,
@@ -1405,9 +1465,36 @@ def _skipped_contract_diagnostics(
             distance_to_recent_low_bps=contract.distance_to_recent_low_bps,
             range_expansion_status=contract.range_expansion_status,
             momentum_deceleration_status=contract.momentum_deceleration_status,
+            exhaustion_base_status=contract.exhaustion_base_status,
+            exhaustion_base_reason=contract.exhaustion_base_reason,
             exhaustion_status=contract.exhaustion_status,
+            exhaustion_guard_decision=contract.exhaustion_guard_decision,
+            exhaustion_progression_status=contract.exhaustion_progression_status,
+            exhaustion_progression_reason=contract.exhaustion_progression_reason,
+            exhaustion_progression_sample_count=(
+                contract.exhaustion_progression_sample_count
+            ),
+            exhaustion_progression_aligned_count=(
+                contract.exhaustion_progression_aligned_count
+            ),
+            exhaustion_progression_matched_conditions=(
+                contract.exhaustion_progression_matched_conditions
+            ),
+            exhaustion_progression_failed_conditions=(
+                contract.exhaustion_progression_failed_conditions
+            ),
+            exhaustion_progression_context_source=(
+                contract.exhaustion_progression_context_source
+            ),
+            exhaustion_progression_override_enabled=(
+                contract.exhaustion_progression_override_enabled
+            ),
             early_momentum_status=contract.early_momentum_status,
             late_entry_risk_status=contract.late_entry_risk_status,
+            quiet_continuation_enabled=contract.quiet_continuation_enabled,
+            quiet_continuation_thresholds_active=(
+                contract.quiet_continuation_thresholds_active
+            ),
             quiet_continuation_allowed_reason=(
                 contract.quiet_continuation_allowed_reason
             ),
@@ -1632,9 +1719,36 @@ def _candidate_funnel_diagnostic_payloads(
             "distance_to_recent_low_bps": contract.distance_to_recent_low_bps,
             "range_expansion_status": contract.range_expansion_status,
             "momentum_deceleration_status": contract.momentum_deceleration_status,
+            "exhaustion_base_status": contract.exhaustion_base_status,
+            "exhaustion_base_reason": contract.exhaustion_base_reason,
             "exhaustion_status": contract.exhaustion_status,
+            "exhaustion_guard_decision": contract.exhaustion_guard_decision,
+            "exhaustion_progression_status": contract.exhaustion_progression_status,
+            "exhaustion_progression_reason": contract.exhaustion_progression_reason,
+            "exhaustion_progression_sample_count": (
+                contract.exhaustion_progression_sample_count
+            ),
+            "exhaustion_progression_aligned_count": (
+                contract.exhaustion_progression_aligned_count
+            ),
+            "exhaustion_progression_matched_conditions": list(
+                contract.exhaustion_progression_matched_conditions
+            ),
+            "exhaustion_progression_failed_conditions": list(
+                contract.exhaustion_progression_failed_conditions
+            ),
+            "exhaustion_progression_context_source": (
+                contract.exhaustion_progression_context_source
+            ),
+            "exhaustion_progression_override_enabled": (
+                contract.exhaustion_progression_override_enabled
+            ),
             "early_momentum_status": contract.early_momentum_status,
             "late_entry_risk_status": contract.late_entry_risk_status,
+            "quiet_continuation_enabled": contract.quiet_continuation_enabled,
+            "quiet_continuation_thresholds_active": (
+                contract.quiet_continuation_thresholds_active
+            ),
             "quiet_continuation_allowed_reason": (
                 contract.quiet_continuation_allowed_reason
             ),
@@ -1669,9 +1783,36 @@ def _candidate_funnel_diagnostic_payloads(
             "distance_to_recent_low_bps": contract.distance_to_recent_low_bps,
             "range_expansion_status": contract.range_expansion_status,
             "momentum_deceleration_status": contract.momentum_deceleration_status,
+            "exhaustion_base_status": contract.exhaustion_base_status,
+            "exhaustion_base_reason": contract.exhaustion_base_reason,
             "exhaustion_status": contract.exhaustion_status,
+            "exhaustion_guard_decision": contract.exhaustion_guard_decision,
+            "exhaustion_progression_status": contract.exhaustion_progression_status,
+            "exhaustion_progression_reason": contract.exhaustion_progression_reason,
+            "exhaustion_progression_sample_count": (
+                contract.exhaustion_progression_sample_count
+            ),
+            "exhaustion_progression_aligned_count": (
+                contract.exhaustion_progression_aligned_count
+            ),
+            "exhaustion_progression_matched_conditions": list(
+                contract.exhaustion_progression_matched_conditions
+            ),
+            "exhaustion_progression_failed_conditions": list(
+                contract.exhaustion_progression_failed_conditions
+            ),
+            "exhaustion_progression_context_source": (
+                contract.exhaustion_progression_context_source
+            ),
+            "exhaustion_progression_override_enabled": (
+                contract.exhaustion_progression_override_enabled
+            ),
             "early_momentum_status": contract.early_momentum_status,
             "late_entry_risk_status": contract.late_entry_risk_status,
+            "quiet_continuation_enabled": contract.quiet_continuation_enabled,
+            "quiet_continuation_thresholds_active": (
+                contract.quiet_continuation_thresholds_active
+            ),
             "quiet_continuation_allowed_reason": (
                 contract.quiet_continuation_allowed_reason
             ),
@@ -1732,9 +1873,36 @@ def _skipped_contract_diagnostic_payloads(
             "distance_to_recent_low_bps": item.distance_to_recent_low_bps,
             "range_expansion_status": item.range_expansion_status,
             "momentum_deceleration_status": item.momentum_deceleration_status,
+            "exhaustion_base_status": item.exhaustion_base_status,
+            "exhaustion_base_reason": item.exhaustion_base_reason,
             "exhaustion_status": item.exhaustion_status,
+            "exhaustion_guard_decision": item.exhaustion_guard_decision,
+            "exhaustion_progression_status": item.exhaustion_progression_status,
+            "exhaustion_progression_reason": item.exhaustion_progression_reason,
+            "exhaustion_progression_sample_count": (
+                item.exhaustion_progression_sample_count
+            ),
+            "exhaustion_progression_aligned_count": (
+                item.exhaustion_progression_aligned_count
+            ),
+            "exhaustion_progression_matched_conditions": list(
+                item.exhaustion_progression_matched_conditions
+            ),
+            "exhaustion_progression_failed_conditions": list(
+                item.exhaustion_progression_failed_conditions
+            ),
+            "exhaustion_progression_context_source": (
+                item.exhaustion_progression_context_source
+            ),
+            "exhaustion_progression_override_enabled": (
+                item.exhaustion_progression_override_enabled
+            ),
             "early_momentum_status": item.early_momentum_status,
             "late_entry_risk_status": item.late_entry_risk_status,
+            "quiet_continuation_enabled": item.quiet_continuation_enabled,
+            "quiet_continuation_thresholds_active": (
+                item.quiet_continuation_thresholds_active
+            ),
             "quiet_continuation_allowed_reason": (
                 item.quiet_continuation_allowed_reason
             ),

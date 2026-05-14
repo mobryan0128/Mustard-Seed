@@ -18,6 +18,7 @@ from kalshi_bot.config.settings import SettingsError, load_settings  # noqa: E40
 from kalshi_bot.contracts.contract_scanner import (  # noqa: E402
     ContractScanner,
     ContractScannerError,
+    ExhaustionProgressionSample,
 )
 from kalshi_bot.forecast.bias_engine import BiasRiskFlags, BiasSnapshot, BiasState  # noqa: E402
 from kalshi_bot.market.market_state_cache import MarketStateSnapshot, TickerState  # noqa: E402
@@ -109,6 +110,11 @@ def _run_fixtures(scanner: ContractScanner) -> list[str]:
     failures.extend(_validate_quiet_continuation_needs_cross_blocks())
     failures.extend(_validate_quiet_continuation_ignores_reversal())
     failures.extend(_validate_exhaustion_guard_blocks_burst_deceleration())
+    failures.extend(_validate_exhaustion_progression_default_off_keeps_hard_block())
+    failures.extend(_validate_exhaustion_progression_downgrades_sustained_itm())
+    failures.extend(_validate_exhaustion_progression_blocks_range_acceleration())
+    failures.extend(_validate_exhaustion_progression_blocks_extreme_worsening())
+    failures.extend(_validate_exhaustion_progression_blocks_mini_exhaustion())
     failures.extend(_validate_weak_momentum_stabilization_allows_stable_itm())
     failures.extend(_validate_weak_momentum_stabilization_blocks_near_strike_chop())
     failures.extend(_validate_mini_exhaustion_downgrades_without_hard_block())
@@ -1240,6 +1246,172 @@ def _validate_exhaustion_guard_blocks_burst_deceleration() -> list[str]:
     return []
 
 
+def _validate_exhaustion_progression_default_off_keeps_hard_block() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker=_progression_market_metadata(),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=_progression_exhaustion_bias_snapshot(),
+        market_snapshot=_base_market_snapshot(),
+        progression_context_by_product={
+            "BTC-USD": (_progression_sample(recent_5m_range_bps=Decimal("35.000")),)
+        },
+    )
+    if snapshot.ranked_contracts:
+        return [f"progression default-off ranked={snapshot.ranked_contracts}"]
+    skipped = snapshot.skipped_contracts[0]
+    failures: list[str] = []
+    if skipped.reason != "exhaustion_guard_blocked":
+        failures.append(f"progression default-off reason={skipped.reason}")
+    if skipped.exhaustion_status != "blocked":
+        failures.append(f"progression default-off status={skipped.exhaustion_status}")
+    if skipped.exhaustion_progression_status != "disabled":
+        failures.append(
+            "progression default-off progression="
+            f"{skipped.exhaustion_progression_status}"
+        )
+    return failures
+
+
+def _validate_exhaustion_progression_downgrades_sustained_itm() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker=_progression_market_metadata(),
+        exhaustion_progression_override_enabled=True,
+        exhaustion_progression_min_aligned_cycles=2,
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=_progression_exhaustion_bias_snapshot(),
+        market_snapshot=_base_market_snapshot(),
+        progression_context_by_product={
+            "BTC-USD": (_progression_sample(recent_5m_range_bps=Decimal("35.000")),)
+        },
+    )
+    if len(snapshot.ranked_contracts) != 1:
+        return [f"progression sustained ranked={snapshot.ranked_contracts}"]
+    contract = snapshot.ranked_contracts[0]
+    failures: list[str] = []
+    if contract.exhaustion_base_status != "blocked":
+        failures.append(f"progression base={contract.exhaustion_base_status}")
+    if contract.exhaustion_status != "progression_caution":
+        failures.append(f"progression final={contract.exhaustion_status}")
+    if contract.exhaustion_guard_decision != "overridden_to_caution":
+        failures.append(f"progression decision={contract.exhaustion_guard_decision}")
+    if contract.side_needs_cross:
+        failures.append("progression unexpectedly needs cross")
+    if contract.required_bps_per_minute != Decimal("0.000"):
+        failures.append(f"progression required_bps={contract.required_bps_per_minute}")
+    if "exhaustion_progression_caution" not in contract.scanner_score_downgrade_reasons:
+        failures.append(f"progression downgrades={contract.scanner_score_downgrade_reasons}")
+    if contract.exhaustion_progression_aligned_count != 2:
+        failures.append(
+            f"progression aligned={contract.exhaustion_progression_aligned_count}"
+        )
+    return failures
+
+
+def _validate_exhaustion_progression_blocks_range_acceleration() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker=_progression_market_metadata(),
+        exhaustion_progression_override_enabled=True,
+        exhaustion_progression_min_aligned_cycles=2,
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=_progression_exhaustion_bias_snapshot(
+            recent_5m_range_bps=Decimal("35.000")
+        ),
+        market_snapshot=_base_market_snapshot(),
+        progression_context_by_product={
+            "BTC-USD": (_progression_sample(recent_5m_range_bps=Decimal("30.000")),)
+        },
+    )
+    if snapshot.ranked_contracts:
+        return [f"progression range ranked={snapshot.ranked_contracts}"]
+    skipped = snapshot.skipped_contracts[0]
+    failures: list[str] = []
+    if skipped.reason != "exhaustion_guard_blocked":
+        failures.append(f"progression range reason={skipped.reason}")
+    if skipped.exhaustion_progression_reason != "range_accelerating":
+        failures.append(
+            f"progression range progression={skipped.exhaustion_progression_reason}"
+        )
+    return failures
+
+
+def _validate_exhaustion_progression_blocks_extreme_worsening() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker=_progression_market_metadata(),
+        exhaustion_progression_override_enabled=True,
+        exhaustion_progression_min_aligned_cycles=2,
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=_progression_exhaustion_bias_snapshot(
+            distance_to_recent_high_bps=Decimal("5.000")
+        ),
+        market_snapshot=_base_market_snapshot(),
+        progression_context_by_product={
+            "BTC-USD": (
+                _progression_sample(
+                    recent_5m_range_bps=Decimal("35.000"),
+                    distance_to_recent_high_bps=Decimal("8.000"),
+                ),
+            )
+        },
+    )
+    if snapshot.ranked_contracts:
+        return [f"progression extreme ranked={snapshot.ranked_contracts}"]
+    skipped = snapshot.skipped_contracts[0]
+    failures: list[str] = []
+    if skipped.reason != "exhaustion_guard_blocked":
+        failures.append(f"progression extreme reason={skipped.reason}")
+    if skipped.exhaustion_progression_reason != "extreme_distance_worsening":
+        failures.append(
+            "progression extreme progression="
+            f"{skipped.exhaustion_progression_reason}"
+        )
+    return failures
+
+
+def _validate_exhaustion_progression_blocks_mini_exhaustion() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker=_progression_market_metadata(
+            target_price=Decimal("99.98")
+        ),
+        exhaustion_progression_override_enabled=True,
+        exhaustion_progression_min_aligned_cycles=2,
+        mini_exhaustion_enabled=True,
+        mini_exhaustion_3m_bps=Decimal("30"),
+        mini_exhaustion_range_bps=Decimal("25"),
+        mini_exhaustion_recent_bps=Decimal("4"),
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=_progression_exhaustion_bias_snapshot(
+            recent_return_bps=Decimal("4.000"),
+            recent_3m_return_bps=Decimal("25.000"),
+            recent_5m_range_bps=Decimal("30.000"),
+        ),
+        market_snapshot=_base_market_snapshot(),
+        progression_context_by_product={
+            "BTC-USD": (_progression_sample(recent_5m_range_bps=Decimal("35.000")),)
+        },
+    )
+    if snapshot.ranked_contracts:
+        return [f"progression mini ranked={snapshot.ranked_contracts}"]
+    skipped = snapshot.skipped_contracts[0]
+    failures: list[str] = []
+    if skipped.mini_exhaustion_status != "flagged":
+        failures.append(f"progression mini status={skipped.mini_exhaustion_status}")
+    if skipped.exhaustion_progression_reason != "mini_exhaustion_flagged":
+        failures.append(
+            f"progression mini progression={skipped.exhaustion_progression_reason}"
+        )
+    return failures
+
+
 def _validate_weak_momentum_stabilization_allows_stable_itm() -> list[str]:
     scanner = ContractScanner(
         product_markets={"BTC-USD": ("KXBTC-1",)},
@@ -1441,6 +1613,76 @@ def _mini_exhaustion_bias_snapshot() -> BiasSnapshot:
                 distance_to_recent_low_bps=Decimal("20.000"),
             )
         }
+    )
+
+
+def _progression_market_metadata(
+    *,
+    target_price: Decimal = Decimal("99"),
+) -> dict[str, dict[str, object]]:
+    return {
+        "KXBTC-1": {
+            "close_time": _future_iso(minutes=5),
+            "target_price": target_price,
+            "target_price_source": "target_price",
+        }
+    }
+
+
+def _progression_exhaustion_bias_snapshot(
+    *,
+    recent_return_bps: Decimal = Decimal("4.000"),
+    recent_3m_return_bps: Decimal = Decimal("25.000"),
+    recent_5m_range_bps: Decimal = Decimal("30.000"),
+    distance_to_recent_high_bps: Decimal = Decimal("5.000"),
+) -> BiasSnapshot:
+    return BiasSnapshot(
+        products={
+            "BTC-USD": BiasState(
+                product_id="BTC-USD",
+                direction="up",
+                confidence=70,
+                structure="trend",
+                risk_flags=BiasRiskFlags(
+                    insufficient_history=False,
+                    stale_data=False,
+                    time_sync_failed=False,
+                ),
+                latest_price=Decimal("100"),
+                lookback_return_bps=Decimal("40.000"),
+                recent_return_bps=recent_return_bps,
+                recent_3m_return_bps=recent_3m_return_bps,
+                recent_5m_return_bps=Decimal("30.000"),
+                recent_5m_range_bps=recent_5m_range_bps,
+                distance_to_recent_high_bps=distance_to_recent_high_bps,
+                distance_to_recent_low_bps=Decimal("40.000"),
+                observation_count=50,
+                as_of="2026-04-23T12:00:00+00:00",
+                classification_reason="aligned_trend",
+                chop_threshold_bps=Decimal("10"),
+            )
+        }
+    )
+
+
+def _progression_sample(
+    *,
+    recent_5m_range_bps: Decimal,
+    distance_to_recent_high_bps: Decimal = Decimal("5.000"),
+) -> ExhaustionProgressionSample:
+    return ExhaustionProgressionSample(
+        product_id="BTC-USD",
+        direction="up",
+        structure="trend",
+        classification_reason="aligned_trend",
+        recent_return_bps=Decimal("5.000"),
+        recent_3m_return_bps=Decimal("24.000"),
+        lookback_return_bps=Decimal("35.000"),
+        recent_5m_range_bps=recent_5m_range_bps,
+        distance_to_recent_high_bps=distance_to_recent_high_bps,
+        distance_to_recent_low_bps=Decimal("40.000"),
+        cycle_number=1,
+        source="normal_cycle",
     )
 
 
