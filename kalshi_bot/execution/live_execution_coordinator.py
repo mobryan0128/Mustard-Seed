@@ -724,6 +724,31 @@ class LiveExecutionCoordinator:
                     },
                 )
                 continue
+            if (
+                getattr(contract, "structure", None) == "reversal"
+                and getattr(contract, "reversal_candidate_status", None)
+                in {"shadow_candidate", "live_candidate"}
+                and getattr(self._settings, "live_reversal_shadow_only", True)
+            ):
+                record_live_outcome(
+                    stage="reversal_shadow",
+                    reason="reversal_shadow_only",
+                    contract=contract,
+                )
+                self._log_contract_intent_skipped(
+                    reason="reversal_shadow_only",
+                    contract=contract,
+                    cycle_number=cycle_number,
+                    scan_source=scan_source,
+                    details={
+                        **_end_window_payload(end_window),
+                        **_entry_segment_payload(entry_segment),
+                        **_execution_pricing_payload(pricing),
+                        **_ev_filter_payload(ev_filter),
+                        **_product_session_pacing_payload(product_session_pacing),
+                    },
+                )
+                continue
             current_exposure_dollars = self._live_current_exposure_dollars()
             risk_decision = self._risk_manager.evaluate_entry_risk(
                 product_id=contract.product_id,
@@ -775,6 +800,17 @@ class LiveExecutionCoordinator:
                     },
                 )
                 continue
+            if (
+                getattr(contract, "structure", None) == "reversal"
+                and getattr(contract, "reversal_candidate_status", None)
+                == "live_candidate"
+            ):
+                reversal_stake_cap = getattr(
+                    self._settings,
+                    "live_reversal_low_stake_max_dollars",
+                    stake_dollars,
+                )
+                stake_dollars = min(stake_dollars, reversal_stake_cap)
 
             mid_price_confirmation = _mid_price_confirmation_status(
                 contract=contract,
@@ -2054,6 +2090,12 @@ class LiveExecutionCoordinator:
             "live_ev_extra_entries_per_product_per_session",
             0,
         )
+        if getattr(self._settings, "live_adaptive_pacing_enabled", False):
+            multiplier = getattr(contract, "adaptive_pacing_multiplier", None)
+            if multiplier is not None:
+                multiplier_decimal = Decimal(str(multiplier))
+                max_open = max(int((Decimal(max_open) * multiplier_decimal).to_integral_value(rounding=ROUND_FLOOR)), max_open)
+                max_entries = max(int((Decimal(max_entries) * multiplier_decimal).to_integral_value(rounding=ROUND_FLOOR)), max_entries)
         open_count = self._live_open_position_count_for_product(contract.product_id)
         session_key = (contract.product_id, contract.market_ticker)
         session_count = self._entry_count_by_product_session.get(session_key, 0)
@@ -2665,6 +2707,17 @@ def _reversal_cross_hold_status(
             required_seconds=required_seconds,
             block_reason=None,
         )
+    if getattr(contract, "reversal_candidate_status", None) in {
+        "shadow_candidate",
+        "live_candidate",
+    }:
+        return ReversalCrossHoldStatus(
+            allowed=True,
+            status="roadmap_reversal_candidate",
+            hold_seconds=itm_persistence.itm_hold_seconds,
+            required_seconds=required_seconds,
+            block_reason=None,
+        )
     if not bool(getattr(contract, "side_currently_itm", False)):
         return ReversalCrossHoldStatus(
             allowed=False,
@@ -2855,6 +2908,143 @@ def _ev_filter_status(
     no_cross = not bool(getattr(contract, "side_needs_cross", False))
     currently_itm = bool(getattr(contract, "side_currently_itm", False))
     trend = getattr(contract, "structure", None) == "trend"
+    roadmap_reversal = (
+        getattr(settings, "live_reversal_classifier_enabled", False)
+        and getattr(contract, "structure", None) == "reversal"
+        and getattr(contract, "reversal_candidate_status", None)
+        in {"shadow_candidate", "live_candidate"}
+    )
+    if roadmap_reversal:
+        probability = getattr(contract, "reversal_probability", None)
+        probability_decimal = (
+            Decimal(str(probability)) if probability is not None else None
+        )
+        score = (
+            (probability_decimal - cost_price).quantize(Decimal("0.0001"))
+            if probability_decimal is not None
+            else None
+        )
+        max_reversal_price = getattr(
+            settings,
+            "live_reversal_max_executable_price",
+            Decimal("0.60"),
+        )
+        min_reversal_ev = getattr(
+            settings,
+            "live_reversal_min_ev",
+            Decimal("0.00"),
+        )
+        matched_reversal = []
+        if no_cross:
+            matched_reversal.append("side_needs_cross_false")
+        if required_bps_ok:
+            matched_reversal.append("required_bps_within_limit")
+        if has_liquidity:
+            matched_reversal.append("liquidity_present")
+        if not product_blocked:
+            matched_reversal.append("product_not_blocklisted")
+        if cost_price <= max_reversal_price:
+            matched_reversal.append("entry_price_within_limit")
+        if score is not None and score >= min_reversal_ev:
+            matched_reversal.append("ev_score_at_or_above_minimum")
+        allowed_reversal = (
+            no_cross
+            and required_bps_ok
+            and has_liquidity
+            and not product_blocked
+            and cost_price <= max_reversal_price
+            and score is not None
+            and score >= min_reversal_ev
+        )
+        if not allowed_reversal:
+            missing_reversal = tuple(
+                condition
+                for condition in required_conditions
+                if condition in {
+                    "side_needs_cross_false",
+                    "required_bps_within_limit",
+                    "entry_price_within_limit",
+                    "product_not_blocklisted",
+                    "liquidity_present",
+                    "ev_score_at_or_above_minimum",
+                }
+                and condition not in matched_reversal
+            )
+            block_reason = (
+                f"missing_{missing_reversal[0]}"
+                if missing_reversal
+                else "reversal_ev_blocked"
+            )
+            return EVFilterStatus(
+                allowed=False,
+                status="blocked",
+                reason="ev_filter_blocked",
+                block_reason=block_reason,
+                cost_price=cost_price,
+                market_probability_price=cost_price,
+                product_price_cap_used=max_reversal_price,
+                product_price_cap_source="live_reversal_max_executable_price",
+                price_limit_basis="reversal_executable_price",
+                side_price_basis=side_price_basis,
+                opposite_price=opposite_price,
+                entry_price_within_limit_status=(
+                    "within_limit"
+                    if cost_price <= max_reversal_price
+                    else "above_limit"
+                ),
+                side_adjusted_price_within_limit=cost_price <= max_reversal_price,
+                no_side_price_interpretation_applied=no_side_interpretation,
+                estimated_reward=estimated_reward,
+                estimated_risk=estimated_risk,
+                cost_expected_value=score,
+                actual_cost_status="within_limit",
+                reward_status="within_limit",
+                cost_expected_value_status=(
+                    "non_negative" if score is not None and score >= min_reversal_ev else "negative"
+                ),
+                ev_exhaustion_status=getattr(contract, "exhaustion_status", None),
+                score=score,
+                score_basis="reversal_probability_minus_executable_price",
+                matched_candidate="roadmap_reversal",
+                candidate_a_match=False,
+                candidate_b_match=False,
+                probability=probability_decimal,
+                conditional_override_eligible=False,
+                required_conditions=required_conditions,
+                matched_conditions=tuple(dict.fromkeys(matched_reversal)),
+            )
+        return EVFilterStatus(
+            allowed=True,
+            status="allowed",
+            reason="ev_filter_allowed",
+            block_reason=None,
+            cost_price=cost_price,
+            market_probability_price=cost_price,
+            product_price_cap_used=max_reversal_price,
+            product_price_cap_source="live_reversal_max_executable_price",
+            price_limit_basis="reversal_executable_price",
+            side_price_basis=side_price_basis,
+            opposite_price=opposite_price,
+            entry_price_within_limit_status="within_limit",
+            side_adjusted_price_within_limit=True,
+            no_side_price_interpretation_applied=no_side_interpretation,
+            estimated_reward=estimated_reward,
+            estimated_risk=estimated_risk,
+            cost_expected_value=score,
+            actual_cost_status="within_limit",
+            reward_status="within_limit",
+            cost_expected_value_status="non_negative",
+            ev_exhaustion_status=getattr(contract, "exhaustion_status", None),
+            score=score,
+            score_basis="reversal_probability_minus_executable_price",
+            matched_candidate="roadmap_reversal",
+            candidate_a_match=False,
+            candidate_b_match=False,
+            probability=probability_decimal,
+            conditional_override_eligible=False,
+            required_conditions=required_conditions,
+            matched_conditions=tuple(dict.fromkeys(matched_reversal)),
+        )
     reversal_allowed = (
         getattr(settings, "live_ev_allow_reversal", False)
         and getattr(contract, "structure", None) == "reversal"
@@ -3239,8 +3429,8 @@ def _composite_quality_status(
     )
     reversal_max_entry_price = getattr(
         settings,
-        "live_reversal_max_entry_price",
-        Decimal("0.10"),
+        "live_reversal_max_executable_price",
+        getattr(settings, "live_reversal_max_entry_price", Decimal("0.10")),
     )
     max_required_bps_per_minute = getattr(
         settings,
@@ -3250,7 +3440,7 @@ def _composite_quality_status(
     reversal_price_status = "not_reversal"
     reversal_price_block_reason = None
     if getattr(contract, "structure", None) == "reversal":
-        if entry_price >= reversal_max_entry_price:
+        if entry_price > reversal_max_entry_price:
             reversal_price_status = "blocked"
             reversal_price_block_reason = "reversal_entry_price_too_high"
             return CompositeQualityStatus(
@@ -3280,7 +3470,73 @@ def _composite_quality_status(
                     )
                 ),
             )
-        reversal_price_status = "allowed_low_price_reversal"
+        reversal_probability = getattr(contract, "reversal_probability", None)
+        reversal_ev = getattr(contract, "reversal_expected_value", None)
+        if reversal_probability is not None and Decimal(str(reversal_probability)) < getattr(
+            settings,
+            "live_reversal_min_probability",
+            Decimal("0.55"),
+        ):
+            reversal_price_status = "blocked"
+            reversal_price_block_reason = "reversal_probability_below_minimum"
+            return CompositeQualityStatus(
+                allowed=False,
+                status="blocked_reversal_probability",
+                reason="reversal_probability_blocked",
+                block_reason="reversal_probability_blocked",
+                required_conditions=required_conditions,
+                matched_conditions=matched_conditions,
+                reversal_price_status=reversal_price_status,
+                reversal_max_entry_price=reversal_max_entry_price,
+                reversal_price_block_reason=reversal_price_block_reason,
+                needs_cross_status=_needs_cross_status(contract, settings),
+                required_bps_per_minute_status=_required_bps_per_minute_status(
+                    contract,
+                    max_required_bps_per_minute,
+                ),
+                max_required_bps_per_minute=max_required_bps_per_minute,
+                target_distance_filter_reason=None,
+                outside_end_window_exception_status=_outside_end_window_exception_status(
+                    contract=contract,
+                    pricing=pricing,
+                    entry_segment=entry_segment,
+                    end_window=end_window,
+                    settings=settings,
+                ),
+            )
+        if reversal_ev is not None and Decimal(str(reversal_ev)) < getattr(
+            settings,
+            "live_reversal_min_ev",
+            Decimal("0.00"),
+        ):
+            reversal_price_status = "blocked"
+            reversal_price_block_reason = "reversal_expected_value_below_minimum"
+            return CompositeQualityStatus(
+                allowed=False,
+                status="blocked_reversal_ev",
+                reason="reversal_ev_blocked",
+                block_reason="reversal_ev_blocked",
+                required_conditions=required_conditions,
+                matched_conditions=matched_conditions,
+                reversal_price_status=reversal_price_status,
+                reversal_max_entry_price=reversal_max_entry_price,
+                reversal_price_block_reason=reversal_price_block_reason,
+                needs_cross_status=_needs_cross_status(contract, settings),
+                required_bps_per_minute_status=_required_bps_per_minute_status(
+                    contract,
+                    max_required_bps_per_minute,
+                ),
+                max_required_bps_per_minute=max_required_bps_per_minute,
+                target_distance_filter_reason=None,
+                outside_end_window_exception_status=_outside_end_window_exception_status(
+                    contract=contract,
+                    pricing=pricing,
+                    entry_segment=entry_segment,
+                    end_window=end_window,
+                    settings=settings,
+                ),
+            )
+        reversal_price_status = "allowed_reversal_price_ev"
 
     needs_cross_status = _needs_cross_status(contract, settings)
     if needs_cross_status == "blocked":
@@ -3387,11 +3643,11 @@ def _composite_quality_status(
             outside_end_window_exception_status=outside_status,
         )
 
-    if reversal_price_status == "allowed_low_price_reversal":
+    if reversal_price_status in {"allowed_low_price_reversal", "allowed_reversal_price_ev"}:
         return CompositeQualityStatus(
             allowed=True,
-            status="allowed_low_price_reversal",
-            reason="low_price_reversal_allowed",
+            status=reversal_price_status,
+            reason="reversal_price_ev_allowed",
             block_reason=None,
             required_conditions=required_conditions,
             matched_conditions=matched_conditions,
@@ -3422,6 +3678,61 @@ def _composite_quality_status(
             target_distance_filter_reason=None,
             outside_end_window_exception_status=outside_status,
         )
+
+    if getattr(settings, "live_composite_score_enabled", False):
+        composite_score = getattr(contract, "composite_score", None)
+        quality_band = getattr(contract, "quality_band", None)
+        score_min = getattr(settings, "live_composite_score_min", Decimal("0.60"))
+        borderline_min = getattr(
+            settings,
+            "live_composite_borderline_min",
+            Decimal("0.40"),
+        )
+        progression_quality = getattr(
+            contract,
+            "progression_continuation_quality",
+            None,
+        )
+        if composite_score is None:
+            return CompositeQualityStatus(
+                allowed=False,
+                status="blocked_composite_score_missing",
+                reason="composite_score_missing",
+                block_reason="composite_score_missing",
+                required_conditions=required_conditions,
+                matched_conditions=matched_conditions,
+                reversal_price_status=reversal_price_status,
+                reversal_max_entry_price=reversal_max_entry_price,
+                reversal_price_block_reason=reversal_price_block_reason,
+                needs_cross_status=needs_cross_status,
+                required_bps_per_minute_status=required_bps_status,
+                max_required_bps_per_minute=max_required_bps_per_minute,
+                target_distance_filter_reason=None,
+                outside_end_window_exception_status=outside_status,
+            )
+        composite_score = Decimal(str(composite_score))
+        if composite_score < score_min and not (
+            composite_score >= borderline_min
+            and progression_quality == "strengthening"
+            and ev_filter is not None
+            and ev_filter.allowed
+        ):
+            return CompositeQualityStatus(
+                allowed=False,
+                status="blocked_composite_score",
+                reason="composite_score_blocked",
+                block_reason=f"quality_band_{quality_band or 'unknown'}",
+                required_conditions=required_conditions,
+                matched_conditions=matched_conditions,
+                reversal_price_status=reversal_price_status,
+                reversal_max_entry_price=reversal_max_entry_price,
+                reversal_price_block_reason=reversal_price_block_reason,
+                needs_cross_status=needs_cross_status,
+                required_bps_per_minute_status=required_bps_status,
+                max_required_bps_per_minute=max_required_bps_per_minute,
+                target_distance_filter_reason=None,
+                outside_end_window_exception_status=outside_status,
+            )
 
     missing = tuple(
         condition
@@ -4186,6 +4497,79 @@ def _signal_diagnostic_payload(contract: ScannedContract) -> dict[str, object]:
             None,
         ),
         "decay_ratio": getattr(contract, "decay_ratio", None),
+        "return_range_ratio": getattr(contract, "return_range_ratio", None),
+        "ratio_decay": getattr(contract, "ratio_decay", None),
+        "near_extreme_distance_bps": getattr(
+            contract,
+            "near_extreme_distance_bps",
+            None,
+        ),
+        "adaptive_chop_threshold_bps": getattr(
+            contract,
+            "adaptive_chop_threshold_bps",
+            None,
+        ),
+        "adaptive_near_extreme_bps": getattr(
+            contract,
+            "adaptive_near_extreme_bps",
+            None,
+        ),
+        "adaptive_ratio_floor": getattr(contract, "adaptive_ratio_floor", None),
+        "adaptive_required_bps_per_minute_limit": getattr(
+            contract,
+            "adaptive_required_bps_per_minute_limit",
+            None,
+        ),
+        "adaptive_pacing_multiplier": getattr(
+            contract,
+            "adaptive_pacing_multiplier",
+            None,
+        ),
+        "composite_score": getattr(contract, "composite_score", None),
+        "continuation_score": getattr(contract, "continuation_score", None),
+        "reversal_score": getattr(contract, "reversal_score", None),
+        "hit_probability_estimate": getattr(
+            contract,
+            "hit_probability_estimate",
+            None,
+        ),
+        "quality_band": getattr(contract, "quality_band", None),
+        "score_components": dict(getattr(contract, "score_components", ()) or ()),
+        "hard_gate_results": dict(getattr(contract, "hard_gate_results", ()) or ()),
+        "trend_age_cycles": getattr(contract, "trend_age_cycles", None),
+        "failed_continuation_count": getattr(
+            contract,
+            "failed_continuation_count",
+            None,
+        ),
+        "retry_degradation_factor": getattr(
+            contract,
+            "retry_degradation_factor",
+            None,
+        ),
+        "progression_continuation_quality": getattr(
+            contract,
+            "progression_continuation_quality",
+            None,
+        ),
+        "reversal_probability": getattr(contract, "reversal_probability", None),
+        "reversal_expected_value": getattr(contract, "reversal_expected_value", None),
+        "reversal_candidate_status": getattr(
+            contract,
+            "reversal_candidate_status",
+            None,
+        ),
+        "reversal_rejection_reason": getattr(
+            contract,
+            "reversal_rejection_reason",
+            None,
+        ),
+        "fake_continuation_signature": getattr(
+            contract,
+            "fake_continuation_signature",
+            None,
+        ),
+        "reversal_shadow_only": getattr(contract, "reversal_shadow_only", None),
     }
 
 

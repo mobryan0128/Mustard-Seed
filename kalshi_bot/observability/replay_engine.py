@@ -77,6 +77,21 @@ class ReplayEngine:
             recorded_at=recorded_at,
         )
 
+    def record_roadmap_decision(
+        self,
+        *,
+        identifier: str | None,
+        payload: Mapping[str, Any],
+        recorded_at: datetime | None = None,
+    ) -> ReplayRecord:
+        return self.record_message(
+            source="roadmap_decision",
+            message_type="roadmap_decision",
+            identifier=identifier,
+            payload=payload,
+            recorded_at=recorded_at,
+        )
+
     def write_record(self, record: ReplayRecord) -> None:
         if not self._enabled:
             return

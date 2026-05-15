@@ -567,10 +567,11 @@ def _session_start_from_market_payload(market: dict[str, Any]) -> datetime | Non
 def _candidate_ticker(*, series_ticker: str, session_start_utc: datetime) -> str | None:
     if not series_ticker:
         return None
+    month = f"{session_start_utc:%b}".upper()
     return (
         f"{series_ticker}-"
         f"{session_start_utc:%y}"
-        f"{session_start_utc:%b}".upper()
+        f"{month}"
         f"{session_start_utc:%d%H%M}-00"
     )
 

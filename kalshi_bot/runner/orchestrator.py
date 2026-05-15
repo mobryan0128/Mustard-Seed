@@ -29,6 +29,10 @@ from kalshi_bot.execution.execution_engine import (
 )
 from kalshi_bot.execution.live_execution_coordinator import LiveExecutionCoordinator
 from kalshi_bot.forecast.bias_engine import BiasEngine, BiasEngineError, BiasSnapshot
+from kalshi_bot.forecast.progression_memory import (
+    ProgressionMemory,
+    observation_from_payload,
+)
 from kalshi_bot.market.crypto_market_discovery import (
     CryptoMarketDiscovery,
     CryptoMarketDiscoveryError,
@@ -123,6 +127,7 @@ class SkippedContractDiagnostic:
     quiet_continuation_thresholds_active: bool | None
     quiet_continuation_allowed_reason: str | None
     quiet_continuation_block_reason: str | None
+    roadmap_diagnostics: tuple[tuple[str, object], ...]
 
 
 @dataclass(frozen=True)
@@ -270,6 +275,15 @@ class KalshiBotRunner:
             str,
             deque[ExhaustionProgressionSample],
         ] = {}
+        self._progression_memory = (
+            ProgressionMemory(
+                window_cycles=settings.live_progression_memory_window_cycles,
+                max_age_seconds=settings.live_progression_memory_max_age_seconds,
+                retry_score_decay=settings.live_retry_score_decay,
+            )
+            if settings.live_progression_memory_enabled
+            else None
+        )
 
     @classmethod
     def from_settings(cls, settings: KalshiSettings) -> "KalshiBotRunner":
@@ -458,6 +472,7 @@ class KalshiBotRunner:
             bias_snapshot=bias_snapshot,
             market_snapshot=market_snapshot,
         )
+        self._record_progression_memory_samples(contract_scan_snapshot)
         live_intents = (
             self._live_execution_coordinator.process_contract_scan_snapshot(
                 contract_scan_snapshot,
@@ -502,6 +517,7 @@ class KalshiBotRunner:
             bias_snapshot=bias_snapshot,
             market_snapshot=market_snapshot,
         )
+        self._record_progression_memory_samples(contract_scan_snapshot)
         self._record_exhaustion_progression_samples(
             cycle_number=cycle_number,
             bias_snapshot=bias_snapshot,
@@ -572,6 +588,7 @@ class KalshiBotRunner:
         )
         self._latest_result = result
         self._record_cycle_snapshot(result)
+        self._record_roadmap_shadow_decisions(result)
         if cycle_number % self._settings.runner_status_log_every_n_cycles == 0:
             self._log_cycle_event(
                 "cycle_completed",
@@ -916,6 +933,11 @@ class KalshiBotRunner:
             progression_context_by_product=(
                 self._exhaustion_progression_context_by_product()
             ),
+            progression_memory_by_product=(
+                self._progression_memory.states_by_product()
+                if self._progression_memory is not None
+                else {}
+            ),
         )
 
     def _record_exhaustion_progression_samples(
@@ -940,6 +962,117 @@ class KalshiBotRunner:
                     source=source,
                 )
             )
+
+    def _record_progression_memory_samples(
+        self,
+        contract_scan_snapshot: ContractScanSnapshot,
+    ) -> None:
+        if self._progression_memory is None:
+            return
+        observations = []
+        for contract in contract_scan_snapshot.ranked_contracts:
+            observations.append(
+                observation_from_payload(
+                    product_id=contract.product_id,
+                    market_ticker=contract.market_ticker,
+                    direction=contract.direction,
+                    structure=contract.structure,
+                    return_range_ratio=getattr(contract, "return_range_ratio", None),
+                    near_extreme=(
+                        getattr(contract, "near_extreme_distance_bps", None)
+                        is not None
+                        and getattr(contract, "adaptive_near_extreme_bps", None)
+                        is not None
+                        and getattr(contract, "near_extreme_distance_bps")
+                        <= getattr(contract, "adaptive_near_extreme_bps")
+                    ),
+                    near_extreme_distance_bps=getattr(
+                        contract,
+                        "near_extreme_distance_bps",
+                        None,
+                    ),
+                    deceleration_status=getattr(
+                        contract,
+                        "momentum_deceleration_status",
+                        None,
+                    ),
+                    range_expansion_status=getattr(
+                        contract,
+                        "range_expansion_status",
+                        None,
+                    ),
+                    side_currently_itm=getattr(
+                        contract,
+                        "side_currently_itm",
+                        None,
+                    ),
+                    side_needs_cross=getattr(contract, "side_needs_cross", None),
+                    distance_to_target_bps=getattr(
+                        contract,
+                        "distance_to_target_bps",
+                        None,
+                    ),
+                    required_bps_per_minute=getattr(
+                        contract,
+                        "required_bps_per_minute",
+                        None,
+                    ),
+                    accepted=True,
+                    reason=None,
+                )
+            )
+        for contract in contract_scan_snapshot.skipped_contracts:
+            observations.append(
+                observation_from_payload(
+                    product_id=contract.product_id,
+                    market_ticker=contract.market_ticker,
+                    direction=getattr(contract, "direction", None),
+                    structure=getattr(contract, "structure", None),
+                    return_range_ratio=getattr(contract, "return_range_ratio", None),
+                    near_extreme=(
+                        getattr(contract, "near_extreme_distance_bps", None)
+                        is not None
+                        and getattr(contract, "adaptive_near_extreme_bps", None)
+                        is not None
+                        and getattr(contract, "near_extreme_distance_bps")
+                        <= getattr(contract, "adaptive_near_extreme_bps")
+                    ),
+                    near_extreme_distance_bps=getattr(
+                        contract,
+                        "near_extreme_distance_bps",
+                        None,
+                    ),
+                    deceleration_status=getattr(
+                        contract,
+                        "momentum_deceleration_status",
+                        None,
+                    ),
+                    range_expansion_status=getattr(
+                        contract,
+                        "range_expansion_status",
+                        None,
+                    ),
+                    side_currently_itm=getattr(
+                        contract,
+                        "side_currently_itm",
+                        None,
+                    ),
+                    side_needs_cross=getattr(contract, "side_needs_cross", None),
+                    distance_to_target_bps=getattr(
+                        contract,
+                        "distance_to_target_bps",
+                        None,
+                    ),
+                    required_bps_per_minute=getattr(
+                        contract,
+                        "required_bps_per_minute",
+                        None,
+                    ),
+                    accepted=False,
+                    reason=contract.reason,
+                )
+            )
+        self._progression_memory.update_many(observations)
 
     def _exhaustion_progression_context_by_product(
         self,
@@ -1115,6 +1248,50 @@ class KalshiBotRunner:
             snapshot_name="cycle_snapshot",
             snapshot=payload,
         )
+
+    def _record_roadmap_shadow_decisions(self, result: RunnerCycleResult) -> None:
+        if not self._settings.live_shadow_decision_log_enabled:
+            return
+        for stage, items in (
+            ("scanner_ranked", result.contract_scan_snapshot.ranked_contracts),
+            ("scanner_skipped", result.contract_scan_snapshot.skipped_contracts),
+        ):
+            for item in items:
+                payload = {
+                    "cycle_number": result.cycle_number,
+                    "stage": stage,
+                    "product_id": getattr(item, "product_id", None),
+                    "market_ticker": getattr(item, "market_ticker", None),
+                    "direction": getattr(item, "direction", None),
+                    "structure": getattr(item, "structure", None),
+                    "reason": getattr(item, "reason", None),
+                    "classification_reason": getattr(
+                        item,
+                        "classification_reason",
+                        None,
+                    ),
+                    "confidence": getattr(item, "confidence", None),
+                    "required_bps_per_minute": getattr(
+                        item,
+                        "required_bps_per_minute",
+                        None,
+                    ),
+                    "side_needs_cross": getattr(item, "side_needs_cross", None),
+                    **_roadmap_diagnostic_fields(item),
+                }
+                identifier = ":".join(
+                    str(part)
+                    for part in (
+                        result.cycle_number,
+                        stage,
+                        getattr(item, "market_ticker", None),
+                    )
+                    if part is not None
+                )
+                self._replay_engine.record_roadmap_decision(
+                    identifier=identifier,
+                    payload=payload,
+                )
 
     def _log_cycle_event(self, event_type: str, payload: dict[str, object]) -> None:
         self._logger.log_event(
@@ -1499,6 +1676,7 @@ def _skipped_contract_diagnostics(
                 contract.quiet_continuation_allowed_reason
             ),
             quiet_continuation_block_reason=contract.quiet_continuation_block_reason,
+            roadmap_diagnostics=tuple(_roadmap_diagnostic_fields(contract).items()),
         )
         for contract in contract_scan_snapshot.skipped_contracts[:10]
     )
@@ -1755,6 +1933,7 @@ def _candidate_funnel_diagnostic_payloads(
             "quiet_continuation_block_reason": (
                 contract.quiet_continuation_block_reason
             ),
+            **_roadmap_diagnostic_fields(contract),
         }
         for contract in contract_scan_snapshot.ranked_contracts[:10]
     )
@@ -1819,10 +1998,73 @@ def _candidate_funnel_diagnostic_payloads(
             "quiet_continuation_block_reason": (
                 contract.quiet_continuation_block_reason
             ),
+            **_roadmap_diagnostic_fields(contract),
         }
         for contract in contract_scan_snapshot.skipped_contracts[:10]
     )
     return ranked_payloads + skipped_payloads
+
+
+def _roadmap_diagnostic_fields(item) -> dict[str, object]:  # noqa: ANN001
+    return {
+        "return_range_ratio": getattr(item, "return_range_ratio", None),
+        "ratio_decay": getattr(item, "ratio_decay", None),
+        "near_extreme_distance_bps": getattr(item, "near_extreme_distance_bps", None),
+        "adaptive_chop_threshold_bps": getattr(
+            item,
+            "adaptive_chop_threshold_bps",
+            None,
+        ),
+        "adaptive_near_extreme_bps": getattr(item, "adaptive_near_extreme_bps", None),
+        "adaptive_ratio_floor": getattr(item, "adaptive_ratio_floor", None),
+        "adaptive_required_bps_per_minute_limit": getattr(
+            item,
+            "adaptive_required_bps_per_minute_limit",
+            None,
+        ),
+        "adaptive_pacing_multiplier": getattr(
+            item,
+            "adaptive_pacing_multiplier",
+            None,
+        ),
+        "composite_score": getattr(item, "composite_score", None),
+        "continuation_score": getattr(item, "continuation_score", None),
+        "reversal_score": getattr(item, "reversal_score", None),
+        "hit_probability_estimate": getattr(item, "hit_probability_estimate", None),
+        "quality_band": getattr(item, "quality_band", None),
+        "score_components": dict(getattr(item, "score_components", ()) or ()),
+        "hard_gate_results": dict(getattr(item, "hard_gate_results", ()) or ()),
+        "trend_age_cycles": getattr(item, "trend_age_cycles", None),
+        "failed_continuation_count": getattr(
+            item,
+            "failed_continuation_count",
+            None,
+        ),
+        "retry_degradation_factor": getattr(item, "retry_degradation_factor", None),
+        "progression_continuation_quality": getattr(
+            item,
+            "progression_continuation_quality",
+            None,
+        ),
+        "reversal_probability": getattr(item, "reversal_probability", None),
+        "reversal_expected_value": getattr(item, "reversal_expected_value", None),
+        "reversal_candidate_status": getattr(
+            item,
+            "reversal_candidate_status",
+            None,
+        ),
+        "reversal_rejection_reason": getattr(
+            item,
+            "reversal_rejection_reason",
+            None,
+        ),
+        "fake_continuation_signature": getattr(
+            item,
+            "fake_continuation_signature",
+            None,
+        ),
+        "reversal_shadow_only": getattr(item, "reversal_shadow_only", None),
+    }
 
 
 def _skipped_contract_diagnostic_payloads(
@@ -1907,6 +2149,7 @@ def _skipped_contract_diagnostic_payloads(
                 item.quiet_continuation_allowed_reason
             ),
             "quiet_continuation_block_reason": item.quiet_continuation_block_reason,
+            **dict(item.roadmap_diagnostics),
         }
         for item in diagnostics
     )

@@ -167,6 +167,54 @@ DEFAULT_LIVE_MINI_EXHAUSTION_RECENT_BPS = Decimal("6")
 DEFAULT_LIVE_BIAS_RECENT_RETURN_MIN: Decimal | None = None
 DEFAULT_LIVE_BIAS_LOOKBACK_RETURN_MIN: Decimal | None = None
 DEFAULT_LIVE_MIN_CROSS_DISTANCE_BPS = Decimal("0")
+DEFAULT_LIVE_ADAPTIVE_THRESHOLDS_ENABLED = False
+DEFAULT_LIVE_COMPOSITE_SCORE_ENABLED = False
+DEFAULT_LIVE_COMPOSITE_SCORE_MIN = Decimal("0.60")
+DEFAULT_LIVE_COMPOSITE_BORDERLINE_MIN = Decimal("0.40")
+DEFAULT_LIVE_RETURN_RANGE_RATIO_ENABLED = True
+DEFAULT_LIVE_RETURN_RANGE_RATIO_MIN_BY_PRODUCT = {
+    "BTC-USD": Decimal("0.50"),
+    "ETH-USD": Decimal("0.50"),
+    "SOL-USD": Decimal("0.50"),
+    "BNB-USD": Decimal("0.50"),
+    "DOGE-USD": Decimal("0.80"),
+    "XRP-USD": Decimal("0.80"),
+    "HYPE-USD": Decimal("0.80"),
+}
+DEFAULT_LIVE_PROGRESSION_MEMORY_ENABLED = False
+DEFAULT_LIVE_PROGRESSION_MEMORY_WINDOW_CYCLES = 4
+DEFAULT_LIVE_PROGRESSION_MEMORY_MAX_AGE_SECONDS = 3600
+DEFAULT_LIVE_RETRY_DEGRADATION_ENABLED = True
+DEFAULT_LIVE_RETRY_SCORE_DECAY = Decimal("0.20")
+DEFAULT_LIVE_REVERSAL_CLASSIFIER_ENABLED = False
+DEFAULT_LIVE_REVERSAL_SHADOW_ONLY = True
+DEFAULT_LIVE_REVERSAL_MAX_EXECUTABLE_PRICE = Decimal("0.60")
+DEFAULT_LIVE_REVERSAL_MIN_EV = Decimal("0.00")
+DEFAULT_LIVE_REVERSAL_LOW_STAKE_MAX_DOLLARS = Decimal("1.00")
+DEFAULT_LIVE_REVERSAL_MIN_PROBABILITY = Decimal("0.55")
+DEFAULT_LIVE_UNIFIED_NEAR_EXTREME_ENABLED = False
+DEFAULT_LIVE_UNIFIED_NEAR_EXTREME_BASE_BPS_BY_PRODUCT = {
+    "BTC-USD": Decimal("6"),
+    "ETH-USD": Decimal("6"),
+    "SOL-USD": Decimal("4"),
+    "BNB-USD": Decimal("4"),
+    "DOGE-USD": Decimal("2"),
+    "XRP-USD": Decimal("2"),
+    "HYPE-USD": Decimal("2"),
+}
+DEFAULT_LIVE_ADAPTIVE_CHOP_ENABLED = False
+DEFAULT_LIVE_ADAPTIVE_PACING_ENABLED = False
+DEFAULT_LIVE_PRODUCT_VOLATILITY_SCALE_BY_PRODUCT = {
+    "BTC-USD": Decimal("1.00"),
+    "ETH-USD": Decimal("1.00"),
+    "SOL-USD": Decimal("1.00"),
+    "BNB-USD": Decimal("1.00"),
+    "DOGE-USD": Decimal("1.10"),
+    "XRP-USD": Decimal("1.10"),
+    "HYPE-USD": Decimal("1.20"),
+}
+DEFAULT_LIVE_SCORE_TELEMETRY_ENABLED = True
+DEFAULT_LIVE_SHADOW_DECISION_LOG_ENABLED = True
 DEFAULT_RUNNER_ENABLED = True
 DEFAULT_RUNNER_LOOP_INTERVAL_SECONDS = 5.0
 DEFAULT_RUNNER_STATUS_LOG_EVERY_N_CYCLES = 1
@@ -359,6 +407,30 @@ class KalshiSettings:
     live_bias_recent_return_min: Decimal | None
     live_bias_lookback_return_min: Decimal | None
     live_min_cross_distance_bps: Decimal
+    live_adaptive_thresholds_enabled: bool
+    live_composite_score_enabled: bool
+    live_composite_score_min: Decimal
+    live_composite_borderline_min: Decimal
+    live_return_range_ratio_enabled: bool
+    live_return_range_ratio_min_by_product: dict[str, Decimal]
+    live_progression_memory_enabled: bool
+    live_progression_memory_window_cycles: int
+    live_progression_memory_max_age_seconds: int
+    live_retry_degradation_enabled: bool
+    live_retry_score_decay: Decimal
+    live_reversal_classifier_enabled: bool
+    live_reversal_shadow_only: bool
+    live_reversal_max_executable_price: Decimal
+    live_reversal_min_ev: Decimal
+    live_reversal_low_stake_max_dollars: Decimal
+    live_reversal_min_probability: Decimal
+    live_unified_near_extreme_enabled: bool
+    live_unified_near_extreme_base_bps_by_product: dict[str, Decimal]
+    live_adaptive_chop_enabled: bool
+    live_adaptive_pacing_enabled: bool
+    live_product_volatility_scale_by_product: dict[str, Decimal]
+    live_score_telemetry_enabled: bool
+    live_shadow_decision_log_enabled: bool
     runner_enabled: bool
     runner_loop_interval_seconds: float
     runner_status_log_every_n_cycles: int
@@ -1071,6 +1143,130 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         DEFAULT_LIVE_MIN_CROSS_DISTANCE_BPS,
         "LIVE_MIN_CROSS_DISTANCE_BPS",
     )
+    live_adaptive_thresholds_enabled = _parse_bool(
+        values.get("LIVE_ADAPTIVE_THRESHOLDS_ENABLED"),
+        DEFAULT_LIVE_ADAPTIVE_THRESHOLDS_ENABLED,
+        "LIVE_ADAPTIVE_THRESHOLDS_ENABLED",
+    )
+    live_composite_score_enabled = _parse_bool(
+        values.get("LIVE_COMPOSITE_SCORE_ENABLED"),
+        DEFAULT_LIVE_COMPOSITE_SCORE_ENABLED,
+        "LIVE_COMPOSITE_SCORE_ENABLED",
+    )
+    live_composite_score_min = _parse_probability(
+        values.get("LIVE_COMPOSITE_SCORE_MIN"),
+        DEFAULT_LIVE_COMPOSITE_SCORE_MIN,
+        "LIVE_COMPOSITE_SCORE_MIN",
+    )
+    live_composite_borderline_min = _parse_probability(
+        values.get("LIVE_COMPOSITE_BORDERLINE_MIN"),
+        DEFAULT_LIVE_COMPOSITE_BORDERLINE_MIN,
+        "LIVE_COMPOSITE_BORDERLINE_MIN",
+    )
+    if live_composite_borderline_min > live_composite_score_min:
+        raise SettingsError(
+            "LIVE_COMPOSITE_BORDERLINE_MIN must be less than or equal to "
+            "LIVE_COMPOSITE_SCORE_MIN."
+        )
+    live_return_range_ratio_enabled = _parse_bool(
+        values.get("LIVE_RETURN_RANGE_RATIO_ENABLED"),
+        DEFAULT_LIVE_RETURN_RANGE_RATIO_ENABLED,
+        "LIVE_RETURN_RANGE_RATIO_ENABLED",
+    )
+    live_return_range_ratio_min_by_product = _parse_product_decimal_map(
+        values.get("LIVE_RETURN_RANGE_RATIO_MIN_BY_PRODUCT"),
+        DEFAULT_LIVE_RETURN_RANGE_RATIO_MIN_BY_PRODUCT,
+        "LIVE_RETURN_RANGE_RATIO_MIN_BY_PRODUCT",
+    )
+    live_progression_memory_enabled = _parse_bool(
+        values.get("LIVE_PROGRESSION_MEMORY_ENABLED"),
+        DEFAULT_LIVE_PROGRESSION_MEMORY_ENABLED,
+        "LIVE_PROGRESSION_MEMORY_ENABLED",
+    )
+    live_progression_memory_window_cycles = _parse_positive_int(
+        values.get("LIVE_PROGRESSION_MEMORY_WINDOW_CYCLES"),
+        DEFAULT_LIVE_PROGRESSION_MEMORY_WINDOW_CYCLES,
+        "LIVE_PROGRESSION_MEMORY_WINDOW_CYCLES",
+    )
+    live_progression_memory_max_age_seconds = _parse_positive_int(
+        values.get("LIVE_PROGRESSION_MEMORY_MAX_AGE_SECONDS"),
+        DEFAULT_LIVE_PROGRESSION_MEMORY_MAX_AGE_SECONDS,
+        "LIVE_PROGRESSION_MEMORY_MAX_AGE_SECONDS",
+    )
+    live_retry_degradation_enabled = _parse_bool(
+        values.get("LIVE_RETRY_DEGRADATION_ENABLED"),
+        DEFAULT_LIVE_RETRY_DEGRADATION_ENABLED,
+        "LIVE_RETRY_DEGRADATION_ENABLED",
+    )
+    live_retry_score_decay = _parse_non_negative_decimal(
+        values.get("LIVE_RETRY_SCORE_DECAY"),
+        DEFAULT_LIVE_RETRY_SCORE_DECAY,
+        "LIVE_RETRY_SCORE_DECAY",
+    )
+    live_reversal_classifier_enabled = _parse_bool(
+        values.get("LIVE_REVERSAL_CLASSIFIER_ENABLED"),
+        DEFAULT_LIVE_REVERSAL_CLASSIFIER_ENABLED,
+        "LIVE_REVERSAL_CLASSIFIER_ENABLED",
+    )
+    live_reversal_shadow_only = _parse_bool(
+        values.get("LIVE_REVERSAL_SHADOW_ONLY"),
+        DEFAULT_LIVE_REVERSAL_SHADOW_ONLY,
+        "LIVE_REVERSAL_SHADOW_ONLY",
+    )
+    live_reversal_max_executable_price = _parse_price_dollars(
+        values.get("LIVE_REVERSAL_MAX_EXECUTABLE_PRICE"),
+        "LIVE_REVERSAL_MAX_EXECUTABLE_PRICE",
+    ) or DEFAULT_LIVE_REVERSAL_MAX_EXECUTABLE_PRICE
+    live_reversal_min_ev = _parse_non_negative_decimal(
+        values.get("LIVE_REVERSAL_MIN_EV"),
+        DEFAULT_LIVE_REVERSAL_MIN_EV,
+        "LIVE_REVERSAL_MIN_EV",
+    )
+    live_reversal_low_stake_max_dollars = _parse_positive_decimal(
+        values.get("LIVE_REVERSAL_LOW_STAKE_MAX_DOLLARS"),
+        DEFAULT_LIVE_REVERSAL_LOW_STAKE_MAX_DOLLARS,
+        "LIVE_REVERSAL_LOW_STAKE_MAX_DOLLARS",
+    )
+    live_reversal_min_probability = _parse_probability(
+        values.get("LIVE_REVERSAL_MIN_PROBABILITY"),
+        DEFAULT_LIVE_REVERSAL_MIN_PROBABILITY,
+        "LIVE_REVERSAL_MIN_PROBABILITY",
+    )
+    live_unified_near_extreme_enabled = _parse_bool(
+        values.get("LIVE_UNIFIED_NEAR_EXTREME_ENABLED"),
+        DEFAULT_LIVE_UNIFIED_NEAR_EXTREME_ENABLED,
+        "LIVE_UNIFIED_NEAR_EXTREME_ENABLED",
+    )
+    live_unified_near_extreme_base_bps_by_product = _parse_product_decimal_map(
+        values.get("LIVE_UNIFIED_NEAR_EXTREME_BASE_BPS_BY_PRODUCT"),
+        DEFAULT_LIVE_UNIFIED_NEAR_EXTREME_BASE_BPS_BY_PRODUCT,
+        "LIVE_UNIFIED_NEAR_EXTREME_BASE_BPS_BY_PRODUCT",
+    )
+    live_adaptive_chop_enabled = _parse_bool(
+        values.get("LIVE_ADAPTIVE_CHOP_ENABLED"),
+        DEFAULT_LIVE_ADAPTIVE_CHOP_ENABLED,
+        "LIVE_ADAPTIVE_CHOP_ENABLED",
+    )
+    live_adaptive_pacing_enabled = _parse_bool(
+        values.get("LIVE_ADAPTIVE_PACING_ENABLED"),
+        DEFAULT_LIVE_ADAPTIVE_PACING_ENABLED,
+        "LIVE_ADAPTIVE_PACING_ENABLED",
+    )
+    live_product_volatility_scale_by_product = _parse_product_decimal_map(
+        values.get("LIVE_PRODUCT_VOLATILITY_SCALE_BY_PRODUCT"),
+        DEFAULT_LIVE_PRODUCT_VOLATILITY_SCALE_BY_PRODUCT,
+        "LIVE_PRODUCT_VOLATILITY_SCALE_BY_PRODUCT",
+    )
+    live_score_telemetry_enabled = _parse_bool(
+        values.get("LIVE_SCORE_TELEMETRY_ENABLED"),
+        DEFAULT_LIVE_SCORE_TELEMETRY_ENABLED,
+        "LIVE_SCORE_TELEMETRY_ENABLED",
+    )
+    live_shadow_decision_log_enabled = _parse_bool(
+        values.get("LIVE_SHADOW_DECISION_LOG_ENABLED"),
+        DEFAULT_LIVE_SHADOW_DECISION_LOG_ENABLED,
+        "LIVE_SHADOW_DECISION_LOG_ENABLED",
+    )
     runner_enabled = _parse_bool(
         values.get("RUNNER_ENABLED"),
         DEFAULT_RUNNER_ENABLED,
@@ -1436,6 +1632,42 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_bias_recent_return_min=live_bias_recent_return_min,
         live_bias_lookback_return_min=live_bias_lookback_return_min,
         live_min_cross_distance_bps=live_min_cross_distance_bps,
+        live_adaptive_thresholds_enabled=live_adaptive_thresholds_enabled,
+        live_composite_score_enabled=live_composite_score_enabled,
+        live_composite_score_min=live_composite_score_min,
+        live_composite_borderline_min=live_composite_borderline_min,
+        live_return_range_ratio_enabled=live_return_range_ratio_enabled,
+        live_return_range_ratio_min_by_product=(
+            live_return_range_ratio_min_by_product
+        ),
+        live_progression_memory_enabled=live_progression_memory_enabled,
+        live_progression_memory_window_cycles=(
+            live_progression_memory_window_cycles
+        ),
+        live_progression_memory_max_age_seconds=(
+            live_progression_memory_max_age_seconds
+        ),
+        live_retry_degradation_enabled=live_retry_degradation_enabled,
+        live_retry_score_decay=live_retry_score_decay,
+        live_reversal_classifier_enabled=live_reversal_classifier_enabled,
+        live_reversal_shadow_only=live_reversal_shadow_only,
+        live_reversal_max_executable_price=live_reversal_max_executable_price,
+        live_reversal_min_ev=live_reversal_min_ev,
+        live_reversal_low_stake_max_dollars=(
+            live_reversal_low_stake_max_dollars
+        ),
+        live_reversal_min_probability=live_reversal_min_probability,
+        live_unified_near_extreme_enabled=live_unified_near_extreme_enabled,
+        live_unified_near_extreme_base_bps_by_product=(
+            live_unified_near_extreme_base_bps_by_product
+        ),
+        live_adaptive_chop_enabled=live_adaptive_chop_enabled,
+        live_adaptive_pacing_enabled=live_adaptive_pacing_enabled,
+        live_product_volatility_scale_by_product=(
+            live_product_volatility_scale_by_product
+        ),
+        live_score_telemetry_enabled=live_score_telemetry_enabled,
+        live_shadow_decision_log_enabled=live_shadow_decision_log_enabled,
         runner_enabled=runner_enabled,
         runner_loop_interval_seconds=runner_loop_interval_seconds,
         runner_status_log_every_n_cycles=runner_status_log_every_n_cycles,
@@ -1653,6 +1885,30 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_BIAS_RECENT_RETURN_MIN",
         "LIVE_BIAS_LOOKBACK_RETURN_MIN",
         "LIVE_MIN_CROSS_DISTANCE_BPS",
+        "LIVE_ADAPTIVE_THRESHOLDS_ENABLED",
+        "LIVE_COMPOSITE_SCORE_ENABLED",
+        "LIVE_COMPOSITE_SCORE_MIN",
+        "LIVE_COMPOSITE_BORDERLINE_MIN",
+        "LIVE_RETURN_RANGE_RATIO_ENABLED",
+        "LIVE_RETURN_RANGE_RATIO_MIN_BY_PRODUCT",
+        "LIVE_PROGRESSION_MEMORY_ENABLED",
+        "LIVE_PROGRESSION_MEMORY_WINDOW_CYCLES",
+        "LIVE_PROGRESSION_MEMORY_MAX_AGE_SECONDS",
+        "LIVE_RETRY_DEGRADATION_ENABLED",
+        "LIVE_RETRY_SCORE_DECAY",
+        "LIVE_REVERSAL_CLASSIFIER_ENABLED",
+        "LIVE_REVERSAL_SHADOW_ONLY",
+        "LIVE_REVERSAL_MAX_EXECUTABLE_PRICE",
+        "LIVE_REVERSAL_MIN_EV",
+        "LIVE_REVERSAL_LOW_STAKE_MAX_DOLLARS",
+        "LIVE_REVERSAL_MIN_PROBABILITY",
+        "LIVE_UNIFIED_NEAR_EXTREME_ENABLED",
+        "LIVE_UNIFIED_NEAR_EXTREME_BASE_BPS_BY_PRODUCT",
+        "LIVE_ADAPTIVE_CHOP_ENABLED",
+        "LIVE_ADAPTIVE_PACING_ENABLED",
+        "LIVE_PRODUCT_VOLATILITY_SCALE_BY_PRODUCT",
+        "LIVE_SCORE_TELEMETRY_ENABLED",
+        "LIVE_SHADOW_DECISION_LOG_ENABLED",
         "RUNNER_ENABLED",
         "RUNNER_LOOP_INTERVAL_SECONDS",
         "RUNNER_STATUS_LOG_EVERY_N_CYCLES",
@@ -1807,6 +2063,45 @@ def _parse_product_price_caps(
         if parsed is not None:
             caps[product.upper()] = parsed
     return caps
+
+
+def _parse_product_decimal_map(
+    value: str | None,
+    default: dict[str, Decimal],
+    key: str,
+) -> dict[str, Decimal]:
+    if value is None or not value.strip():
+        return dict(default)
+    raw = value.strip()
+    items: dict[str, object]
+    if raw.startswith("{"):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise SettingsError(f"{key} must be valid JSON or CSV product:value pairs.") from exc
+        if not isinstance(parsed, dict):
+            raise SettingsError(f"{key} JSON value must be an object.")
+        items = parsed
+    else:
+        items = {}
+        for pair in _parse_csv(raw):
+            if ":" not in pair:
+                raise SettingsError(f"{key} CSV entries must use PRODUCT:VALUE format.")
+            product, decimal_text = pair.split(":", 1)
+            items[product] = decimal_text
+    normalized = dict(default)
+    for raw_product, raw_decimal in items.items():
+        product = str(raw_product).strip().upper()
+        if not product:
+            raise SettingsError(f"{key} product keys must be non-empty.")
+        try:
+            parsed_decimal = Decimal(str(raw_decimal).strip())
+        except (InvalidOperation, ValueError) as exc:
+            raise SettingsError(f"{key} values must be valid decimal strings.") from exc
+        if parsed_decimal < Decimal("0"):
+            raise SettingsError(f"{key} values must be greater than or equal to zero.")
+        normalized[product] = parsed_decimal
+    return normalized
 
 
 def _parse_positive_decimal(value: str | None, default: Decimal, key: str) -> Decimal:

@@ -8,8 +8,23 @@ from decimal import Decimal
 from typing import Mapping
 
 from kalshi_bot.config.settings import KalshiSettings
-from kalshi_bot.contracts.contract_scorer import ContractScore, score_contract
+from kalshi_bot.contracts.contract_scorer import (
+    CompositeQualityScore,
+    ContractScore,
+    score_candidate_quality,
+    score_contract,
+)
+from kalshi_bot.contracts.reversal_classifier import (
+    ReversalClassification,
+    classify_reversal_probability,
+    reversal_expected_value,
+)
 from kalshi_bot.forecast.bias_engine import BiasSnapshot
+from kalshi_bot.forecast.adaptive_thresholds import (
+    AdaptiveThresholds,
+    adaptive_thresholds_for_product,
+)
+from kalshi_bot.forecast.progression_memory import ProgressionMemoryState
 from kalshi_bot.market.market_state_cache import MarketStateSnapshot, TickerState
 
 
@@ -140,6 +155,31 @@ class ScannedContract:
     mini_exhaustion_enabled: bool | None = None
     mini_exhaustion_thresholds_active: bool | None = None
     decay_ratio: Decimal | None = None
+    return_range_ratio: Decimal | None = None
+    ratio_decay: Decimal | None = None
+    near_extreme_distance_bps: Decimal | None = None
+    adaptive_chop_threshold_bps: Decimal | None = None
+    adaptive_near_extreme_bps: Decimal | None = None
+    adaptive_ratio_floor: Decimal | None = None
+    adaptive_required_bps_per_minute_limit: Decimal | None = None
+    adaptive_pacing_multiplier: Decimal | None = None
+    composite_score: Decimal | None = None
+    continuation_score: Decimal | None = None
+    reversal_score: Decimal | None = None
+    hit_probability_estimate: Decimal | None = None
+    quality_band: str | None = None
+    score_components: tuple[tuple[str, Decimal], ...] = ()
+    hard_gate_results: tuple[tuple[str, str], ...] = ()
+    trend_age_cycles: int | None = None
+    failed_continuation_count: int | None = None
+    retry_degradation_factor: Decimal | None = None
+    progression_continuation_quality: str | None = None
+    reversal_probability: Decimal | None = None
+    reversal_expected_value: Decimal | None = None
+    reversal_candidate_status: str | None = None
+    reversal_rejection_reason: str | None = None
+    fake_continuation_signature: bool | None = None
+    reversal_shadow_only: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -223,6 +263,31 @@ class SkippedContract:
     mini_exhaustion_enabled: bool | None = None
     mini_exhaustion_thresholds_active: bool | None = None
     decay_ratio: Decimal | None = None
+    return_range_ratio: Decimal | None = None
+    ratio_decay: Decimal | None = None
+    near_extreme_distance_bps: Decimal | None = None
+    adaptive_chop_threshold_bps: Decimal | None = None
+    adaptive_near_extreme_bps: Decimal | None = None
+    adaptive_ratio_floor: Decimal | None = None
+    adaptive_required_bps_per_minute_limit: Decimal | None = None
+    adaptive_pacing_multiplier: Decimal | None = None
+    composite_score: Decimal | None = None
+    continuation_score: Decimal | None = None
+    reversal_score: Decimal | None = None
+    hit_probability_estimate: Decimal | None = None
+    quality_band: str | None = None
+    score_components: tuple[tuple[str, Decimal], ...] = ()
+    hard_gate_results: tuple[tuple[str, str], ...] = ()
+    trend_age_cycles: int | None = None
+    failed_continuation_count: int | None = None
+    retry_degradation_factor: Decimal | None = None
+    progression_continuation_quality: str | None = None
+    reversal_probability: Decimal | None = None
+    reversal_expected_value: Decimal | None = None
+    reversal_candidate_status: str | None = None
+    reversal_rejection_reason: str | None = None
+    fake_continuation_signature: bool | None = None
+    reversal_shadow_only: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -305,6 +370,23 @@ class ContractScanner:
         mini_exhaustion_range_bps: Decimal = Decimal("25"),
         mini_exhaustion_recent_bps: Decimal = Decimal("6"),
         min_cross_distance_bps: Decimal = Decimal("0"),
+        adaptive_thresholds_enabled: bool = False,
+        composite_score_enabled: bool = False,
+        composite_score_min: Decimal = Decimal("0.60"),
+        composite_borderline_min: Decimal = Decimal("0.40"),
+        return_range_ratio_enabled: bool = True,
+        return_range_ratio_min_by_product: Mapping[str, Decimal] | None = None,
+        reversal_classifier_enabled: bool = False,
+        reversal_shadow_only: bool = True,
+        reversal_max_executable_price: Decimal = Decimal("0.60"),
+        reversal_min_ev: Decimal = Decimal("0.00"),
+        reversal_min_probability: Decimal = Decimal("0.55"),
+        unified_near_extreme_enabled: bool = False,
+        unified_near_extreme_base_bps_by_product: Mapping[str, Decimal] | None = None,
+        adaptive_chop_enabled: bool = False,
+        adaptive_pacing_enabled: bool = False,
+        product_volatility_scale_by_product: Mapping[str, Decimal] | None = None,
+        score_telemetry_enabled: bool = True,
     ) -> None:
         normalized = {
             product_id.strip(): tuple(
@@ -388,6 +470,32 @@ class ContractScanner:
         self._mini_exhaustion_range_bps = Decimal(str(mini_exhaustion_range_bps))
         self._mini_exhaustion_recent_bps = Decimal(str(mini_exhaustion_recent_bps))
         self._min_cross_distance_bps = Decimal(str(min_cross_distance_bps))
+        self._adaptive_thresholds_enabled = adaptive_thresholds_enabled
+        self._composite_score_enabled = composite_score_enabled
+        self._composite_score_min = Decimal(str(composite_score_min))
+        self._composite_borderline_min = Decimal(str(composite_borderline_min))
+        self._return_range_ratio_enabled = return_range_ratio_enabled
+        self._return_range_ratio_min_by_product = {
+            key.upper(): Decimal(str(value))
+            for key, value in (return_range_ratio_min_by_product or {}).items()
+        }
+        self._reversal_classifier_enabled = reversal_classifier_enabled
+        self._reversal_shadow_only = reversal_shadow_only
+        self._reversal_max_executable_price = Decimal(str(reversal_max_executable_price))
+        self._reversal_min_ev = Decimal(str(reversal_min_ev))
+        self._reversal_min_probability = Decimal(str(reversal_min_probability))
+        self._unified_near_extreme_enabled = unified_near_extreme_enabled
+        self._unified_near_extreme_base_bps_by_product = {
+            key.upper(): Decimal(str(value))
+            for key, value in (unified_near_extreme_base_bps_by_product or {}).items()
+        }
+        self._adaptive_chop_enabled = adaptive_chop_enabled
+        self._adaptive_pacing_enabled = adaptive_pacing_enabled
+        self._product_volatility_scale_by_product = {
+            key.upper(): Decimal(str(value))
+            for key, value in (product_volatility_scale_by_product or {}).items()
+        }
+        self._score_telemetry_enabled = score_telemetry_enabled
 
     @classmethod
     def from_settings(cls, settings: KalshiSettings) -> "ContractScanner":
@@ -406,10 +514,12 @@ class ContractScanner:
         progression_context_by_product: (
             Mapping[str, tuple[ExhaustionProgressionSample, ...]] | None
         ) = None,
+        progression_memory_by_product: Mapping[str, ProgressionMemoryState] | None = None,
     ) -> ContractScanSnapshot:
         ranked_contracts: list[ScannedContract] = []
         skipped_contracts: list[SkippedContract] = []
         progression_context_by_product = progression_context_by_product or {}
+        progression_memory_by_product = progression_memory_by_product or {}
 
         for product_id, market_tickers in self._product_markets.items():
             bias_state = bias_snapshot.products.get(product_id)
@@ -599,6 +709,22 @@ class ContractScanner:
                         (),
                     ),
                 )
+                roadmap_quality_fields = self._roadmap_quality_fields(
+                    product_id=product_id,
+                    bias_state=effective_bias_state,
+                    feasibility=feasibility,
+                    entry_price=midpoint,
+                    trend_confirmation_status=trend_confirmation_status,
+                    signal_quality_fields=signal_quality_fields,
+                    progression_memory=progression_memory_by_product.get(
+                        product_id.upper()
+                    )
+                    or progression_memory_by_product.get(product_id),
+                )
+                signal_quality_fields = {
+                    **signal_quality_fields,
+                    **roadmap_quality_fields,
+                }
                 if feasibility_skip_reason is not None:
                     skipped_contracts.append(
                         SkippedContract(
@@ -682,49 +808,60 @@ class ContractScanner:
                     yes_bid_size_fp=ticker_state.yes_bid_size_fp,
                     yes_ask_size_fp=ticker_state.yes_ask_size_fp,
                     dollar_volume=ticker_state.dollar_volume,
+                    composite_score=signal_quality_fields.get("composite_score"),
                 )
-                ranked_contracts.append(
-                    ScannedContract(
-                        product_id=product_id,
-                        market_ticker=market_ticker,
-                        direction=effective_bias_state.direction,
-                        structure=effective_bias_state.structure,
-                        confidence=effective_bias_state.confidence,
-                        best_bid=ticker_state.yes_bid_dollars,
-                        best_ask=ticker_state.yes_ask_dollars,
-                        midpoint=midpoint,
-                        bias_as_of=effective_bias_state.as_of,
-                        market_as_of=_market_as_of(ticker_state),
-                        score=score,
-                        latest_price=effective_bias_state.latest_price,
-                        observation_count=effective_bias_state.observation_count,
-                        recent_return_bps=effective_bias_state.recent_return_bps,
-                        lookback_return_bps=effective_bias_state.lookback_return_bps,
-                        impulse_direction=effective_bias_state.impulse_direction,
-                        impulse_return_bps=effective_bias_state.impulse_return_bps,
-                        impulse_detected=effective_bias_state.impulse_detected,
-                        risk_flags=_risk_flags(effective_bias_state.risk_flags),
-                        target_price=feasibility.target_price,
-                        target_price_source=feasibility.target_price_source,
-                        distance_to_target=feasibility.distance_to_target,
-                        distance_to_target_bps=feasibility.distance_to_target_bps,
-                        required_bps_per_minute=feasibility.required_bps_per_minute,
-                        side_currently_itm=feasibility.side_currently_itm,
-                        side_needs_cross=feasibility.side_needs_cross,
-                        feasibility_status=feasibility.feasibility_status,
-                        reversal_confirmation_status=reversal_confirmation_status,
-                        trend_confirmation_status=trend_confirmation_status,
-                        signal_conflict_flags=signal_conflict_flags,
-                        scanner_score_confidence=score_confidence,
-                        scanner_score_downgrade_reasons=score_downgrade_reasons,
-                        scanner_score_bonus_reasons=score_bonus_reasons,
-                        contract_open_time=_optional_str_metadata(metadata, "open_time"),
-                        contract_close_time=_optional_str_metadata(metadata, "close_time"),
-                        contract_time_remaining_seconds=feasibility.time_remaining_seconds,
-                        **signal_quality_fields,
-                        **_bias_threshold_diagnostic_fields(effective_bias_state),
+                continuation_contract = ScannedContract(
+                    product_id=product_id,
+                    market_ticker=market_ticker,
+                    direction=effective_bias_state.direction,
+                    structure=effective_bias_state.structure,
+                    confidence=effective_bias_state.confidence,
+                    best_bid=ticker_state.yes_bid_dollars,
+                    best_ask=ticker_state.yes_ask_dollars,
+                    midpoint=midpoint,
+                    bias_as_of=effective_bias_state.as_of,
+                    market_as_of=_market_as_of(ticker_state),
+                    score=score,
+                    latest_price=effective_bias_state.latest_price,
+                    observation_count=effective_bias_state.observation_count,
+                    recent_return_bps=effective_bias_state.recent_return_bps,
+                    lookback_return_bps=effective_bias_state.lookback_return_bps,
+                    impulse_direction=effective_bias_state.impulse_direction,
+                    impulse_return_bps=effective_bias_state.impulse_return_bps,
+                    impulse_detected=effective_bias_state.impulse_detected,
+                    risk_flags=_risk_flags(effective_bias_state.risk_flags),
+                    target_price=feasibility.target_price,
+                    target_price_source=feasibility.target_price_source,
+                    distance_to_target=feasibility.distance_to_target,
+                    distance_to_target_bps=feasibility.distance_to_target_bps,
+                    required_bps_per_minute=feasibility.required_bps_per_minute,
+                    side_currently_itm=feasibility.side_currently_itm,
+                    side_needs_cross=feasibility.side_needs_cross,
+                    feasibility_status=feasibility.feasibility_status,
+                    reversal_confirmation_status=reversal_confirmation_status,
+                    trend_confirmation_status=trend_confirmation_status,
+                    signal_conflict_flags=signal_conflict_flags,
+                    scanner_score_confidence=score_confidence,
+                    scanner_score_downgrade_reasons=score_downgrade_reasons,
+                    scanner_score_bonus_reasons=score_bonus_reasons,
+                    contract_open_time=_optional_str_metadata(metadata, "open_time"),
+                    contract_close_time=_optional_str_metadata(metadata, "close_time"),
+                    contract_time_remaining_seconds=feasibility.time_remaining_seconds,
+                    **signal_quality_fields,
+                    **_bias_threshold_diagnostic_fields(effective_bias_state),
+                )
+                ranked_contracts.append(continuation_contract)
+                reversal_contract = self._reversal_candidate_from_contract(
+                    continuation_contract,
+                    ticker_state=ticker_state,
+                    metadata=metadata,
+                    progression_memory=progression_memory_by_product.get(
+                        product_id.upper()
                     )
+                    or progression_memory_by_product.get(product_id),
                 )
+                if reversal_contract is not None:
+                    ranked_contracts.append(reversal_contract)
 
         ranked_contracts.sort(key=lambda contract: contract.score.ranking_key() + (contract.market_ticker,))
         skipped_contracts.sort(key=lambda contract: (contract.product_id, contract.market_ticker, contract.reason))
@@ -887,6 +1024,275 @@ class ContractScanner:
             "mini_exhaustion_thresholds_active": self._mini_exhaustion_enabled,
             "decay_ratio": _decay_ratio(bias_state, direction=direction),
         }
+
+    def _roadmap_quality_fields(
+        self,
+        *,
+        product_id: str,
+        bias_state,  # noqa: ANN001
+        feasibility: TargetFeasibility | None,
+        entry_price: Decimal | None,
+        trend_confirmation_status: str | None,
+        signal_quality_fields: Mapping[str, object],
+        progression_memory: ProgressionMemoryState | None,
+        is_reversal_candidate: bool = False,
+        reversal_probability_override: Decimal | None = None,
+        reversal_expected_value_override: Decimal | None = None,
+        reversal_candidate_status: str | None = None,
+        reversal_rejection_reason: str | None = None,
+    ) -> dict[str, object]:
+        recent_range = _decimal_or_none(getattr(bias_state, "recent_5m_range_bps", None))
+        thresholds = adaptive_thresholds_for_product(
+            product_id=product_id,
+            recent_5m_range_bps=recent_range,
+            base_near_extreme_bps_by_product=(
+                self._unified_near_extreme_base_bps_by_product
+            ),
+            ratio_floor_by_product=self._return_range_ratio_min_by_product,
+            volatility_scale_by_product=self._product_volatility_scale_by_product,
+            continuation_score_min=self._composite_score_min,
+            max_required_bps_per_minute=self._quiet_continuation_max_required_bps_per_minute,
+            adaptive_enabled=self._adaptive_thresholds_enabled,
+            adaptive_chop_enabled=self._adaptive_chop_enabled,
+            adaptive_pacing_enabled=self._adaptive_pacing_enabled,
+        )
+        ratio = (
+            _return_range_ratio(
+                getattr(bias_state, "lookback_return_bps", None),
+                getattr(bias_state, "recent_5m_range_bps", None),
+            )
+            if self._return_range_ratio_enabled
+            else None
+        )
+        direction = getattr(bias_state, "direction", None)
+        near_extreme_distance = _near_extreme_distance_bps(
+            bias_state=bias_state,
+            direction=direction,
+        )
+        ratio_decay = (
+            progression_memory.ratio_decay
+            if progression_memory is not None and not progression_memory.memory_cold_start
+            else _decay_ratio(bias_state, direction=direction)
+        )
+        deceleration_count = (
+            progression_memory.deceleration_persistence_count
+            if progression_memory is not None
+            else (
+                1
+                if signal_quality_fields.get("momentum_deceleration_status")
+                in {"decelerating_after_burst", "bursting", "still_moving"}
+                else 0
+            )
+        )
+        failed_attempts = (
+            progression_memory.failed_continuation_count
+            if progression_memory is not None
+            else 0
+        )
+        trend_age = progression_memory.trend_age_cycles if progression_memory else 0
+        reversal_classification = classify_reversal_probability(
+            return_range_ratio=ratio,
+            ratio_floor=thresholds.adaptive_ratio_floor,
+            near_extreme_distance_bps=near_extreme_distance,
+            near_extreme_threshold_bps=thresholds.adaptive_near_extreme_bps,
+            deceleration_status=str(
+                signal_quality_fields.get("momentum_deceleration_status") or ""
+            ),
+            range_expansion_status=str(
+                signal_quality_fields.get("range_expansion_status") or ""
+            ),
+            trend_confirmation_status=trend_confirmation_status,
+            required_bps_per_minute=(
+                feasibility.required_bps_per_minute if feasibility else None
+            ),
+            memory_state=progression_memory,
+        )
+        reversal_probability = (
+            reversal_probability_override
+            if reversal_probability_override is not None
+            else reversal_classification.reversal_probability
+        )
+        quality_score = score_candidate_quality(
+            return_range_ratio=ratio,
+            ratio_floor=thresholds.adaptive_ratio_floor,
+            ratio_decay=ratio_decay,
+            near_extreme_distance_bps=near_extreme_distance,
+            near_extreme_threshold_bps=thresholds.adaptive_near_extreme_bps,
+            recent_5m_range_bps=recent_range,
+            recent_5m_return_bps=_decimal_or_none(
+                getattr(bias_state, "recent_5m_return_bps", None)
+            ),
+            lookback_return_bps=_decimal_or_none(
+                getattr(bias_state, "lookback_return_bps", None)
+            ),
+            trend_confirmation_status=trend_confirmation_status,
+            deceleration_persistence_count=deceleration_count,
+            range_expansion_status=str(
+                signal_quality_fields.get("range_expansion_status") or ""
+            ),
+            ev=reversal_expected_value_override,
+            price=entry_price,
+            side_needs_cross=feasibility.side_needs_cross if feasibility else None,
+            required_bps_per_minute=(
+                feasibility.required_bps_per_minute if feasibility else None
+            ),
+            required_bps_per_minute_limit=(
+                thresholds.adaptive_required_bps_per_minute_limit
+            ),
+            product_volatility_scale=thresholds.product_volatility_scale,
+            trend_age_cycles=trend_age,
+            failed_attempts=failed_attempts,
+            progression_memory=progression_memory,
+            reversal_probability=reversal_probability,
+            is_reversal_candidate=is_reversal_candidate,
+        )
+        payload = {
+            "adaptive_chop_threshold_bps": thresholds.adaptive_chop_threshold_bps,
+            "adaptive_near_extreme_bps": thresholds.adaptive_near_extreme_bps,
+            "adaptive_ratio_floor": thresholds.adaptive_ratio_floor,
+            "adaptive_required_bps_per_minute_limit": (
+                thresholds.adaptive_required_bps_per_minute_limit
+            ),
+            "adaptive_pacing_multiplier": thresholds.adaptive_pacing_multiplier,
+            "composite_score": quality_score.composite_score,
+            "continuation_score": quality_score.continuation_score,
+            "reversal_score": quality_score.reversal_score,
+            "hit_probability_estimate": quality_score.hit_probability_estimate,
+            "quality_band": quality_score.quality_band,
+            "return_range_ratio": ratio,
+            "ratio_decay": ratio_decay,
+            "near_extreme_distance_bps": near_extreme_distance,
+            "trend_age_cycles": trend_age,
+            "failed_continuation_count": failed_attempts,
+            "retry_degradation_factor": (
+                progression_memory.retry_degradation_factor
+                if progression_memory is not None
+                else Decimal("1")
+            ),
+            "progression_continuation_quality": (
+                progression_memory.progression_continuation_quality
+                if progression_memory is not None
+                else "cold_start"
+            ),
+            "reversal_probability": reversal_probability,
+            "reversal_expected_value": reversal_expected_value_override,
+            "reversal_candidate_status": reversal_candidate_status,
+            "reversal_rejection_reason": (
+                reversal_rejection_reason
+                or reversal_classification.rejection_reason
+            ),
+            "fake_continuation_signature": (
+                reversal_classification.fake_continuation_signature
+            ),
+            "reversal_shadow_only": self._reversal_shadow_only,
+            "score_components": tuple(quality_score.component_scores.items()),
+            "hard_gate_results": tuple(quality_score.hard_gate_statuses.items()),
+        }
+        return payload
+
+    def _reversal_candidate_from_contract(
+        self,
+        contract: ScannedContract,
+        *,
+        ticker_state: TickerState,
+        metadata: Mapping[str, object],
+        progression_memory: ProgressionMemoryState | None,
+    ) -> ScannedContract | None:
+        if not self._reversal_classifier_enabled:
+            return None
+        if contract.direction not in {"up", "down"}:
+            return None
+        opposite_direction = "down" if contract.direction == "up" else "up"
+        opposite_price = _opposite_executable_price(
+            direction=opposite_direction,
+            ticker_state=ticker_state,
+        )
+        bias_like = _OppositeBiasState(contract, opposite_direction)
+        feasibility = _target_feasibility(
+            direction=opposite_direction,
+            current_spot_price=contract.latest_price,
+            target_price=_optional_decimal_metadata(metadata, "target_price"),
+            target_price_source=_optional_str_metadata(metadata, "target_price_source"),
+            close_time=_optional_str_metadata(metadata, "close_time"),
+            min_cross_distance_bps=self._product_min_cross_distance_bps(
+                contract.product_id
+            ),
+        )
+        reversal_ev = reversal_expected_value(
+            reversal_probability=contract.reversal_probability,
+            executable_price=opposite_price,
+        )
+        rejection_reason = _reversal_candidate_rejection_reason(
+            probability=contract.reversal_probability,
+            minimum_probability=self._reversal_min_probability,
+            executable_price=opposite_price,
+            max_executable_price=self._reversal_max_executable_price,
+            expected_value=reversal_ev,
+            min_expected_value=self._reversal_min_ev,
+            side_needs_cross=feasibility.side_needs_cross,
+            classifier_enabled=self._reversal_classifier_enabled,
+        )
+        candidate_status = (
+            "shadow_candidate"
+            if rejection_reason is None and self._reversal_shadow_only
+            else "live_candidate"
+            if rejection_reason is None
+            else "rejected"
+        )
+        if rejection_reason is not None and not self._score_telemetry_enabled:
+            return None
+        signal_quality_fields = {
+            "range_expansion_status": contract.range_expansion_status,
+            "momentum_deceleration_status": contract.momentum_deceleration_status,
+        }
+        roadmap_fields = self._roadmap_quality_fields(
+            product_id=contract.product_id,
+            bias_state=bias_like,
+            feasibility=feasibility,
+            entry_price=opposite_price,
+            trend_confirmation_status=contract.trend_confirmation_status,
+            signal_quality_fields=signal_quality_fields,
+            progression_memory=progression_memory,
+            is_reversal_candidate=True,
+            reversal_probability_override=contract.reversal_probability,
+            reversal_expected_value_override=reversal_ev,
+            reversal_candidate_status=candidate_status,
+            reversal_rejection_reason=rejection_reason,
+        )
+        score = score_contract(
+            confidence=max(contract.confidence - 10, 1),
+            best_bid=ticker_state.yes_bid_dollars or Decimal("0"),
+            best_ask=ticker_state.yes_ask_dollars or Decimal("0"),
+            yes_bid_size_fp=ticker_state.yes_bid_size_fp,
+            yes_ask_size_fp=ticker_state.yes_ask_size_fp,
+            dollar_volume=ticker_state.dollar_volume,
+            composite_score=roadmap_fields.get("composite_score"),
+        )
+        return replace(
+            contract,
+            direction=opposite_direction,
+            structure="reversal",
+            confidence=max(contract.confidence - 10, 1),
+            score=score,
+            midpoint=opposite_price or contract.midpoint,
+            target_price=feasibility.target_price,
+            target_price_source=feasibility.target_price_source,
+            distance_to_target=feasibility.distance_to_target,
+            distance_to_target_bps=feasibility.distance_to_target_bps,
+            required_bps_per_minute=feasibility.required_bps_per_minute,
+            side_currently_itm=feasibility.side_currently_itm,
+            side_needs_cross=feasibility.side_needs_cross,
+            feasibility_status=feasibility.feasibility_status,
+            scanner_score_downgrade_reasons=(
+                tuple(contract.scanner_score_downgrade_reasons)
+                + (("reversal_candidate_rejected",) if rejection_reason else ())
+            ),
+            scanner_score_bonus_reasons=(
+                tuple(contract.scanner_score_bonus_reasons)
+                + (("reversal_candidate_generated",) if rejection_reason is None else ())
+            ),
+            **roadmap_fields,
+        )
 
     def _quiet_continuation_signal_block_reason(
         self,
@@ -1145,7 +1551,127 @@ def scanner_live_settings_kwargs(settings: KalshiSettings) -> dict[str, object]:
         "mini_exhaustion_range_bps": settings.live_mini_exhaustion_range_bps,
         "mini_exhaustion_recent_bps": settings.live_mini_exhaustion_recent_bps,
         "min_cross_distance_bps": settings.live_min_cross_distance_bps,
+        "adaptive_thresholds_enabled": settings.live_adaptive_thresholds_enabled,
+        "composite_score_enabled": settings.live_composite_score_enabled,
+        "composite_score_min": settings.live_composite_score_min,
+        "composite_borderline_min": settings.live_composite_borderline_min,
+        "return_range_ratio_enabled": settings.live_return_range_ratio_enabled,
+        "return_range_ratio_min_by_product": (
+            settings.live_return_range_ratio_min_by_product
+        ),
+        "reversal_classifier_enabled": settings.live_reversal_classifier_enabled,
+        "reversal_shadow_only": settings.live_reversal_shadow_only,
+        "reversal_max_executable_price": settings.live_reversal_max_executable_price,
+        "reversal_min_ev": settings.live_reversal_min_ev,
+        "reversal_min_probability": settings.live_reversal_min_probability,
+        "unified_near_extreme_enabled": settings.live_unified_near_extreme_enabled,
+        "unified_near_extreme_base_bps_by_product": (
+            settings.live_unified_near_extreme_base_bps_by_product
+        ),
+        "adaptive_chop_enabled": settings.live_adaptive_chop_enabled,
+        "adaptive_pacing_enabled": settings.live_adaptive_pacing_enabled,
+        "product_volatility_scale_by_product": (
+            settings.live_product_volatility_scale_by_product
+        ),
+        "score_telemetry_enabled": settings.live_score_telemetry_enabled,
     }
+
+
+class _OppositeBiasState:
+    def __init__(self, contract: ScannedContract, direction: str) -> None:
+        self.product_id = contract.product_id
+        self.direction = direction
+        self.confidence = contract.confidence
+        self.structure = "reversal"
+        self.latest_price = contract.latest_price
+        self.lookback_return_bps = contract.lookback_return_bps
+        self.recent_return_bps = contract.recent_return_bps
+        self.observation_count = contract.observation_count or 0
+        self.as_of = contract.bias_as_of
+        self.impulse_direction = contract.impulse_direction
+        self.impulse_return_bps = contract.impulse_return_bps
+        self.impulse_detected = contract.impulse_detected
+        self.classification_reason = "reversal_candidate_from_fake_continuation"
+        self.chop_threshold_bps = contract.chop_threshold_bps
+        self.recent_window_seconds = contract.recent_window_seconds
+        self.lookback_window_seconds = contract.lookback_window_seconds
+        self.recent_abs_bps = contract.recent_abs_bps
+        self.lookback_abs_bps = contract.lookback_abs_bps
+        self.recent_threshold_gap_bps = contract.recent_threshold_gap_bps
+        self.lookback_threshold_gap_bps = contract.lookback_threshold_gap_bps
+        self.recent_3m_return_bps = contract.recent_3m_return_bps
+        self.recent_5m_return_bps = contract.recent_5m_return_bps
+        self.recent_3m_range_bps = contract.recent_3m_range_bps
+        self.recent_5m_range_bps = contract.recent_5m_range_bps
+        self.distance_to_recent_high_bps = contract.distance_to_recent_high_bps
+        self.distance_to_recent_low_bps = contract.distance_to_recent_low_bps
+
+
+def _return_range_ratio(
+    lookback_return_bps: Decimal | None,
+    recent_5m_range_bps: Decimal | None,
+) -> Decimal | None:
+    lookback = _decimal_or_none(lookback_return_bps)
+    recent_range = _decimal_or_none(recent_5m_range_bps)
+    if lookback is None or recent_range is None or recent_range <= Decimal("0"):
+        return None
+    return (abs(lookback) / recent_range).quantize(Decimal("0.0001"))
+
+
+def _near_extreme_distance_bps(*, bias_state, direction: str | None) -> Decimal | None:  # noqa: ANN001
+    if direction == "up":
+        return _decimal_or_none(getattr(bias_state, "distance_to_recent_high_bps", None))
+    if direction == "down":
+        return _decimal_or_none(getattr(bias_state, "distance_to_recent_low_bps", None))
+    high = _decimal_or_none(getattr(bias_state, "distance_to_recent_high_bps", None))
+    low = _decimal_or_none(getattr(bias_state, "distance_to_recent_low_bps", None))
+    if high is None:
+        return low
+    if low is None:
+        return high
+    return min(high, low)
+
+
+def _opposite_executable_price(
+    *,
+    direction: str,
+    ticker_state: TickerState,
+) -> Decimal | None:
+    if direction == "up":
+        return ticker_state.yes_ask_dollars
+    if direction == "down" and ticker_state.yes_bid_dollars is not None:
+        return (Decimal("1") - ticker_state.yes_bid_dollars).quantize(Decimal("0.0001"))
+    return None
+
+
+def _reversal_candidate_rejection_reason(
+    *,
+    probability: Decimal | None,
+    minimum_probability: Decimal,
+    executable_price: Decimal | None,
+    max_executable_price: Decimal,
+    expected_value: Decimal | None,
+    min_expected_value: Decimal,
+    side_needs_cross: bool | None,
+    classifier_enabled: bool,
+) -> str | None:
+    if not classifier_enabled:
+        return "reversal_classifier_disabled"
+    if probability is None:
+        return "reversal_probability_missing"
+    if probability < minimum_probability:
+        return "reversal_probability_below_minimum"
+    if executable_price is None:
+        return "reversal_executable_price_missing"
+    if executable_price > max_executable_price:
+        return "reversal_executable_price_above_maximum"
+    if expected_value is None:
+        return "reversal_expected_value_missing"
+    if expected_value < min_expected_value:
+        return "reversal_expected_value_below_minimum"
+    if bool(side_needs_cross):
+        return "reversal_needs_cross_blocked"
+    return None
 
 
 def _range_expansion_status(
