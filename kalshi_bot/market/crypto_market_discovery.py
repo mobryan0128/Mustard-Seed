@@ -225,6 +225,9 @@ class CryptoMarketDiscovery:
             payload={
                 "product_id": product_id,
                 "series_tickers": series_tickers,
+                "product_discovered": bool(selected_market_tickers),
+                "product_not_discovered_reason": skip_reason,
+                "product_no_active_market_reason": skip_reason,
                 "selected_market_count": len(selected_market_tickers),
                 "selected_market_tickers": selected_market_tickers,
                 "skip_reason": skip_reason,
@@ -246,6 +249,9 @@ class CryptoMarketDiscovery:
             identifier=product_id,
             payload={
                 "product_id": product_id,
+                "product_discovered": False,
+                "product_not_discovered_reason": reason,
+                "product_filtered_reason": reason,
                 "reason": reason,
             },
         )

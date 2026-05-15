@@ -60,10 +60,17 @@ def main() -> None:
     )
     state = memory.state("BTC-USD")
     assert state.sample_count == 2
+    assert state.trend_age_seconds >= 0
     assert state.ratio_decay == Decimal("0.6000")
     assert state.failed_continuation_count == 1
+    assert state.deceleration_persistence_count == 1
+    assert state.range_expansion_persistence_count == 1
     assert state.retry_degradation_factor == Decimal("0.8000")
     assert state.reversal_buildup_score > Decimal("0")
+    payload = state.as_payload()
+    assert "trend_age_seconds" in payload
+    assert "deceleration_persistence_count" in payload
+    assert "range_expansion_persistence_count" in payload
     print("phaseG2 progression memory checks passed")
 
 

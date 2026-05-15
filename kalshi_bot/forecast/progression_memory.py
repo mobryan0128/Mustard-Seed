@@ -38,6 +38,7 @@ class ProgressionMemoryState:
     product_id: str
     sample_count: int
     trend_age_cycles: int
+    trend_age_seconds: int
     consecutive_same_side_intents: int
     failed_continuation_count: int
     near_extreme_retest_count: int
@@ -58,6 +59,7 @@ class ProgressionMemoryState:
             "progression_product_id": self.product_id,
             "progression_sample_count": self.sample_count,
             "trend_age_cycles": self.trend_age_cycles,
+            "trend_age_seconds": self.trend_age_seconds,
             "consecutive_same_side_intents": self.consecutive_same_side_intents,
             "failed_continuation_count": self.failed_continuation_count,
             "near_extreme_retest_count": self.near_extreme_retest_count,
@@ -101,6 +103,7 @@ class ProgressionMemory:
                 product_id=product_key,
                 sample_count=0,
                 trend_age_cycles=0,
+                trend_age_seconds=0,
                 consecutive_same_side_intents=0,
                 failed_continuation_count=0,
                 near_extreme_retest_count=0,
@@ -117,6 +120,16 @@ class ProgressionMemory:
                 memory_cold_start=True,
             )
         last = history[-1]
+        first = history[0]
+        trend_age_seconds = max(
+            int(
+                (
+                    last.recorded_at.astimezone(timezone.utc)
+                    - first.recorded_at.astimezone(timezone.utc)
+                ).total_seconds()
+            ),
+            0,
+        )
         same_side = _count_suffix(history, lambda item: item.direction == last.direction)
         failed = sum(1 for item in history if item.failed_continuation)
         near_extreme = sum(1 for item in history if item.near_extreme)
@@ -149,6 +162,7 @@ class ProgressionMemory:
             product_id=product_key,
             sample_count=len(history),
             trend_age_cycles=len(history),
+            trend_age_seconds=trend_age_seconds,
             consecutive_same_side_intents=same_side,
             failed_continuation_count=failed,
             near_extreme_retest_count=near_extreme,

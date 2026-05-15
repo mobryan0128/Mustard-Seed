@@ -6,7 +6,7 @@ import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_FLOOR
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from typing import Any
 
 from kalshi_bot.clients.kalshi_client import (
@@ -109,6 +109,13 @@ class ReversalCrossHoldStatus:
     hold_seconds: Decimal
     required_seconds: int
     block_reason: str | None
+    mode: str = "hard_block"
+    as_score_penalty: bool = False
+    hard_block: bool = False
+    reason: str | None = None
+    legacy_gate_applied: bool = False
+    roadmap_gate_applied: bool = False
+    final_blocking_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -186,6 +193,23 @@ class EVFilterStatus:
     conditional_override_eligible: bool
     required_conditions: tuple[str, ...]
     matched_conditions: tuple[str, ...]
+    required_bps_ok: bool | None = None
+    required_bps_per_minute: Decimal | None = None
+    required_bps_limit_used: Decimal | None = None
+    required_bps_rejection_reason: str | None = None
+    ev_actual_cost_type: str | None = None
+    ev_actual_cost_limit: Decimal | None = None
+    ev_actual_cost_observed: Decimal | None = None
+    ev_actual_cost_rejection_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class WeakRecentReturnProgressionStatus:
+    allowed: bool
+    status: str
+    reason: str | None
+    memory_present: bool
+    progression_quality: str | None
 
 
 @dataclass(frozen=True)
@@ -469,6 +493,27 @@ class LiveExecutionCoordinator:
                         "quiet_continuation_block_reason",
                         None,
                     ),
+                    "roadmap_mode_active": getattr(
+                        contract,
+                        "roadmap_mode_active",
+                        None,
+                    ),
+                    "legacy_gate_applied": getattr(
+                        contract,
+                        "legacy_gate_applied",
+                        None,
+                    ),
+                    "legacy_gate_mapped_to_score": getattr(
+                        contract,
+                        "legacy_gate_mapped_to_score",
+                        None,
+                    ),
+                    "legacy_gate_bypassed_due_to_roadmap_mode": getattr(
+                        contract,
+                        "legacy_gate_bypassed_due_to_roadmap_mode",
+                        None,
+                    ),
+                    "final_blocking_gate": reason,
                 }
             )
 
@@ -746,6 +791,33 @@ class LiveExecutionCoordinator:
                         **_execution_pricing_payload(pricing),
                         **_ev_filter_payload(ev_filter),
                         **_product_session_pacing_payload(product_session_pacing),
+                    },
+                )
+                continue
+            weak_progression = _weak_recent_return_progression_status(
+                contract=contract,
+                ev_filter=ev_filter,
+            )
+            if not weak_progression.allowed:
+                record_live_outcome(
+                    stage="weak_recent_return_progression",
+                    reason=weak_progression.status,
+                    contract=contract,
+                )
+                self._log_contract_intent_skipped(
+                    reason=weak_progression.status,
+                    contract=contract,
+                    cycle_number=cycle_number,
+                    scan_source=scan_source,
+                    details={
+                        **_end_window_payload(end_window),
+                        **_entry_segment_payload(entry_segment),
+                        **_execution_pricing_payload(pricing),
+                        **_ev_filter_payload(ev_filter),
+                        **_product_session_pacing_payload(product_session_pacing),
+                        **_weak_recent_return_progression_payload(
+                            weak_progression
+                        ),
                     },
                 )
                 continue
@@ -2691,6 +2763,7 @@ def _reversal_cross_hold_status(
     settings: KalshiSettings,
 ) -> ReversalCrossHoldStatus:
     required_seconds = getattr(settings, "live_reversal_cross_hold_seconds", 60)
+    roadmap_mode = _roadmap_mode_active(settings)
     if not getattr(settings, "live_reversal_cross_hold_enabled", True):
         return ReversalCrossHoldStatus(
             allowed=True,
@@ -2698,6 +2771,8 @@ def _reversal_cross_hold_status(
             hold_seconds=itm_persistence.itm_hold_seconds,
             required_seconds=required_seconds,
             block_reason=None,
+            mode="disabled",
+            reason="reversal_cross_hold_disabled",
         )
     if getattr(contract, "structure", None) != "reversal":
         return ReversalCrossHoldStatus(
@@ -2706,6 +2781,8 @@ def _reversal_cross_hold_status(
             hold_seconds=itm_persistence.itm_hold_seconds,
             required_seconds=required_seconds,
             block_reason=None,
+            mode="not_applicable",
+            reason="not_reversal",
         )
     if getattr(contract, "reversal_candidate_status", None) in {
         "shadow_candidate",
@@ -2717,14 +2794,34 @@ def _reversal_cross_hold_status(
             hold_seconds=itm_persistence.itm_hold_seconds,
             required_seconds=required_seconds,
             block_reason=None,
+            mode="roadmap_candidate_bypass",
+            reason="roadmap_reversal_candidate_controls_reversal",
+            roadmap_gate_applied=True,
         )
     if not bool(getattr(contract, "side_currently_itm", False)):
+        if roadmap_mode and not bool(getattr(contract, "side_needs_cross", False)):
+            return ReversalCrossHoldStatus(
+                allowed=True,
+                status="roadmap_score_penalty",
+                hold_seconds=itm_persistence.itm_hold_seconds,
+                required_seconds=required_seconds,
+                block_reason=None,
+                mode="score_penalty",
+                as_score_penalty=True,
+                reason="reversal_cross_hold_not_itm_mapped_to_score",
+                legacy_gate_applied=True,
+            )
         return ReversalCrossHoldStatus(
             allowed=False,
             status="not_itm",
             hold_seconds=itm_persistence.itm_hold_seconds,
             required_seconds=required_seconds,
             block_reason="reversal_cross_hold_requires_itm",
+            mode="hard_block",
+            hard_block=True,
+            reason="reversal_cross_hold_requires_itm",
+            legacy_gate_applied=True,
+            final_blocking_reason="reversal_cross_hold_requires_itm",
         )
     if bool(getattr(contract, "side_needs_cross", False)):
         return ReversalCrossHoldStatus(
@@ -2733,14 +2830,36 @@ def _reversal_cross_hold_status(
             hold_seconds=itm_persistence.itm_hold_seconds,
             required_seconds=required_seconds,
             block_reason="reversal_cross_hold_requires_no_cross_needed",
+            mode="hard_block",
+            hard_block=True,
+            reason="reversal_cross_hold_requires_no_cross_needed",
+            legacy_gate_applied=True,
+            final_blocking_reason="reversal_cross_hold_requires_no_cross_needed",
         )
     if itm_persistence.itm_hold_seconds < Decimal(required_seconds):
+        if roadmap_mode:
+            return ReversalCrossHoldStatus(
+                allowed=True,
+                status="roadmap_score_penalty",
+                hold_seconds=itm_persistence.itm_hold_seconds,
+                required_seconds=required_seconds,
+                block_reason=None,
+                mode="score_penalty",
+                as_score_penalty=True,
+                reason="reversal_cross_hold_waiting_mapped_to_score",
+                legacy_gate_applied=True,
+            )
         return ReversalCrossHoldStatus(
             allowed=False,
             status="holding",
             hold_seconds=itm_persistence.itm_hold_seconds,
             required_seconds=required_seconds,
             block_reason="reversal_cross_hold_waiting",
+            mode="hard_block",
+            hard_block=True,
+            reason="reversal_cross_hold_waiting",
+            legacy_gate_applied=True,
+            final_blocking_reason="reversal_cross_hold_waiting",
         )
     return ReversalCrossHoldStatus(
         allowed=True,
@@ -2748,6 +2867,24 @@ def _reversal_cross_hold_status(
         hold_seconds=itm_persistence.itm_hold_seconds,
         required_seconds=required_seconds,
         block_reason=None,
+        mode="confirmed",
+        reason="reversal_cross_hold_confirmed",
+        legacy_gate_applied=True,
+    )
+
+
+def _roadmap_mode_active(settings: KalshiSettings) -> bool:
+    return any(
+        bool(getattr(settings, key, False))
+        for key in (
+            "live_composite_score_enabled",
+            "live_adaptive_thresholds_enabled",
+            "live_unified_near_extreme_enabled",
+            "live_adaptive_chop_enabled",
+            "live_progression_memory_enabled",
+            "live_reversal_classifier_enabled",
+            "live_adaptive_pacing_enabled",
+        )
     )
 
 
@@ -2831,6 +2968,19 @@ def _ev_filter_status(
     entry_segment: EntrySegmentStatus,
     settings: KalshiSettings,
 ) -> EVFilterStatus:
+    required_bps_limit = getattr(
+        settings,
+        "live_ev_required_bps_max",
+        Decimal("0.25"),
+    )
+    (
+        required_bps_decimal,
+        required_bps_ok,
+        required_bps_rejection_reason,
+    ) = _required_bps_decision(
+        getattr(contract, "required_bps_per_minute", None),
+        required_bps_limit,
+    )
     required_conditions = (
         "structure_trend",
         "side_currently_itm",
@@ -2875,6 +3025,10 @@ def _ev_filter_status(
             conditional_override_eligible=False,
             required_conditions=required_conditions,
             matched_conditions=(),
+            required_bps_ok=required_bps_ok,
+            required_bps_per_minute=required_bps_decimal,
+            required_bps_limit_used=required_bps_limit,
+            required_bps_rejection_reason=required_bps_rejection_reason,
         )
 
     cost_price = pricing.intent_price_dollars
@@ -2891,15 +3045,6 @@ def _ev_filter_status(
         item.upper() for item in getattr(settings, "live_product_blocklist", ())
     }
     product_blocked = contract.product_id.upper() in product_blocklist
-    required_bps = getattr(contract, "required_bps_per_minute", None)
-    required_bps_decimal = (
-        Decimal(str(required_bps)) if required_bps is not None else None
-    )
-    required_bps_limit = getattr(
-        settings,
-        "live_ev_required_bps_max",
-        Decimal("0.25"),
-    )
     has_liquidity = (
         pricing.orderbook_present
         and pricing.available_count_at_intent_price is not None
@@ -3012,6 +3157,18 @@ def _ev_filter_status(
                 conditional_override_eligible=False,
                 required_conditions=required_conditions,
                 matched_conditions=tuple(dict.fromkeys(matched_reversal)),
+                required_bps_ok=required_bps_ok,
+                required_bps_per_minute=required_bps_decimal,
+                required_bps_limit_used=required_bps_limit,
+                required_bps_rejection_reason=required_bps_rejection_reason,
+                ev_actual_cost_type="per_contract_entry_price",
+                ev_actual_cost_limit=max_reversal_price,
+                ev_actual_cost_observed=cost_price,
+                ev_actual_cost_rejection_reason=(
+                    None
+                    if cost_price <= max_reversal_price
+                    else "per_contract_price_above_limit"
+                ),
             )
         return EVFilterStatus(
             allowed=True,
@@ -3044,15 +3201,20 @@ def _ev_filter_status(
             conditional_override_eligible=False,
             required_conditions=required_conditions,
             matched_conditions=tuple(dict.fromkeys(matched_reversal)),
+            required_bps_ok=required_bps_ok,
+            required_bps_per_minute=required_bps_decimal,
+            required_bps_limit_used=required_bps_limit,
+            required_bps_rejection_reason=required_bps_rejection_reason,
+            ev_actual_cost_type="per_contract_entry_price",
+            ev_actual_cost_limit=max_reversal_price,
+            ev_actual_cost_observed=cost_price,
+            ev_actual_cost_rejection_reason=None,
         )
     reversal_allowed = (
         getattr(settings, "live_ev_allow_reversal", False)
         and getattr(contract, "structure", None) == "reversal"
     )
     structure_allowed = trend or reversal_allowed
-    required_bps_ok = (
-        required_bps_decimal is not None and required_bps_decimal <= required_bps_limit
-    )
     (
         price_limit,
         product_price_cap_source,
@@ -3156,6 +3318,10 @@ def _ev_filter_status(
         if cost_price <= getattr(settings, "live_ev_max_actual_cost", Decimal("0.70"))
         else "above_limit"
     )
+    actual_cost_limit = getattr(settings, "live_ev_max_actual_cost", Decimal("0.70"))
+    actual_cost_rejection_reason = (
+        None if actual_cost_status == "within_limit" else "per_contract_price_above_limit"
+    )
     reward_status = (
         "within_limit"
         if estimated_reward
@@ -3243,6 +3409,14 @@ def _ev_filter_status(
             conditional_override_eligible=False,
             required_conditions=required_conditions,
             matched_conditions=tuple(dict.fromkeys(matched)),
+            required_bps_ok=required_bps_ok,
+            required_bps_per_minute=required_bps_decimal,
+            required_bps_limit_used=required_bps_limit,
+            required_bps_rejection_reason=required_bps_rejection_reason,
+            ev_actual_cost_type="per_contract_entry_price",
+            ev_actual_cost_limit=actual_cost_limit,
+            ev_actual_cost_observed=cost_price,
+            ev_actual_cost_rejection_reason=actual_cost_rejection_reason,
         )
 
     return EVFilterStatus(
@@ -3276,6 +3450,92 @@ def _ev_filter_status(
         conditional_override_eligible=True,
         required_conditions=required_conditions,
         matched_conditions=tuple(dict.fromkeys(matched)),
+        required_bps_ok=required_bps_ok,
+        required_bps_per_minute=required_bps_decimal,
+        required_bps_limit_used=required_bps_limit,
+        required_bps_rejection_reason=required_bps_rejection_reason,
+        ev_actual_cost_type="per_contract_entry_price",
+        ev_actual_cost_limit=actual_cost_limit,
+        ev_actual_cost_observed=cost_price,
+        ev_actual_cost_rejection_reason=actual_cost_rejection_reason,
+    )
+
+
+def _required_bps_decision(
+    required_bps_per_minute: object,
+    required_bps_limit: Decimal,
+) -> tuple[Decimal | None, bool, str | None]:
+    if required_bps_per_minute is None:
+        return (None, False, "required_bps_missing")
+    try:
+        required = Decimal(str(required_bps_per_minute))
+    except (InvalidOperation, TypeError, ValueError):
+        return (None, False, "required_bps_invalid")
+    if not required.is_finite():
+        return (None, False, "required_bps_invalid")
+    if required > required_bps_limit:
+        return (required, False, "required_bps_per_minute_too_high")
+    return (required, True, None)
+
+
+def _weak_recent_return_progression_status(
+    *,
+    contract: ScannedContract,
+    ev_filter: EVFilterStatus,
+) -> WeakRecentReturnProgressionStatus:
+    if getattr(contract, "trend_confirmation_status", None) != "weak_recent_return":
+        return WeakRecentReturnProgressionStatus(
+            allowed=True,
+            status="not_weak_recent_return",
+            reason=None,
+            memory_present=bool(getattr(contract, "progression_memory_snapshot", ())),
+            progression_quality=getattr(
+                contract,
+                "progression_continuation_quality",
+                None,
+            ),
+        )
+    memory_snapshot = dict(getattr(contract, "progression_memory_snapshot", ()) or ())
+    memory_present = bool(memory_snapshot) and not bool(
+        memory_snapshot.get("memory_cold_start")
+    )
+    progression_quality = getattr(contract, "progression_continuation_quality", None)
+    if not memory_present:
+        return WeakRecentReturnProgressionStatus(
+            allowed=False,
+            status="weak_recent_return_missing_progression_blocked",
+            reason="missing_or_cold_progression_memory",
+            memory_present=False,
+            progression_quality=progression_quality,
+        )
+    ratio_decay = getattr(contract, "ratio_decay", None)
+    failed_count = getattr(contract, "failed_continuation_count", None) or 0
+    decel_count = getattr(contract, "deceleration_persistence_count", None) or 0
+    itm_status = str(memory_snapshot.get("itm_strengthening_status") or "unknown")
+    ev_score = ev_filter.score
+    confirmed = (
+        (ratio_decay is None or Decimal(str(ratio_decay)) <= Decimal("0"))
+        and int(failed_count) <= 1
+        and int(decel_count) <= 1
+        and itm_status in {"strengthening", "flat"}
+        and ev_filter.allowed
+        and ev_score is not None
+        and ev_score >= Decimal("0")
+    )
+    if confirmed:
+        return WeakRecentReturnProgressionStatus(
+            allowed=True,
+            status="weak_recent_return_progression_confirmed",
+            reason=None,
+            memory_present=True,
+            progression_quality=progression_quality,
+        )
+    return WeakRecentReturnProgressionStatus(
+        allowed=False,
+        status="weak_recent_return_progression_rejected",
+        reason="progression_quality_not_confirmed",
+        memory_present=True,
+        progression_quality=progression_quality,
     )
 
 
@@ -3392,6 +3652,12 @@ def _ev_filter_skip_reason(
     ):
         return "needs_cross_blocked"
     required_bps = getattr(contract, "required_bps_per_minute", None)
+    if ev_filter.required_bps_rejection_reason in {
+        "required_bps_missing",
+        "required_bps_invalid",
+        "required_bps_per_minute_too_high",
+    }:
+        return ev_filter.required_bps_rejection_reason
     if required_bps is not None and Decimal(str(required_bps)) > getattr(
         settings,
         "live_ev_required_bps_max",
@@ -4257,6 +4523,14 @@ def _ev_filter_payload(status: EVFilterStatus | None) -> dict[str, object]:
             "ev_conditional_override_eligible": None,
             "ev_required_conditions": [],
             "ev_matched_conditions": [],
+            "required_bps_ok": None,
+            "required_bps_per_minute": None,
+            "required_bps_limit_used": None,
+            "required_bps_rejection_reason": None,
+            "ev_actual_cost_type": None,
+            "ev_actual_cost_limit": None,
+            "ev_actual_cost_observed": None,
+            "ev_actual_cost_rejection_reason": None,
         }
     return {
         "ev_filter_status": status.status,
@@ -4290,6 +4564,25 @@ def _ev_filter_payload(status: EVFilterStatus | None) -> dict[str, object]:
         "ev_conditional_override_eligible": status.conditional_override_eligible,
         "ev_required_conditions": list(status.required_conditions),
         "ev_matched_conditions": list(status.matched_conditions),
+        "required_bps_ok": status.required_bps_ok,
+        "required_bps_per_minute": status.required_bps_per_minute,
+        "required_bps_limit_used": status.required_bps_limit_used,
+        "required_bps_rejection_reason": status.required_bps_rejection_reason,
+        "ev_actual_cost_type": status.ev_actual_cost_type,
+        "ev_actual_cost_limit": status.ev_actual_cost_limit,
+        "ev_actual_cost_observed": status.ev_actual_cost_observed,
+        "ev_actual_cost_rejection_reason": status.ev_actual_cost_rejection_reason,
+    }
+
+
+def _weak_recent_return_progression_payload(
+    status: WeakRecentReturnProgressionStatus,
+) -> dict[str, object]:
+    return {
+        "weak_recent_return_progression_status": status.status,
+        "weak_recent_return_progression_reason": status.reason,
+        "weak_recent_return_progression_memory_present": status.memory_present,
+        "weak_recent_return_progression_quality": status.progression_quality,
     }
 
 
@@ -4536,10 +4829,30 @@ def _signal_diagnostic_payload(contract: ScannedContract) -> dict[str, object]:
         "quality_band": getattr(contract, "quality_band", None),
         "score_components": dict(getattr(contract, "score_components", ()) or ()),
         "hard_gate_results": dict(getattr(contract, "hard_gate_results", ()) or ()),
+        "candidate_downgrade_reasons": list(
+            getattr(contract, "candidate_downgrade_reasons", ()) or ()
+        ),
+        "candidate_upgrade_reasons": list(
+            getattr(contract, "candidate_upgrade_reasons", ()) or ()
+        ),
+        "progression_memory_snapshot": dict(
+            getattr(contract, "progression_memory_snapshot", ()) or ()
+        ),
         "trend_age_cycles": getattr(contract, "trend_age_cycles", None),
+        "trend_age_seconds": getattr(contract, "trend_age_seconds", None),
         "failed_continuation_count": getattr(
             contract,
             "failed_continuation_count",
+            None,
+        ),
+        "deceleration_persistence_count": getattr(
+            contract,
+            "deceleration_persistence_count",
+            None,
+        ),
+        "range_expansion_persistence_count": getattr(
+            contract,
+            "range_expansion_persistence_count",
             None,
         ),
         "retry_degradation_factor": getattr(
@@ -4570,6 +4883,30 @@ def _signal_diagnostic_payload(contract: ScannedContract) -> dict[str, object]:
             None,
         ),
         "reversal_shadow_only": getattr(contract, "reversal_shadow_only", None),
+        "roadmap_mode_active": getattr(contract, "roadmap_mode_active", None),
+        "legacy_gate_applied": getattr(contract, "legacy_gate_applied", None),
+        "legacy_gate_mapped_to_score": getattr(
+            contract,
+            "legacy_gate_mapped_to_score",
+            None,
+        ),
+        "legacy_gate_bypassed_due_to_roadmap_mode": getattr(
+            contract,
+            "legacy_gate_bypassed_due_to_roadmap_mode",
+            None,
+        ),
+        "final_blocking_gate": getattr(contract, "final_blocking_gate", None),
+        "product_filtered_reason": getattr(contract, "product_filtered_reason", None),
+        "product_no_active_market_reason": getattr(
+            contract,
+            "product_no_active_market_reason",
+            None,
+        ),
+        "product_no_liquidity_reason": getattr(
+            contract,
+            "product_no_liquidity_reason",
+            None,
+        ),
     }
 
 
@@ -4942,6 +5279,18 @@ def _reversal_cross_hold_payload(status: ReversalCrossHoldStatus) -> dict[str, o
         "reversal_cross_hold_seconds": status.hold_seconds,
         "reversal_cross_hold_required": status.required_seconds,
         "reversal_cross_hold_block_reason": status.block_reason,
+        "reversal_cross_hold_mode": status.mode,
+        "reversal_cross_hold_as_score_penalty": status.as_score_penalty,
+        "reversal_cross_hold_hard_block": status.hard_block,
+        "reversal_cross_hold_reason": status.reason,
+        "reversal_gate_source": (
+            "roadmap" if status.roadmap_gate_applied else "legacy"
+            if status.legacy_gate_applied
+            else "none"
+        ),
+        "reversal_legacy_gate_applied": status.legacy_gate_applied,
+        "reversal_roadmap_gate_applied": status.roadmap_gate_applied,
+        "reversal_final_blocking_reason": status.final_blocking_reason,
     }
 
 

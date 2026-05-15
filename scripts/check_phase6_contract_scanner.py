@@ -20,6 +20,7 @@ from kalshi_bot.contracts.contract_scanner import (  # noqa: E402
     ContractScannerError,
     ExhaustionProgressionSample,
 )
+from kalshi_bot.forecast.progression_memory import ProgressionMemoryState  # noqa: E402
 from kalshi_bot.forecast.bias_engine import BiasRiskFlags, BiasSnapshot, BiasState  # noqa: E402
 from kalshi_bot.market.market_state_cache import MarketStateSnapshot, TickerState  # noqa: E402
 
@@ -119,6 +120,7 @@ def _run_fixtures(scanner: ContractScanner) -> list[str]:
     failures.extend(_validate_weak_momentum_stabilization_blocks_near_strike_chop())
     failures.extend(_validate_mini_exhaustion_downgrades_without_hard_block())
     failures.extend(_validate_noise_cross_ignored_when_configured())
+    failures.extend(_validate_roadmap_progression_telemetry_populates())
     return failures
 
 
@@ -1537,6 +1539,60 @@ def _validate_noise_cross_ignored_when_configured() -> list[str]:
         failures.append(f"noise cross side_needs_cross={contract.side_needs_cross}")
     if contract.required_bps_per_minute != Decimal("0.000"):
         failures.append(f"noise cross required={contract.required_bps_per_minute}")
+    return failures
+
+
+def _validate_roadmap_progression_telemetry_populates() -> list[str]:
+    scanner = ContractScanner(
+        product_markets={"BTC-USD": ("KXBTC-1",)},
+        market_metadata_by_ticker=_progression_market_metadata(),
+        composite_score_enabled=True,
+        adaptive_thresholds_enabled=True,
+        progression_memory_enabled=True,
+    )
+    snapshot = scanner.scan(
+        bias_snapshot=_progression_exhaustion_bias_snapshot(
+            recent_return_bps=Decimal("4.000"),
+            recent_3m_return_bps=Decimal("10.000"),
+            recent_5m_range_bps=Decimal("12.000"),
+            distance_to_recent_high_bps=Decimal("12.000"),
+        ),
+        market_snapshot=_base_market_snapshot(),
+        progression_memory_by_product={
+            "BTC-USD": ProgressionMemoryState(
+                product_id="BTC-USD",
+                sample_count=2,
+                trend_age_cycles=2,
+                trend_age_seconds=60,
+                consecutive_same_side_intents=2,
+                failed_continuation_count=0,
+                near_extreme_retest_count=0,
+                deceleration_persistence_count=0,
+                range_expansion_persistence_count=0,
+                ratio_decay=Decimal("-0.1000"),
+                retry_degradation_factor=Decimal("1.0000"),
+                itm_strengthening_status="strengthening",
+                distance_to_target_worsening=False,
+                progression_continuation_quality="strengthening",
+                reversal_buildup_score=Decimal("0.0000"),
+                last_direction="up",
+                last_market_ticker="KXBTC-1",
+                memory_cold_start=False,
+            )
+        },
+    )
+    if not snapshot.ranked_contracts:
+        return ["roadmap progression telemetry no ranked contract"]
+    contract = snapshot.ranked_contracts[0]
+    failures: list[str] = []
+    if not contract.progression_memory_snapshot:
+        failures.append("progression memory snapshot missing")
+    if contract.trend_age_seconds != 60:
+        failures.append(f"trend age seconds={contract.trend_age_seconds}")
+    if contract.candidate_upgrade_reasons is None:
+        failures.append("candidate upgrade reasons missing")
+    if contract.roadmap_mode_active is not True:
+        failures.append(f"roadmap mode active={contract.roadmap_mode_active}")
     return failures
 
 

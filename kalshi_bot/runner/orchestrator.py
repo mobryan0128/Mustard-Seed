@@ -622,6 +622,9 @@ class KalshiBotRunner:
                     "candidate_funnel_summary": _candidate_funnel_summary_payload(
                         contract_scan_snapshot
                     ),
+                    "progression_memory_snapshot_by_product": (
+                        self._progression_memory_snapshot_payload()
+                    ),
                     "candidate_funnel_diagnostics": (
                         _candidate_funnel_diagnostic_payloads(contract_scan_snapshot)
                         if self._settings.live_candidate_funnel_diagnostics_enabled
@@ -1232,6 +1235,9 @@ class KalshiBotRunner:
                         result.status.skipped_contract_diagnostics
                     )
                 ),
+                "progression_memory_snapshot_by_product": (
+                    self._progression_memory_snapshot_payload()
+                ),
                 "bias_diagnostics": _bias_diagnostic_payloads(result.status.bias_diagnostics),
                 "mapped_market_diagnostics": _mapped_market_diagnostic_payloads(
                     result.status.mapped_market_diagnostics
@@ -1248,6 +1254,14 @@ class KalshiBotRunner:
             snapshot_name="cycle_snapshot",
             snapshot=payload,
         )
+
+    def _progression_memory_snapshot_payload(self) -> dict[str, object]:
+        if self._progression_memory is None:
+            return {}
+        return {
+            product_id: state.as_payload()
+            for product_id, state in self._progression_memory.states_by_product().items()
+        }
 
     def _record_roadmap_shadow_decisions(self, result: RunnerCycleResult) -> None:
         if not self._settings.live_shadow_decision_log_enabled:
@@ -1849,6 +1863,12 @@ def _candidate_funnel_summary_payload(
         for reason, count in skip_counts.items()
         if reason.startswith("quiet_continuation_")
     )
+    candidate_counts: Counter[str] = Counter(
+        contract.product_id for contract in contract_scan_snapshot.ranked_contracts
+    )
+    skip_counts_by_product: Counter[str] = Counter(
+        contract.product_id for contract in contract_scan_snapshot.skipped_contracts
+    )
     return {
         "ranked_contract_count": len(contract_scan_snapshot.ranked_contracts),
         "skipped_contract_count": len(contract_scan_snapshot.skipped_contracts),
@@ -1862,6 +1882,16 @@ def _candidate_funnel_summary_payload(
         "quiet_continuation_ranked_count": quiet_ranked,
         "quiet_continuation_failed_count": quiet_failed,
         "neutral_bias_count": skip_counts.get("neutral_bias", 0),
+        "product_scanner_candidate_count": tuple(
+            {
+                "product_id": product_id,
+                "candidate_count": candidate_counts.get(product_id, 0),
+                "skipped_count": skip_counts_by_product.get(product_id, 0),
+            }
+            for product_id in sorted(
+                set(candidate_counts) | set(skip_counts_by_product)
+            )
+        ),
     }
 
 
@@ -2034,10 +2064,30 @@ def _roadmap_diagnostic_fields(item) -> dict[str, object]:  # noqa: ANN001
         "quality_band": getattr(item, "quality_band", None),
         "score_components": dict(getattr(item, "score_components", ()) or ()),
         "hard_gate_results": dict(getattr(item, "hard_gate_results", ()) or ()),
+        "candidate_downgrade_reasons": list(
+            getattr(item, "candidate_downgrade_reasons", ()) or ()
+        ),
+        "candidate_upgrade_reasons": list(
+            getattr(item, "candidate_upgrade_reasons", ()) or ()
+        ),
+        "progression_memory_snapshot": dict(
+            getattr(item, "progression_memory_snapshot", ()) or ()
+        ),
         "trend_age_cycles": getattr(item, "trend_age_cycles", None),
+        "trend_age_seconds": getattr(item, "trend_age_seconds", None),
         "failed_continuation_count": getattr(
             item,
             "failed_continuation_count",
+            None,
+        ),
+        "deceleration_persistence_count": getattr(
+            item,
+            "deceleration_persistence_count",
+            None,
+        ),
+        "range_expansion_persistence_count": getattr(
+            item,
+            "range_expansion_persistence_count",
             None,
         ),
         "retry_degradation_factor": getattr(item, "retry_degradation_factor", None),
@@ -2064,6 +2114,30 @@ def _roadmap_diagnostic_fields(item) -> dict[str, object]:  # noqa: ANN001
             None,
         ),
         "reversal_shadow_only": getattr(item, "reversal_shadow_only", None),
+        "roadmap_mode_active": getattr(item, "roadmap_mode_active", None),
+        "legacy_gate_applied": getattr(item, "legacy_gate_applied", None),
+        "legacy_gate_mapped_to_score": getattr(
+            item,
+            "legacy_gate_mapped_to_score",
+            None,
+        ),
+        "legacy_gate_bypassed_due_to_roadmap_mode": getattr(
+            item,
+            "legacy_gate_bypassed_due_to_roadmap_mode",
+            None,
+        ),
+        "final_blocking_gate": getattr(item, "final_blocking_gate", None),
+        "product_filtered_reason": getattr(item, "product_filtered_reason", None),
+        "product_no_active_market_reason": getattr(
+            item,
+            "product_no_active_market_reason",
+            None,
+        ),
+        "product_no_liquidity_reason": getattr(
+            item,
+            "product_no_liquidity_reason",
+            None,
+        ),
     }
 
 

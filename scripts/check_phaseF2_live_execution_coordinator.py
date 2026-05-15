@@ -27,7 +27,15 @@ from kalshi_bot.execution.execution_engine import (  # noqa: E402
     SimulationDecision,
     SimulationSnapshot,
 )
-from kalshi_bot.execution.live_execution_coordinator import LiveExecutionCoordinator  # noqa: E402
+from kalshi_bot.execution.live_execution_coordinator import (  # noqa: E402
+    EntrySegmentStatus,
+    ExecutionPricing,
+    ItmPersistenceStatus,
+    LiveExecutionCoordinator,
+    _ev_filter_status,
+    _reversal_cross_hold_status,
+    _weak_recent_return_progression_status,
+)
 from kalshi_bot.market.market_state_cache import (  # noqa: E402
     MarketStateSnapshot,
     OrderBookState,
@@ -94,6 +102,10 @@ def main() -> int:
     failures.extend(_validate_candidate_funnel_summary_logs_scanner_and_live_counts())
     failures.extend(_validate_ev_no_high_actual_cost_blocks())
     failures.extend(_validate_progression_caution_still_runs_ev_cost_gate())
+    failures.extend(_validate_required_bps_missing_safe_fallback())
+    failures.extend(_validate_ev_actual_cost_is_per_contract_price())
+    failures.extend(_validate_weak_recent_return_missing_memory_blocks())
+    failures.extend(_validate_reversal_cross_hold_roadmap_score_penalty())
 
     if failures:
         for failure in failures:
@@ -950,6 +962,88 @@ def _validate_progression_caution_still_runs_ev_cost_gate() -> list[str]:
     )
 
 
+def _validate_required_bps_missing_safe_fallback() -> list[str]:
+    status = _ev_filter_status(
+        contract=_contract(required_bps_per_minute=None),
+        pricing=_pricing(intent_price=Decimal("0.45")),
+        entry_segment=_entry_segment(),
+        settings=_Settings(
+            log_directory=Path("."),
+            log_jsonl_enabled=False,
+            live_ev_filter_enabled=True,
+        ),
+    )
+    if status.required_bps_ok is not False:
+        return [f"missing required bps ok={status.required_bps_ok}"]
+    if status.required_bps_rejection_reason != "required_bps_missing":
+        return [f"missing required bps reason={status.required_bps_rejection_reason}"]
+    if status.allowed:
+        return ["missing required bps unexpectedly allowed"]
+    return []
+
+
+def _validate_ev_actual_cost_is_per_contract_price() -> list[str]:
+    status = _ev_filter_status(
+        contract=_contract(
+            midpoint=Decimal("0.45"),
+            required_bps_per_minute=Decimal("0.000"),
+        ),
+        pricing=_pricing(intent_price=Decimal("0.45")),
+        entry_segment=_entry_segment(),
+        settings=_Settings(
+            log_directory=Path("."),
+            log_jsonl_enabled=False,
+            live_ev_filter_enabled=True,
+            live_ev_max_actual_cost=Decimal("0.70"),
+        ),
+    )
+    if status.ev_actual_cost_type != "per_contract_entry_price":
+        return [f"actual cost type={status.ev_actual_cost_type}"]
+    if status.ev_actual_cost_observed != Decimal("0.45"):
+        return [f"actual cost observed={status.ev_actual_cost_observed}"]
+    if status.actual_cost_status != "within_limit":
+        return [f"actual cost status={status.actual_cost_status}"]
+    return []
+
+
+def _validate_weak_recent_return_missing_memory_blocks() -> list[str]:
+    status = _weak_recent_return_progression_status(
+        contract=_contract(trend_confirmation_status="weak_recent_return"),
+        ev_filter=_allowed_ev_status(),
+    )
+    if status.allowed:
+        return ["weak recent return missing memory allowed"]
+    if status.status != "weak_recent_return_missing_progression_blocked":
+        return [f"weak recent status={status.status}"]
+    return []
+
+
+def _validate_reversal_cross_hold_roadmap_score_penalty() -> list[str]:
+    status = _reversal_cross_hold_status(
+        contract=_contract(
+            structure="reversal",
+            side_currently_itm=True,
+            side_needs_cross=False,
+        ),
+        itm_persistence=ItmPersistenceStatus(
+            status="new_itm",
+            consecutive_itm_observations=1,
+            previous_side_currently_itm=False,
+            itm_hold_seconds=Decimal("5"),
+        ),
+        settings=_Settings(
+            log_directory=Path("."),
+            log_jsonl_enabled=False,
+            live_composite_score_enabled=True,
+        ),
+    )
+    if not status.allowed:
+        return [f"roadmap cross-hold allowed={status.allowed}"]
+    if not status.as_score_penalty:
+        return [f"roadmap cross-hold penalty={status.as_score_penalty}"]
+    return []
+
+
 def _validate_ev_no_candidate_a_required_bps_blocks() -> list[str]:
     return _expect_ev_no_skip(
         market_ticker="KXBTC15M-EV-NO-BPS",
@@ -1249,7 +1343,7 @@ def _validate_reversal_price_blocks_confirmed_hold() -> list[str]:
             side_needs_cross=False,
             distance_to_target_bps=Decimal("-3.000"),
             required_bps_per_minute=Decimal("0.000"),
-            midpoint=Decimal("0.10"),
+            midpoint=Decimal("0.11"),
             contract_close_time=_future_time(minutes=2),
         )
         coordinator.process_contract_scan_snapshot(_contract_snapshot(contract), cycle_number=71)
@@ -2445,6 +2539,48 @@ def _past_time(*, minutes: int) -> str:
     return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
 
 
+def _pricing(*, intent_price: Decimal) -> ExecutionPricing:
+    return ExecutionPricing(
+        pricing_source="test",
+        intent_price_dollars=intent_price,
+        scanner_midpoint=intent_price,
+        intent_side="yes",
+        yes_bid=intent_price - Decimal("0.01"),
+        yes_ask=intent_price,
+        executable_side_ask=intent_price,
+        executable_side_ask_size_fp=Decimal("10"),
+        available_count_at_intent_price=Decimal("10"),
+        orderbook_present=True,
+        orderbook_seq=1,
+        spread_dollars=Decimal("0.01"),
+        execution_premium_over_midpoint_dollars=Decimal("0"),
+    )
+
+
+def _entry_segment() -> EntrySegmentStatus:
+    return EntrySegmentStatus(
+        allowed=True,
+        status="allowed",
+        segment="10_to_5",
+        current_count=0,
+        max_count=1,
+        remaining_seconds=600,
+    )
+
+
+def _allowed_ev_status():
+    return _ev_filter_status(
+        contract=_contract(required_bps_per_minute=Decimal("0.000")),
+        pricing=_pricing(intent_price=Decimal("0.45")),
+        entry_segment=_entry_segment(),
+        settings=_Settings(
+            log_directory=Path("."),
+            log_jsonl_enabled=False,
+            live_ev_filter_enabled=True,
+        ),
+    )
+
+
 @dataclass(frozen=True)
 class _Settings:
     log_directory: Path
@@ -2507,6 +2643,13 @@ class _Settings:
     live_ev_require_positive_cost_expected_value: bool = True
     live_ev_exhaustion_block_enabled: bool = True
     live_candidate_funnel_diagnostics_enabled: bool = False
+    live_composite_score_enabled: bool = False
+    live_adaptive_thresholds_enabled: bool = False
+    live_unified_near_extreme_enabled: bool = False
+    live_adaptive_chop_enabled: bool = False
+    live_progression_memory_enabled: bool = False
+    live_reversal_classifier_enabled: bool = False
+    live_adaptive_pacing_enabled: bool = False
 
 
 class _FixedEntryRiskManager:

@@ -48,6 +48,16 @@ SCORE_DOWNGRADE_REVERSAL_NEAR_TARGET_CONFIDENCE = 30
 SCORE_BONUS_CONFIRMED_TREND_CONFIDENCE = 10
 SCORE_MAX_CONFIDENCE = 90
 REVERSAL_NOISE_ZONE_DISTANCE_BPS = Decimal("5.000")
+_ROADMAP_MAPPED_QUIET_SIGNAL_BLOCKS = frozenset(
+    {
+        "quiet_continuation_recent_move_too_large",
+        "quiet_continuation_3m_burst_too_large",
+        "quiet_continuation_5m_burst_too_large",
+        "quiet_continuation_range_expanded",
+        "quiet_continuation_decelerating_after_burst",
+        "quiet_continuation_near_recent_extreme",
+    }
+)
 
 
 class ContractScannerError(ValueError):
@@ -170,8 +180,14 @@ class ScannedContract:
     quality_band: str | None = None
     score_components: tuple[tuple[str, Decimal], ...] = ()
     hard_gate_results: tuple[tuple[str, str], ...] = ()
+    candidate_downgrade_reasons: tuple[str, ...] = ()
+    candidate_upgrade_reasons: tuple[str, ...] = ()
+    progression_memory_snapshot: tuple[tuple[str, object], ...] = ()
     trend_age_cycles: int | None = None
+    trend_age_seconds: int | None = None
     failed_continuation_count: int | None = None
+    deceleration_persistence_count: int | None = None
+    range_expansion_persistence_count: int | None = None
     retry_degradation_factor: Decimal | None = None
     progression_continuation_quality: str | None = None
     reversal_probability: Decimal | None = None
@@ -180,6 +196,14 @@ class ScannedContract:
     reversal_rejection_reason: str | None = None
     fake_continuation_signature: bool | None = None
     reversal_shadow_only: bool | None = None
+    roadmap_mode_active: bool | None = None
+    legacy_gate_applied: str | None = None
+    legacy_gate_mapped_to_score: str | None = None
+    legacy_gate_bypassed_due_to_roadmap_mode: str | None = None
+    final_blocking_gate: str | None = None
+    product_filtered_reason: str | None = None
+    product_no_active_market_reason: str | None = None
+    product_no_liquidity_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -278,8 +302,14 @@ class SkippedContract:
     quality_band: str | None = None
     score_components: tuple[tuple[str, Decimal], ...] = ()
     hard_gate_results: tuple[tuple[str, str], ...] = ()
+    candidate_downgrade_reasons: tuple[str, ...] = ()
+    candidate_upgrade_reasons: tuple[str, ...] = ()
+    progression_memory_snapshot: tuple[tuple[str, object], ...] = ()
     trend_age_cycles: int | None = None
+    trend_age_seconds: int | None = None
     failed_continuation_count: int | None = None
+    deceleration_persistence_count: int | None = None
+    range_expansion_persistence_count: int | None = None
     retry_degradation_factor: Decimal | None = None
     progression_continuation_quality: str | None = None
     reversal_probability: Decimal | None = None
@@ -288,6 +318,14 @@ class SkippedContract:
     reversal_rejection_reason: str | None = None
     fake_continuation_signature: bool | None = None
     reversal_shadow_only: bool | None = None
+    roadmap_mode_active: bool | None = None
+    legacy_gate_applied: str | None = None
+    legacy_gate_mapped_to_score: str | None = None
+    legacy_gate_bypassed_due_to_roadmap_mode: str | None = None
+    final_blocking_gate: str | None = None
+    product_filtered_reason: str | None = None
+    product_no_active_market_reason: str | None = None
+    product_no_liquidity_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -376,6 +414,7 @@ class ContractScanner:
         composite_borderline_min: Decimal = Decimal("0.40"),
         return_range_ratio_enabled: bool = True,
         return_range_ratio_min_by_product: Mapping[str, Decimal] | None = None,
+        progression_memory_enabled: bool = False,
         reversal_classifier_enabled: bool = False,
         reversal_shadow_only: bool = True,
         reversal_max_executable_price: Decimal = Decimal("0.60"),
@@ -475,6 +514,7 @@ class ContractScanner:
         self._composite_score_min = Decimal(str(composite_score_min))
         self._composite_borderline_min = Decimal(str(composite_borderline_min))
         self._return_range_ratio_enabled = return_range_ratio_enabled
+        self._progression_memory_enabled = progression_memory_enabled
         self._return_range_ratio_min_by_product = {
             key.upper(): Decimal(str(value))
             for key, value in (return_range_ratio_min_by_product or {}).items()
@@ -496,6 +536,17 @@ class ContractScanner:
             for key, value in (product_volatility_scale_by_product or {}).items()
         }
         self._score_telemetry_enabled = score_telemetry_enabled
+        self._roadmap_mode_active = any(
+            (
+                self._composite_score_enabled,
+                self._adaptive_thresholds_enabled,
+                self._unified_near_extreme_enabled,
+                self._adaptive_chop_enabled,
+                self._progression_memory_enabled,
+                self._reversal_classifier_enabled,
+                self._adaptive_pacing_enabled,
+            )
+        )
 
     @classmethod
     def from_settings(cls, settings: KalshiSettings) -> "ContractScanner":
@@ -526,6 +577,15 @@ class ContractScanner:
             for market_ticker in market_tickers:
                 ticker_state = market_snapshot.tickers.get(market_ticker)
                 if ticker_state is None:
+                    skipped_contracts.append(
+                        SkippedContract(
+                            product_id=product_id,
+                            market_ticker=market_ticker,
+                            reason="missing_ticker_state",
+                            product_no_liquidity_reason="ticker_state_missing",
+                            final_blocking_gate="missing_ticker_state",
+                        )
+                    )
                     continue
                 metadata = self._market_metadata_by_ticker.get(market_ticker, {})
                 stale_skip_reason = _stale_ticker_skip_reason(metadata)
@@ -576,11 +636,19 @@ class ContractScanner:
                                 self._quiet_continuation_max_required_bps_per_minute
                             ),
                         )
+                        quiet_signal_block_reason = None
                         if quiet_skip_reason is None:
-                            quiet_skip_reason = self._quiet_continuation_signal_block_reason(
+                            quiet_signal_block_reason = self._quiet_continuation_signal_block_reason(
                                 product_id=product_id,
                                 bias_state=quiet_bias_state,
                             )
+                            quiet_skip_reason = quiet_signal_block_reason
+                            if (
+                                self._roadmap_mode_active
+                                and quiet_signal_block_reason
+                                in _ROADMAP_MAPPED_QUIET_SIGNAL_BLOCKS
+                            ):
+                                quiet_skip_reason = None
                         if quiet_skip_reason is None:
                             quiet_weak_status = self._weak_momentum_stabilization_status(
                                 product_id=product_id,
@@ -716,10 +784,11 @@ class ContractScanner:
                     entry_price=midpoint,
                     trend_confirmation_status=trend_confirmation_status,
                     signal_quality_fields=signal_quality_fields,
-                    progression_memory=progression_memory_by_product.get(
-                        product_id.upper()
-                    )
-                    or progression_memory_by_product.get(product_id),
+                    progression_memory=_progression_memory_for_candidate(
+                        progression_memory_by_product,
+                        product_id=product_id,
+                        direction=effective_bias_state.direction,
+                    ),
                 )
                 signal_quality_fields = {
                     **signal_quality_fields,
@@ -1090,6 +1159,19 @@ class ContractScanner:
             else 0
         )
         trend_age = progression_memory.trend_age_cycles if progression_memory else 0
+        trend_age_seconds = (
+            progression_memory.trend_age_seconds if progression_memory else 0
+        )
+        range_expansion_count = (
+            progression_memory.range_expansion_persistence_count
+            if progression_memory is not None
+            else (
+                1
+                if signal_quality_fields.get("range_expansion_status")
+                in {"expanding", "bursting"}
+                else 0
+            )
+        )
         reversal_classification = classify_reversal_probability(
             return_range_ratio=ratio,
             ratio_floor=thresholds.adaptive_ratio_floor,
@@ -1187,6 +1269,34 @@ class ContractScanner:
             "reversal_shadow_only": self._reversal_shadow_only,
             "score_components": tuple(quality_score.component_scores.items()),
             "hard_gate_results": tuple(quality_score.hard_gate_statuses.items()),
+            "candidate_downgrade_reasons": quality_score.downgrade_reasons,
+            "candidate_upgrade_reasons": quality_score.bonus_reasons,
+            "progression_memory_snapshot": (
+                tuple(progression_memory.as_payload().items())
+                if progression_memory is not None
+                else ()
+            ),
+            "trend_age_seconds": trend_age_seconds,
+            "deceleration_persistence_count": deceleration_count,
+            "range_expansion_persistence_count": range_expansion_count,
+            "roadmap_mode_active": self._roadmap_mode_active,
+            "legacy_gate_applied": (
+                "exhaustion_guard"
+                if signal_quality_fields.get("exhaustion_status") == "blocked"
+                else None
+            ),
+            "legacy_gate_mapped_to_score": (
+                "exhaustion_or_momentum_component"
+                if self._roadmap_mode_active
+                else None
+            ),
+            "legacy_gate_bypassed_due_to_roadmap_mode": (
+                "exhaustion_guard_blocked"
+                if self._roadmap_mode_active
+                and signal_quality_fields.get("exhaustion_status") == "blocked"
+                else None
+            ),
+            "final_blocking_gate": None,
         }
         return payload
 
@@ -1373,6 +1483,8 @@ class ContractScanner:
         if bool(feasibility.side_needs_cross):
             return None
         if signal_quality_fields.get("exhaustion_status") == "blocked":
+            if self._roadmap_mode_active:
+                return None
             return "exhaustion_guard_blocked"
         return None
 
@@ -1559,6 +1671,7 @@ def scanner_live_settings_kwargs(settings: KalshiSettings) -> dict[str, object]:
         "return_range_ratio_min_by_product": (
             settings.live_return_range_ratio_min_by_product
         ),
+        "progression_memory_enabled": settings.live_progression_memory_enabled,
         "reversal_classifier_enabled": settings.live_reversal_classifier_enabled,
         "reversal_shadow_only": settings.live_reversal_shadow_only,
         "reversal_max_executable_price": settings.live_reversal_max_executable_price,
@@ -1616,6 +1729,21 @@ def _return_range_ratio(
     if lookback is None or recent_range is None or recent_range <= Decimal("0"):
         return None
     return (abs(lookback) / recent_range).quantize(Decimal("0.0001"))
+
+
+def _progression_memory_for_candidate(
+    states_by_product: Mapping[str, ProgressionMemoryState],
+    *,
+    product_id: str,
+    direction: str | None,
+) -> ProgressionMemoryState | None:
+    state = states_by_product.get(product_id.upper()) or states_by_product.get(product_id)
+    if state is None or state.memory_cold_start:
+        return state
+    if state.last_direction is not None and direction is not None:
+        if state.last_direction != direction:
+            return None
+    return state
 
 
 def _near_extreme_distance_bps(*, bias_state, direction: str | None) -> Decimal | None:  # noqa: ANN001
