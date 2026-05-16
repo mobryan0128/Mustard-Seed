@@ -34,6 +34,7 @@ from kalshi_bot.execution.live_execution_coordinator import (  # noqa: E402
     LiveExecutionCoordinator,
     _ev_filter_status,
     _reversal_cross_hold_status,
+    _roadmap_continuation_decision,
     _weak_recent_return_progression_status,
 )
 from kalshi_bot.market.market_state_cache import (  # noqa: E402
@@ -106,6 +107,11 @@ def main() -> int:
     failures.extend(_validate_ev_actual_cost_is_per_contract_price())
     failures.extend(_validate_weak_recent_return_missing_memory_blocks())
     failures.extend(_validate_reversal_cross_hold_roadmap_score_penalty())
+    failures.extend(_validate_progression_weakening_blocks_continuation())
+    failures.extend(_validate_persistent_deceleration_blocks_continuation())
+    failures.extend(_validate_weak_recent_return_danger_blocks_continuation())
+    failures.extend(_validate_score_aware_ev_cap_allows_clean_candidate())
+    failures.extend(_validate_score_aware_ev_cap_rejects_danger_candidate())
 
     if failures:
         for failure in failures:
@@ -1041,6 +1047,109 @@ def _validate_reversal_cross_hold_roadmap_score_penalty() -> list[str]:
         return [f"roadmap cross-hold allowed={status.allowed}"]
     if not status.as_score_penalty:
         return [f"roadmap cross-hold penalty={status.as_score_penalty}"]
+    return []
+
+
+def _validate_progression_weakening_blocks_continuation() -> list[str]:
+    status = _roadmap_continuation_decision(
+        contract=_contract(
+            progression_continuation_quality="weakening",
+            progression_memory_snapshot=(("sample_count", 3),),
+        ),
+        ev_filter=_allowed_ev_status(),
+        settings=_Settings(log_directory=Path("."), log_jsonl_enabled=False),
+        weak_progression=_allowed_weak_progression(),
+    )
+    if status.continuation_allowed:
+        return ["progression weakening continuation allowed"]
+    if status.continuation_blocked_reason != "progression_weakening_blocked":
+        return [f"progression weakening reason={status.continuation_blocked_reason}"]
+    return []
+
+
+def _validate_persistent_deceleration_blocks_continuation() -> list[str]:
+    status = _roadmap_continuation_decision(
+        contract=_contract(deceleration_persistence_count=3),
+        ev_filter=_allowed_ev_status(),
+        settings=_Settings(log_directory=Path("."), log_jsonl_enabled=False),
+        weak_progression=_allowed_weak_progression(),
+    )
+    if status.continuation_allowed:
+        return ["persistent deceleration continuation allowed"]
+    if status.continuation_blocked_reason != "persistent_deceleration_blocked":
+        return [f"persistent decel reason={status.continuation_blocked_reason}"]
+    return []
+
+
+def _validate_weak_recent_return_danger_blocks_continuation() -> list[str]:
+    status = _roadmap_continuation_decision(
+        contract=_contract(
+            trend_confirmation_status="weak_recent_return",
+            deceleration_persistence_count=2,
+            progression_memory_snapshot=(("sample_count", 3),),
+        ),
+        ev_filter=_allowed_ev_status(),
+        settings=_Settings(log_directory=Path("."), log_jsonl_enabled=False),
+        weak_progression=_allowed_weak_progression(),
+    )
+    if status.continuation_allowed:
+        return ["weak recent danger continuation allowed"]
+    if status.continuation_blocked_reason != "weak_recent_return_danger_blocked":
+        return [f"weak recent danger reason={status.continuation_blocked_reason}"]
+    return []
+
+
+def _validate_score_aware_ev_cap_allows_clean_candidate() -> list[str]:
+    status = _ev_filter_status(
+        contract=_contract(
+            midpoint=Decimal("0.72"),
+            required_bps_per_minute=Decimal("0.000"),
+            composite_score=Decimal("0.75"),
+            progression_continuation_quality="strengthening",
+        ),
+        pricing=_pricing(intent_price=Decimal("0.72")),
+        entry_segment=_entry_segment(),
+        settings=_Settings(
+            log_directory=Path("."),
+            log_jsonl_enabled=False,
+            live_ev_filter_enabled=True,
+            live_ev_min_reward_dollars=Decimal("0.20"),
+            live_score_aware_ev_cap_enabled=True,
+            live_score_aware_ev_cap_max_by_product={"BTC-USD": Decimal("0.75")},
+        ),
+    )
+    if not status.allowed:
+        return [f"score-aware clean status={status.status} block={status.block_reason}"]
+    if status.score_aware_ev_cap_status != "applied":
+        return [f"score-aware clean cap={status.score_aware_ev_cap_status}"]
+    return []
+
+
+def _validate_score_aware_ev_cap_rejects_danger_candidate() -> list[str]:
+    status = _ev_filter_status(
+        contract=_contract(
+            midpoint=Decimal("0.72"),
+            required_bps_per_minute=Decimal("0.000"),
+            composite_score=Decimal("0.75"),
+            progression_continuation_quality="strengthening",
+            deceleration_persistence_count=3,
+        ),
+        pricing=_pricing(intent_price=Decimal("0.72")),
+        entry_segment=_entry_segment(),
+        settings=_Settings(
+            log_directory=Path("."),
+            log_jsonl_enabled=False,
+            live_ev_filter_enabled=True,
+            live_ev_max_actual_cost=Decimal("0.80"),
+            live_ev_min_reward_dollars=Decimal("0.20"),
+            live_score_aware_ev_cap_enabled=True,
+            live_score_aware_ev_cap_max_by_product={"BTC-USD": Decimal("0.75")},
+        ),
+    )
+    if status.allowed:
+        return ["score-aware danger unexpectedly allowed"]
+    if status.score_aware_ev_cap_status != "blocked_by_danger":
+        return [f"score-aware danger cap={status.score_aware_ev_cap_status}"]
     return []
 
 
@@ -2349,6 +2458,15 @@ def _contract(
     trend_confirmation_status: str = "confirmed",
     exhaustion_status: str | None = None,
     contract_time_remaining_seconds: int | None = 120,
+    composite_score: Decimal | None = None,
+    progression_memory_snapshot: tuple[tuple[str, object], ...] = (),
+    progression_continuation_quality: str | None = None,
+    deceleration_persistence_count: int | None = None,
+    reversal_probability: Decimal | None = None,
+    reversal_expected_value: Decimal | None = None,
+    fake_continuation_signature: bool | None = None,
+    near_extreme_distance_bps: Decimal | None = None,
+    adaptive_near_extreme_bps: Decimal | None = None,
 ) -> ScannedContract:
     return ScannedContract(
         product_id=product_id,
@@ -2396,6 +2514,15 @@ def _contract(
         contract_open_time="2026-04-23T11:45:00+00:00",
         contract_close_time=contract_close_time,
         contract_time_remaining_seconds=contract_time_remaining_seconds,
+        composite_score=composite_score,
+        progression_memory_snapshot=progression_memory_snapshot,
+        progression_continuation_quality=progression_continuation_quality,
+        deceleration_persistence_count=deceleration_persistence_count,
+        reversal_probability=reversal_probability,
+        reversal_expected_value=reversal_expected_value,
+        fake_continuation_signature=fake_continuation_signature,
+        near_extreme_distance_bps=near_extreme_distance_bps,
+        adaptive_near_extreme_bps=adaptive_near_extreme_bps,
     )
 
 
@@ -2581,6 +2708,13 @@ def _allowed_ev_status():
     )
 
 
+def _allowed_weak_progression():
+    return _weak_recent_return_progression_status(
+        contract=_contract(trend_confirmation_status="confirmed"),
+        ev_filter=_allowed_ev_status(),
+    )
+
+
 @dataclass(frozen=True)
 class _Settings:
     log_directory: Path
@@ -2650,6 +2784,9 @@ class _Settings:
     live_progression_memory_enabled: bool = False
     live_reversal_classifier_enabled: bool = False
     live_adaptive_pacing_enabled: bool = False
+    live_score_aware_ev_cap_enabled: bool = False
+    live_score_aware_ev_cap_bump: Decimal = Decimal("0.05")
+    live_score_aware_ev_cap_max_by_product: dict[str, Decimal] | None = None
 
 
 class _FixedEntryRiskManager:

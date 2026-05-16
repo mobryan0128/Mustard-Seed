@@ -106,6 +106,8 @@ def score_candidate_quality(
     failed_attempts: int,
     progression_memory: ProgressionMemoryState | None,
     reversal_probability: Decimal | None,
+    fake_continuation_signature: bool = False,
+    reversal_probability_threshold: Decimal = Decimal("0.55"),
     is_reversal_candidate: bool = False,
 ) -> CompositeQualityScore:
     """Score one candidate using fixed, explainable components."""
@@ -128,6 +130,10 @@ def score_candidate_quality(
         near_extreme_distance_bps,
         near_extreme_threshold_bps,
     )
+    near_extreme = (
+        near_extreme_distance_bps is not None
+        and near_extreme_distance_bps <= near_extreme_threshold_bps
+    )
     components["near_extreme_distance"] = near_extreme_component
     if near_extreme_component < ZERO_DECIMAL:
         downgrades.append("near_extreme")
@@ -140,9 +146,8 @@ def score_candidate_quality(
     components["recent_5m_return"] = _return_component(recent_5m_return_bps)
     components["lookback_return"] = _return_component(lookback_return_bps)
     components["trend_confirmation"] = _trend_component(trend_confirmation_status)
-    components["deceleration_persistence"] = -min(
-        Decimal(deceleration_persistence_count) * Decimal("0.04"),
-        Decimal("0.16"),
+    components["deceleration_persistence"] = _deceleration_component(
+        deceleration_persistence_count
     )
     if deceleration_persistence_count >= 2:
         downgrades.append("persistent_deceleration")
@@ -171,20 +176,43 @@ def score_candidate_quality(
         downgrades.append("failed_continuation_memory")
 
     memory_component = ZERO_DECIMAL
+    progression_weakening = False
+    progression_strengthening = False
     if progression_memory is not None and not progression_memory.memory_cold_start:
         if progression_memory.progression_continuation_quality == "strengthening":
             memory_component += Decimal("0.08")
+            progression_strengthening = True
             bonuses.append("progression_strengthening")
         elif progression_memory.progression_continuation_quality in {"weakening", "decaying"}:
-            memory_component -= Decimal("0.08")
+            memory_component -= Decimal("0.25")
+            progression_weakening = True
             downgrades.append("progression_weakening")
         memory_component += (progression_memory.retry_degradation_factor - ONE_DECIMAL) * Decimal("0.20")
     components["progression_memory"] = memory_component.quantize(Decimal("0.0001"))
 
+    reversal_probability_decimal = (
+        Decimal(str(reversal_probability)) if reversal_probability is not None else None
+    )
+    high_reversal_probability = (
+        reversal_probability_decimal is not None
+        and reversal_probability_decimal >= reversal_probability_threshold
+    )
     reversal_component = ZERO_DECIMAL
-    if reversal_probability is not None:
-        reversal_component = (Decimal(str(reversal_probability)) - Decimal("0.50")) * Decimal("0.40")
+    if reversal_probability_decimal is not None:
+        if is_reversal_candidate:
+            reversal_component = (
+                reversal_probability_decimal - Decimal("0.50")
+            ) * Decimal("0.40")
+        elif high_reversal_probability:
+            reversal_component = (
+                Decimal("-0.18")
+                if reversal_probability_decimal >= Decimal("0.65")
+                else Decimal("-0.10")
+            )
+            downgrades.append("high_reversal_probability")
     components["reversal_probability"] = reversal_component.quantize(Decimal("0.0001"))
+    if fake_continuation_signature:
+        downgrades.append("fake_continuation_signature")
 
     hard_gates["needs_cross"] = "blocked" if side_needs_cross else "clear"
     hard_gates["required_bps_per_minute"] = (
@@ -210,6 +238,59 @@ def score_candidate_quality(
     )
     continuation_score = _bounded(continuation_raw)
     reversal_score = _bounded(reversal_raw)
+    weak_recent_return = trend_confirmation_status == "weak_recent_return"
+    weak_trend_confirmation = trend_confirmation_status != "confirmed"
+    ratio_decaying = ratio_decay is not None and ratio_decay > ZERO_DECIMAL
+    explicit_positive_confirmation = (
+        progression_strengthening
+        and not ratio_decaying
+        and deceleration_persistence_count <= 1
+        and trend_confirmation_status == "confirmed"
+        and ev is not None
+        and ev >= ZERO_DECIMAL
+        and not fake_continuation_signature
+    )
+    danger_flags = []
+    if progression_weakening:
+        danger_flags.append("progression_weakening")
+    if deceleration_persistence_count >= 2:
+        danger_flags.append("persistent_deceleration")
+    if weak_recent_return:
+        danger_flags.append("weak_recent_return")
+        downgrades.append("weak_recent_return")
+    if fake_continuation_signature:
+        danger_flags.append("fake_continuation_signature")
+    if high_reversal_probability:
+        danger_flags.append("high_reversal_probability")
+    near_extreme_danger = near_extreme and (
+        weak_recent_return
+        or progression_weakening
+        or deceleration_persistence_count >= 2
+        or fake_continuation_signature
+        or high_reversal_probability
+        or (ratio_decaying and weak_trend_confirmation)
+    )
+    if near_extreme_danger:
+        danger_flags.append("near_extreme_danger_combo")
+        downgrades.append("near_extreme_danger_combo")
+    major_danger = (
+        progression_weakening
+        or deceleration_persistence_count >= 3
+        or (weak_recent_return and (progression_weakening or deceleration_persistence_count >= 2))
+        or near_extreme_danger
+    )
+    if danger_flags and not explicit_positive_confirmation:
+        continuation_score = min(continuation_score, Decimal("0.8900"))
+        hard_gates["continuation_danger_cap"] = "capped_high_score"
+        downgrades.append("continuation_danger_cap")
+    else:
+        hard_gates["continuation_danger_cap"] = "clear"
+    if major_danger and not explicit_positive_confirmation:
+        continuation_score = min(continuation_score, Decimal("0.5500"))
+        hard_gates["continuation_major_danger"] = "blocked"
+        downgrades.append("continuation_major_danger")
+    else:
+        hard_gates["continuation_major_danger"] = "clear"
     composite = reversal_score if is_reversal_candidate else continuation_score
     hit_probability = _bounded(Decimal("0.35") + composite * Decimal("0.50"))
     quality_band = _quality_band(composite)
@@ -239,20 +320,30 @@ def _ratio_component(value: Decimal | None, floor: Decimal) -> Decimal:
 
 def _near_extreme_component(distance: Decimal | None, threshold: Decimal) -> Decimal:
     if distance is None:
-        return Decimal("-0.03")
+        return Decimal("-0.01")
     if distance <= threshold:
-        return Decimal("-0.12")
+        return Decimal("-0.02")
     if distance >= threshold * Decimal("1.50"):
-        return Decimal("0.08")
-    return Decimal("0.02")
+        return Decimal("0.02")
+    return Decimal("0.01")
 
 
 def _decay_component(value: Decimal | None) -> Decimal:
     if value is None:
         return ZERO_DECIMAL
     if value > ZERO_DECIMAL:
-        return -min(value * Decimal("0.05"), Decimal("0.12"))
-    return min(abs(value) * Decimal("0.03"), Decimal("0.06"))
+        return -min(value * Decimal("0.02"), Decimal("0.03"))
+    return min(abs(value) * Decimal("0.02"), Decimal("0.03"))
+
+
+def _deceleration_component(count: int) -> Decimal:
+    if count <= 0:
+        return ZERO_DECIMAL
+    if count == 1:
+        return Decimal("-0.06")
+    if count == 2:
+        return Decimal("-0.18")
+    return Decimal("-0.30")
 
 
 def _range_component(value: Decimal | None) -> Decimal:

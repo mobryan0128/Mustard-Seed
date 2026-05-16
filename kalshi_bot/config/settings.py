@@ -215,6 +215,17 @@ DEFAULT_LIVE_PRODUCT_VOLATILITY_SCALE_BY_PRODUCT = {
 }
 DEFAULT_LIVE_SCORE_TELEMETRY_ENABLED = True
 DEFAULT_LIVE_SHADOW_DECISION_LOG_ENABLED = True
+DEFAULT_LIVE_SCORE_AWARE_EV_CAP_ENABLED = False
+DEFAULT_LIVE_SCORE_AWARE_EV_CAP_BUMP = Decimal("0.05")
+DEFAULT_LIVE_SCORE_AWARE_EV_CAP_MAX_BY_PRODUCT = {
+    "BTC-USD": Decimal("0.75"),
+    "ETH-USD": Decimal("0.72"),
+    "SOL-USD": Decimal("0.70"),
+    "BNB-USD": Decimal("0.70"),
+    "DOGE-USD": Decimal("0.72"),
+    "XRP-USD": Decimal("0.62"),
+    "HYPE-USD": Decimal("0.60"),
+}
 DEFAULT_RUNNER_ENABLED = True
 DEFAULT_RUNNER_LOOP_INTERVAL_SECONDS = 5.0
 DEFAULT_RUNNER_STATUS_LOG_EVERY_N_CYCLES = 1
@@ -431,6 +442,9 @@ class KalshiSettings:
     live_product_volatility_scale_by_product: dict[str, Decimal]
     live_score_telemetry_enabled: bool
     live_shadow_decision_log_enabled: bool
+    live_score_aware_ev_cap_enabled: bool
+    live_score_aware_ev_cap_bump: Decimal
+    live_score_aware_ev_cap_max_by_product: dict[str, Decimal]
     runner_enabled: bool
     runner_loop_interval_seconds: float
     runner_status_log_every_n_cycles: int
@@ -1267,6 +1281,21 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         DEFAULT_LIVE_SHADOW_DECISION_LOG_ENABLED,
         "LIVE_SHADOW_DECISION_LOG_ENABLED",
     )
+    live_score_aware_ev_cap_enabled = _parse_bool(
+        values.get("LIVE_SCORE_AWARE_EV_CAP_ENABLED"),
+        DEFAULT_LIVE_SCORE_AWARE_EV_CAP_ENABLED,
+        "LIVE_SCORE_AWARE_EV_CAP_ENABLED",
+    )
+    live_score_aware_ev_cap_bump = _parse_non_negative_decimal(
+        values.get("LIVE_SCORE_AWARE_EV_CAP_BUMP"),
+        DEFAULT_LIVE_SCORE_AWARE_EV_CAP_BUMP,
+        "LIVE_SCORE_AWARE_EV_CAP_BUMP",
+    )
+    live_score_aware_ev_cap_max_by_product = _parse_product_decimal_map(
+        values.get("LIVE_SCORE_AWARE_EV_CAP_MAX_BY_PRODUCT"),
+        DEFAULT_LIVE_SCORE_AWARE_EV_CAP_MAX_BY_PRODUCT,
+        "LIVE_SCORE_AWARE_EV_CAP_MAX_BY_PRODUCT",
+    )
     runner_enabled = _parse_bool(
         values.get("RUNNER_ENABLED"),
         DEFAULT_RUNNER_ENABLED,
@@ -1668,6 +1697,11 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         ),
         live_score_telemetry_enabled=live_score_telemetry_enabled,
         live_shadow_decision_log_enabled=live_shadow_decision_log_enabled,
+        live_score_aware_ev_cap_enabled=live_score_aware_ev_cap_enabled,
+        live_score_aware_ev_cap_bump=live_score_aware_ev_cap_bump,
+        live_score_aware_ev_cap_max_by_product=(
+            live_score_aware_ev_cap_max_by_product
+        ),
         runner_enabled=runner_enabled,
         runner_loop_interval_seconds=runner_loop_interval_seconds,
         runner_status_log_every_n_cycles=runner_status_log_every_n_cycles,
@@ -1909,6 +1943,9 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_PRODUCT_VOLATILITY_SCALE_BY_PRODUCT",
         "LIVE_SCORE_TELEMETRY_ENABLED",
         "LIVE_SHADOW_DECISION_LOG_ENABLED",
+        "LIVE_SCORE_AWARE_EV_CAP_ENABLED",
+        "LIVE_SCORE_AWARE_EV_CAP_BUMP",
+        "LIVE_SCORE_AWARE_EV_CAP_MAX_BY_PRODUCT",
         "RUNNER_ENABLED",
         "RUNNER_LOOP_INTERVAL_SECONDS",
         "RUNNER_STATUS_LOG_EVERY_N_CYCLES",

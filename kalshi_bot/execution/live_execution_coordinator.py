@@ -201,6 +201,17 @@ class EVFilterStatus:
     ev_actual_cost_limit: Decimal | None = None
     ev_actual_cost_observed: Decimal | None = None
     ev_actual_cost_rejection_reason: str | None = None
+    score_aware_ev_cap_status: str | None = None
+    score_aware_ev_cap_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class ContinuationDecisionStatus:
+    continuation_allowed: bool
+    continuation_blocked_reason: str | None
+    reversal_candidate_generated: bool
+    reversal_rejected_reason: str | None
+    final_blocking_gate: str | None
 
 
 @dataclass(frozen=True)
@@ -775,6 +786,15 @@ class LiveExecutionCoordinator:
                 in {"shadow_candidate", "live_candidate"}
                 and getattr(self._settings, "live_reversal_shadow_only", True)
             ):
+                reversal_decision = _roadmap_continuation_decision(
+                    contract=contract,
+                    ev_filter=ev_filter,
+                    settings=self._settings,
+                    weak_progression=_weak_recent_return_progression_status(
+                        contract=contract,
+                        ev_filter=ev_filter,
+                    ),
+                )
                 record_live_outcome(
                     stage="reversal_shadow",
                     reason="reversal_shadow_only",
@@ -791,6 +811,7 @@ class LiveExecutionCoordinator:
                         **_execution_pricing_payload(pricing),
                         **_ev_filter_payload(ev_filter),
                         **_product_session_pacing_payload(product_session_pacing),
+                        **_continuation_decision_payload(reversal_decision),
                     },
                 )
                 continue
@@ -798,14 +819,26 @@ class LiveExecutionCoordinator:
                 contract=contract,
                 ev_filter=ev_filter,
             )
-            if not weak_progression.allowed:
+            continuation_decision = _roadmap_continuation_decision(
+                contract=contract,
+                ev_filter=ev_filter,
+                settings=self._settings,
+                weak_progression=weak_progression,
+            )
+            if not continuation_decision.continuation_allowed:
                 record_live_outcome(
-                    stage="weak_recent_return_progression",
-                    reason=weak_progression.status,
+                    stage="roadmap_continuation_decision",
+                    reason=(
+                        continuation_decision.continuation_blocked_reason
+                        or "continuation_blocked"
+                    ),
                     contract=contract,
                 )
                 self._log_contract_intent_skipped(
-                    reason=weak_progression.status,
+                    reason=(
+                        continuation_decision.continuation_blocked_reason
+                        or "continuation_blocked"
+                    ),
                     contract=contract,
                     cycle_number=cycle_number,
                     scan_source=scan_source,
@@ -818,6 +851,7 @@ class LiveExecutionCoordinator:
                         **_weak_recent_return_progression_payload(
                             weak_progression
                         ),
+                        **_continuation_decision_payload(continuation_decision),
                     },
                 )
                 continue
@@ -869,6 +903,7 @@ class LiveExecutionCoordinator:
                     details={
                         **_execution_pricing_payload(pricing),
                         **_ev_filter_payload(ev_filter),
+                        **_continuation_decision_payload(continuation_decision),
                     },
                 )
                 continue
@@ -911,6 +946,7 @@ class LiveExecutionCoordinator:
                         **_ev_filter_payload(ev_filter),
                         **_execution_pricing_payload(pricing),
                         **_mid_price_confirmation_payload(mid_price_confirmation),
+                        **_continuation_decision_payload(continuation_decision),
                     },
                 )
                 continue
@@ -949,6 +985,7 @@ class LiveExecutionCoordinator:
                         **_ev_filter_payload(ev_filter),
                         **_execution_pricing_payload(pricing),
                         **_execution_safety_payload(safety),
+                        **_continuation_decision_payload(continuation_decision),
                     },
                 )
                 continue
@@ -977,6 +1014,7 @@ class LiveExecutionCoordinator:
                         **_ev_filter_payload(ev_filter),
                         **_execution_pricing_payload(pricing),
                         **_execution_safety_payload(safety),
+                        **_continuation_decision_payload(continuation_decision),
                     },
                 )
                 continue
@@ -1002,6 +1040,7 @@ class LiveExecutionCoordinator:
                         **_ev_filter_payload(ev_filter),
                         **_execution_pricing_payload(pricing),
                         **_execution_safety_payload(safety),
+                        **_continuation_decision_payload(continuation_decision),
                     },
                 )
                 continue
@@ -1039,6 +1078,7 @@ class LiveExecutionCoordinator:
                         **_execution_pricing_payload(pricing),
                         **_execution_safety_payload(safety),
                         **_composite_quality_payload(composite_quality),
+                        **_continuation_decision_payload(continuation_decision),
                     },
                 )
                 continue
@@ -1081,9 +1121,11 @@ class LiveExecutionCoordinator:
                 "cycle_number": cycle_number,
                 "scan_source": scan_source,
                 "product_id": intent.product_id,
+                "market_ticker": intent.ticker,
                 "ticker": intent.ticker,
                 "side": intent.side,
                 "action": intent.action,
+                "entry_price": intent.price_dollars,
                 "price_dollars": intent.price_dollars,
                 "count": intent.count,
                 "stake_dollars": intent.stake_dollars,
@@ -1114,6 +1156,7 @@ class LiveExecutionCoordinator:
                 **_execution_safety_payload(safety),
                 **_ev_filter_payload(ev_filter),
                 **_composite_quality_payload(composite_quality),
+                **_continuation_decision_payload(continuation_decision),
                 "intent_count": intent.count,
             }
             self._live_intent_diagnostics_by_client_order_id[
@@ -1694,6 +1737,9 @@ class LiveExecutionCoordinator:
                 identifier=order_request.client_order_id,
                 payload={
                     "reason": reason,
+                    **self._intent_diagnostics_payload(
+                        order_request.client_order_id
+                    ),
                     **_order_request_payload(order_request),
                 },
             )
@@ -1714,6 +1760,9 @@ class LiveExecutionCoordinator:
                 identifier=order_request.client_order_id,
                 payload={
                     "reason": safety_decision.reason,
+                    **self._intent_diagnostics_payload(
+                        order_request.client_order_id
+                    ),
                     **_order_request_payload(order_request),
                 },
             )
@@ -1734,6 +1783,9 @@ class LiveExecutionCoordinator:
                 identifier=order_request.client_order_id,
                 payload={
                     "reason": reason,
+                    **self._intent_diagnostics_payload(
+                        order_request.client_order_id
+                    ),
                     **_order_request_payload(order_request),
                 },
             )
@@ -1754,7 +1806,12 @@ class LiveExecutionCoordinator:
             self._log_and_record(
                 event_type="live_order_submit_attempt",
                 identifier=order_request.client_order_id,
-                payload=_order_request_payload(order_request),
+                payload={
+                    **self._intent_diagnostics_payload(
+                        order_request.client_order_id
+                    ),
+                    **_order_request_payload(order_request),
+                },
             )
             created_order = self._client.create_order(order_request)
             order_placed = True
@@ -1762,12 +1819,22 @@ class LiveExecutionCoordinator:
             self._log_and_record(
                 event_type="kalshi_order_response",
                 identifier=created_order.order_id,
-                payload=_order_summary_payload(created_order),
+                payload={
+                    **self._intent_diagnostics_payload(
+                        created_order.client_order_id
+                    ),
+                    **_order_summary_payload(created_order),
+                },
             )
             self._log_and_record(
                 event_type="live_order_submitted",
                 identifier=created_order.order_id,
-                payload=_order_summary_payload(created_order),
+                payload={
+                    **self._intent_diagnostics_payload(
+                        created_order.client_order_id
+                    ),
+                    **_order_summary_payload(created_order),
+                },
             )
             self._update_live_position_ledger(
                 intent=intent,
@@ -1787,6 +1854,9 @@ class LiveExecutionCoordinator:
                 identifier=order_request.client_order_id,
                 payload={
                     "message": error_message,
+                    **self._intent_diagnostics_payload(
+                        order_request.client_order_id
+                    ),
                     **_order_request_payload(order_request),
                 },
             )
@@ -1805,6 +1875,7 @@ class LiveExecutionCoordinator:
             identifier=final_order.order_id,
             payload={
                 "classification": classification,
+                **self._intent_diagnostics_payload(final_order.client_order_id),
                 **_order_summary_payload(final_order),
             },
         )
@@ -1819,6 +1890,7 @@ class LiveExecutionCoordinator:
                 identifier=final_order.order_id,
                 payload={
                     "classification": classification,
+                    **self._intent_diagnostics_payload(final_order.client_order_id),
                     **_order_summary_payload(final_order),
                 },
             )
@@ -2384,6 +2456,19 @@ class LiveExecutionCoordinator:
             payload=payload,
         )
 
+    def _intent_diagnostics_payload(
+        self,
+        client_order_id: str | None,
+    ) -> dict[str, object]:
+        if client_order_id is None:
+            return {}
+        return dict(
+            self._live_intent_diagnostics_by_client_order_id.get(
+                client_order_id,
+                {},
+            )
+        )
+
 
 def _risk_manager_from_settings(settings: KalshiSettings) -> RiskManager:
     if hasattr(settings, "live_validation_enabled"):
@@ -2446,9 +2531,11 @@ def _intent_is_risk_approved(intent: LiveOrderIntent) -> bool:
 
 def _order_request_payload(order: KalshiOrderRequest) -> dict[str, object]:
     return {
+        "market_ticker": order.ticker,
         "ticker": order.ticker,
         "side": order.side,
         "action": order.action,
+        "entry_price": order.price_dollars,
         "price_dollars": order.price_dollars,
         "count": order.count,
         "client_order_id": order.client_order_id,
@@ -3216,11 +3303,26 @@ def _ev_filter_status(
     )
     structure_allowed = trend or reversal_allowed
     (
-        price_limit,
-        product_price_cap_source,
+        base_price_limit,
+        base_product_price_cap_source,
     ) = _ev_price_max_itm_no_cross_for_product(
         contract.product_id,
         settings,
+    )
+    (
+        price_limit,
+        product_price_cap_source,
+        score_aware_cap_status,
+        score_aware_cap_reason,
+    ) = _score_aware_ev_price_limit(
+        contract=contract,
+        settings=settings,
+        base_price_limit=base_price_limit,
+        base_price_cap_source=base_product_price_cap_source,
+        required_bps_ok=required_bps_ok,
+        has_liquidity=has_liquidity,
+        no_cross=no_cross,
+        currently_itm=currently_itm,
     )
     entry_price_ok = (
         market_probability_price is not None
@@ -3313,12 +3415,12 @@ def _ev_filter_status(
         if probability is not None
         else None
     )
-    actual_cost_status = (
-        "within_limit"
-        if cost_price <= getattr(settings, "live_ev_max_actual_cost", Decimal("0.70"))
-        else "above_limit"
-    )
     actual_cost_limit = getattr(settings, "live_ev_max_actual_cost", Decimal("0.70"))
+    if score_aware_cap_status == "applied":
+        actual_cost_limit = max(actual_cost_limit, price_limit)
+    actual_cost_status = (
+        "within_limit" if cost_price <= actual_cost_limit else "above_limit"
+    )
     actual_cost_rejection_reason = (
         None if actual_cost_status == "within_limit" else "per_contract_price_above_limit"
     )
@@ -3417,6 +3519,8 @@ def _ev_filter_status(
             ev_actual_cost_limit=actual_cost_limit,
             ev_actual_cost_observed=cost_price,
             ev_actual_cost_rejection_reason=actual_cost_rejection_reason,
+            score_aware_ev_cap_status=score_aware_cap_status,
+            score_aware_ev_cap_reason=score_aware_cap_reason,
         )
 
     return EVFilterStatus(
@@ -3458,6 +3562,8 @@ def _ev_filter_status(
         ev_actual_cost_limit=actual_cost_limit,
         ev_actual_cost_observed=cost_price,
         ev_actual_cost_rejection_reason=actual_cost_rejection_reason,
+        score_aware_ev_cap_status=score_aware_cap_status,
+        score_aware_ev_cap_reason=score_aware_cap_reason,
     )
 
 
@@ -3537,6 +3643,237 @@ def _weak_recent_return_progression_status(
         memory_present=True,
         progression_quality=progression_quality,
     )
+
+
+def _roadmap_continuation_decision(
+    *,
+    contract: ScannedContract,
+    ev_filter: EVFilterStatus,
+    settings: KalshiSettings,
+    weak_progression: WeakRecentReturnProgressionStatus,
+) -> ContinuationDecisionStatus:
+    if getattr(contract, "structure", None) == "reversal":
+        generated = getattr(contract, "reversal_candidate_status", None) in {
+            "shadow_candidate",
+            "live_candidate",
+        }
+        return ContinuationDecisionStatus(
+            continuation_allowed=True,
+            continuation_blocked_reason=None,
+            reversal_candidate_generated=generated,
+            reversal_rejected_reason=getattr(
+                contract,
+                "reversal_rejection_reason",
+                None,
+            ),
+            final_blocking_gate=None,
+        )
+    generated = bool(_high_reversal_probability(contract, settings)) and (
+        _decimal_attr(contract, "reversal_expected_value") is not None
+        and _decimal_attr(contract, "reversal_expected_value")
+        >= getattr(settings, "live_reversal_min_ev", Decimal("0.00"))
+    )
+    rejected_reason = getattr(contract, "reversal_rejection_reason", None)
+    if not weak_progression.allowed:
+        return _blocked_continuation_decision(
+            weak_progression.status,
+            reversal_candidate_generated=generated,
+            reversal_rejected_reason=rejected_reason,
+        )
+    memory = dict(getattr(contract, "progression_memory_snapshot", ()) or ())
+    sample_count = int(memory.get("sample_count") or 0)
+    progression_quality = getattr(contract, "progression_continuation_quality", None)
+    decel_count = int(getattr(contract, "deceleration_persistence_count", None) or 0)
+    weak_recent = getattr(contract, "trend_confirmation_status", None) == "weak_recent_return"
+    if progression_quality in {"weakening", "decaying"} and sample_count >= 3:
+        return _blocked_continuation_decision(
+            "progression_weakening_blocked",
+            reversal_candidate_generated=generated,
+            reversal_rejected_reason=rejected_reason,
+        )
+    if decel_count >= 3:
+        return _blocked_continuation_decision(
+            "persistent_deceleration_blocked",
+            reversal_candidate_generated=generated,
+            reversal_rejected_reason=rejected_reason,
+        )
+    if weak_recent and (
+        progression_quality in {"weakening", "decaying"} or decel_count >= 2
+    ):
+        return _blocked_continuation_decision(
+            "weak_recent_return_danger_blocked",
+            reversal_candidate_generated=generated,
+            reversal_rejected_reason=rejected_reason,
+        )
+    if _high_reversal_probability(contract, settings) and not generated:
+        return _blocked_continuation_decision(
+            "high_reversal_probability_invalid_opposite_ev",
+            reversal_candidate_generated=False,
+            reversal_rejected_reason=(
+                rejected_reason or "opposite_side_ev_not_valid"
+            ),
+        )
+    return ContinuationDecisionStatus(
+        continuation_allowed=True,
+        continuation_blocked_reason=None,
+        reversal_candidate_generated=generated,
+        reversal_rejected_reason=rejected_reason,
+        final_blocking_gate=None,
+    )
+
+
+def _blocked_continuation_decision(
+    reason: str,
+    *,
+    reversal_candidate_generated: bool,
+    reversal_rejected_reason: str | None,
+) -> ContinuationDecisionStatus:
+    return ContinuationDecisionStatus(
+        continuation_allowed=False,
+        continuation_blocked_reason=reason,
+        reversal_candidate_generated=reversal_candidate_generated,
+        reversal_rejected_reason=reversal_rejected_reason,
+        final_blocking_gate=reason,
+    )
+
+
+def _score_aware_ev_price_limit(
+    *,
+    contract: ScannedContract,
+    settings: KalshiSettings,
+    base_price_limit: Decimal,
+    base_price_cap_source: str,
+    required_bps_ok: bool,
+    has_liquidity: bool,
+    no_cross: bool,
+    currently_itm: bool,
+) -> tuple[Decimal, str, str, str | None]:
+    if not getattr(settings, "live_score_aware_ev_cap_enabled", False):
+        return (base_price_limit, base_price_cap_source, "disabled", None)
+    if not (
+        getattr(contract, "structure", None) == "trend"
+        and currently_itm
+        and no_cross
+        and required_bps_ok
+        and has_liquidity
+    ):
+        return (
+            base_price_limit,
+            base_price_cap_source,
+            "not_eligible",
+            "not_clean_itm_no_cross_candidate",
+        )
+    if _score_aware_ev_cap_danger(contract, settings):
+        return (
+            base_price_limit,
+            base_price_cap_source,
+            "blocked_by_danger",
+            "danger_flags_present",
+        )
+    score = _decimal_attr(contract, "composite_score")
+    if score is None or score < getattr(settings, "live_composite_score_min", Decimal("0.60")):
+        return (
+            base_price_limit,
+            base_price_cap_source,
+            "not_eligible",
+            "composite_score_below_score_aware_cap_minimum",
+        )
+    if getattr(contract, "progression_continuation_quality", None) != "strengthening":
+        return (
+            base_price_limit,
+            base_price_cap_source,
+            "not_eligible",
+            "progression_not_strengthening",
+        )
+    product_caps = getattr(settings, "live_score_aware_ev_cap_max_by_product", {}) or {}
+    product_key = _normalize_product_id(contract.product_id)
+    product_max = product_caps.get(product_key) or product_caps.get(
+        product_key.split("-", maxsplit=1)[0]
+    )
+    bumped = base_price_limit + getattr(
+        settings,
+        "live_score_aware_ev_cap_bump",
+        Decimal("0.05"),
+    )
+    adjusted = min(bumped, product_max) if product_max is not None else bumped
+    adjusted = min(max(adjusted, Decimal("0.01")), Decimal("0.99"))
+    return (
+        adjusted,
+        f"score_aware:{base_price_cap_source}",
+        "applied",
+        None,
+    )
+
+
+def _score_aware_ev_cap_danger(
+    contract: ScannedContract,
+    settings: KalshiSettings,
+) -> bool:
+    return bool(_continuation_danger_flags(contract, settings))
+
+
+def _continuation_danger_flags(
+    contract: ScannedContract,
+    settings: KalshiSettings,
+) -> tuple[str, ...]:
+    flags: list[str] = []
+    progression_quality = getattr(contract, "progression_continuation_quality", None)
+    decel_count = int(getattr(contract, "deceleration_persistence_count", None) or 0)
+    weak_recent = getattr(contract, "trend_confirmation_status", None) == "weak_recent_return"
+    fake_signature = bool(getattr(contract, "fake_continuation_signature", False))
+    high_reversal = _high_reversal_probability(contract, settings)
+    near_extreme = _near_extreme_contract_flag(contract)
+    ratio_decaying = _decimal_attr(contract, "ratio_decay")
+    ratio_decaying = ratio_decaying is not None and ratio_decaying > Decimal("0")
+    weak_trend = getattr(contract, "trend_confirmation_status", None) != "confirmed"
+    if progression_quality in {"weakening", "decaying"}:
+        flags.append("progression_weakening")
+    if decel_count >= 2:
+        flags.append("persistent_deceleration")
+    if weak_recent:
+        flags.append("weak_recent_return")
+    if fake_signature:
+        flags.append("fake_continuation_signature")
+    if high_reversal:
+        flags.append("high_reversal_probability")
+    if near_extreme and (
+        weak_recent
+        or progression_quality in {"weakening", "decaying"}
+        or decel_count >= 2
+        or fake_signature
+        or high_reversal
+        or (ratio_decaying and weak_trend)
+    ):
+        flags.append("near_extreme_danger_combo")
+    return tuple(dict.fromkeys(flags))
+
+
+def _near_extreme_contract_flag(contract: ScannedContract) -> bool:
+    distance = _decimal_attr(contract, "near_extreme_distance_bps")
+    threshold = _decimal_attr(contract, "adaptive_near_extreme_bps")
+    return distance is not None and threshold is not None and distance <= threshold
+
+
+def _high_reversal_probability(
+    contract: ScannedContract,
+    settings: KalshiSettings,
+) -> bool:
+    probability = _decimal_attr(contract, "reversal_probability")
+    return (
+        probability is not None
+        and probability
+        >= getattr(settings, "live_reversal_min_probability", Decimal("0.55"))
+    )
+
+
+def _decimal_attr(contract: ScannedContract, name: str) -> Decimal | None:
+    value = getattr(contract, name, None)
+    if value is None:
+        return None
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
 
 
 def _ev_price_max_itm_no_cross_for_product(
@@ -4531,6 +4868,8 @@ def _ev_filter_payload(status: EVFilterStatus | None) -> dict[str, object]:
             "ev_actual_cost_limit": None,
             "ev_actual_cost_observed": None,
             "ev_actual_cost_rejection_reason": None,
+            "score_aware_ev_cap_status": None,
+            "score_aware_ev_cap_reason": None,
         }
     return {
         "ev_filter_status": status.status,
@@ -4572,6 +4911,28 @@ def _ev_filter_payload(status: EVFilterStatus | None) -> dict[str, object]:
         "ev_actual_cost_limit": status.ev_actual_cost_limit,
         "ev_actual_cost_observed": status.ev_actual_cost_observed,
         "ev_actual_cost_rejection_reason": status.ev_actual_cost_rejection_reason,
+        "score_aware_ev_cap_status": status.score_aware_ev_cap_status,
+        "score_aware_ev_cap_reason": status.score_aware_ev_cap_reason,
+    }
+
+
+def _continuation_decision_payload(
+    status: ContinuationDecisionStatus | None,
+) -> dict[str, object]:
+    if status is None:
+        return {
+            "continuation_allowed": None,
+            "continuation_blocked_reason": None,
+            "reversal_candidate_generated": None,
+            "reversal_rejected_reason": None,
+            "final_blocking_gate": None,
+        }
+    return {
+        "continuation_allowed": status.continuation_allowed,
+        "continuation_blocked_reason": status.continuation_blocked_reason,
+        "reversal_candidate_generated": status.reversal_candidate_generated,
+        "reversal_rejected_reason": status.reversal_rejected_reason,
+        "final_blocking_gate": status.final_blocking_gate,
     }
 
 

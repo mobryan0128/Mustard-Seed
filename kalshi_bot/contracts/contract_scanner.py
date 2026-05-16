@@ -1226,6 +1226,10 @@ class ContractScanner:
             failed_attempts=failed_attempts,
             progression_memory=progression_memory,
             reversal_probability=reversal_probability,
+            fake_continuation_signature=(
+                reversal_classification.fake_continuation_signature
+            ),
+            reversal_probability_threshold=self._reversal_min_probability,
             is_reversal_candidate=is_reversal_candidate,
         )
         payload = {

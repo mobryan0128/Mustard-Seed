@@ -116,6 +116,7 @@ def _roadmap_decision(payload: dict[str, Any], *, line_number: int) -> dict[str,
         failed_attempts=0,
         progression_memory=None,
         reversal_probability=reversal.reversal_probability,
+        fake_continuation_signature=reversal.fake_continuation_signature,
     )
     reversal_allowed = (
         reversal.reversal_probability >= Decimal("0.55")
@@ -125,12 +126,17 @@ def _roadmap_decision(payload: dict[str, Any], *, line_number: int) -> dict[str,
         and reversal_ev >= Decimal("0.00")
         and not bool(payload.get("side_needs_cross"))
     )
+    high_reversal_invalid = (
+        reversal.reversal_probability >= Decimal("0.55") and not reversal_allowed
+    )
     if bool(payload.get("side_needs_cross")):
         new_decision = "block_needs_cross"
-    elif score.composite_score >= Decimal("0.60"):
-        new_decision = "allow_continuation"
+    elif high_reversal_invalid:
+        new_decision = "block_high_reversal_invalid_opposite_ev"
     elif reversal_allowed:
         new_decision = "generate_reversal"
+    elif score.composite_score >= Decimal("0.60"):
+        new_decision = "allow_continuation"
     else:
         new_decision = "block"
     return {
@@ -153,6 +159,15 @@ def _roadmap_decision(payload: dict[str, Any], *, line_number: int) -> dict[str,
             "shadow_candidate" if reversal_allowed else "rejected"
         ),
         "reversal_rejection_reason": None if reversal_allowed else reversal.rejection_reason,
+        "continuation_allowed": new_decision == "allow_continuation",
+        "continuation_blocked_reason": (
+            None if new_decision == "allow_continuation" else new_decision
+        ),
+        "reversal_candidate_generated": reversal_allowed,
+        "reversal_rejected_reason": None if reversal_allowed else reversal.rejection_reason,
+        "final_blocking_gate": (
+            None if new_decision in {"allow_continuation", "generate_reversal"} else new_decision
+        ),
         "score_components": score.component_scores,
         "downgrade_reasons": score.downgrade_reasons,
         "upgrade_reasons": score.bonus_reasons,

@@ -34,6 +34,15 @@ def main() -> None:
     assert classification.reversal_probability >= Decimal("0.55")
     assert ev is not None
     assert ev == classification.reversal_probability - Decimal("0.55")
+    assert ev >= Decimal("0.00")
+    invalid_price = Decimal("0.99")
+    assert invalid_price > classification.reversal_probability
+    invalid_ev = reversal_expected_value(
+        reversal_probability=classification.reversal_probability,
+        executable_price=invalid_price,
+    )
+    assert invalid_ev is not None
+    assert invalid_ev < Decimal("0.00")
     print("phaseG4 reversal candidate checks passed")
 
 
