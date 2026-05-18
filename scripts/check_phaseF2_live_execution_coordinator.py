@@ -35,6 +35,7 @@ from kalshi_bot.execution.live_execution_coordinator import (  # noqa: E402
     _ev_filter_status,
     _reversal_cross_hold_status,
     _roadmap_continuation_decision,
+    _signal_diagnostic_payload,
     _weak_recent_return_progression_status,
 )
 from kalshi_bot.market.market_state_cache import (  # noqa: E402
@@ -110,8 +111,12 @@ def main() -> int:
     failures.extend(_validate_progression_weakening_blocks_continuation())
     failures.extend(_validate_persistent_deceleration_blocks_continuation())
     failures.extend(_validate_weak_recent_return_danger_blocks_continuation())
+    failures.extend(_validate_cold_start_high_ratio_overextension_blocks())
+    failures.extend(_validate_high_reversal_clean_continuation_allowed())
     failures.extend(_validate_score_aware_ev_cap_allows_clean_candidate())
     failures.extend(_validate_score_aware_ev_cap_rejects_danger_candidate())
+    failures.extend(_validate_score_aware_ev_cap_rejects_cold_start_combo())
+    failures.extend(_validate_final_calibration_telemetry_fields_present())
 
     if failures:
         for failure in failures:
@@ -1099,6 +1104,43 @@ def _validate_weak_recent_return_danger_blocks_continuation() -> list[str]:
     return []
 
 
+def _validate_cold_start_high_ratio_overextension_blocks() -> list[str]:
+    status = _roadmap_continuation_decision(
+        contract=_contract(
+            hard_gate_results=(("cold_start_high_ratio_overextension", "blocked"),),
+        ),
+        ev_filter=_allowed_ev_status(),
+        settings=_Settings(log_directory=Path("."), log_jsonl_enabled=False),
+        weak_progression=_allowed_weak_progression(),
+    )
+    if status.continuation_allowed:
+        return ["cold-start high-ratio overextension continuation allowed"]
+    if (
+        status.continuation_blocked_reason
+        != "cold_start_high_ratio_overextension_blocked"
+    ):
+        return [f"cold-start high-ratio reason={status.continuation_blocked_reason}"]
+    return []
+
+
+def _validate_high_reversal_clean_continuation_allowed() -> list[str]:
+    status = _roadmap_continuation_decision(
+        contract=_contract(
+            reversal_probability=Decimal("0.75"),
+            reversal_expected_value=Decimal("-0.10"),
+            progression_continuation_quality="strengthening",
+            progression_memory_snapshot=(("sample_count", 3),),
+            deceleration_persistence_count=0,
+        ),
+        ev_filter=_allowed_ev_status(),
+        settings=_Settings(log_directory=Path("."), log_jsonl_enabled=False),
+        weak_progression=_allowed_weak_progression(),
+    )
+    if not status.continuation_allowed:
+        return [f"high reversal clean blocked={status.continuation_blocked_reason}"]
+    return []
+
+
 def _validate_score_aware_ev_cap_allows_clean_candidate() -> list[str]:
     status = _ev_filter_status(
         contract=_contract(
@@ -1150,6 +1192,86 @@ def _validate_score_aware_ev_cap_rejects_danger_candidate() -> list[str]:
         return ["score-aware danger unexpectedly allowed"]
     if status.score_aware_ev_cap_status != "blocked_by_danger":
         return [f"score-aware danger cap={status.score_aware_ev_cap_status}"]
+    return []
+
+
+def _validate_score_aware_ev_cap_rejects_cold_start_combo() -> list[str]:
+    status = _ev_filter_status(
+        contract=_contract(
+            midpoint=Decimal("0.72"),
+            required_bps_per_minute=Decimal("0.000"),
+            composite_score=Decimal("0.75"),
+            progression_continuation_quality="cold_start",
+            hard_gate_results=(("cold_start_high_ratio_overextension", "blocked"),),
+        ),
+        pricing=_pricing(intent_price=Decimal("0.72")),
+        entry_segment=_entry_segment(),
+        settings=_Settings(
+            log_directory=Path("."),
+            log_jsonl_enabled=False,
+            live_ev_filter_enabled=True,
+            live_ev_max_actual_cost=Decimal("0.80"),
+            live_ev_min_reward_dollars=Decimal("0.20"),
+            live_score_aware_ev_cap_enabled=True,
+            live_score_aware_ev_cap_max_by_product={"BTC-USD": Decimal("0.75")},
+        ),
+    )
+    if status.score_aware_ev_cap_status != "blocked_by_danger":
+        return [f"score-aware cold-start cap={status.score_aware_ev_cap_status}"]
+    return []
+
+
+def _validate_final_calibration_telemetry_fields_present() -> list[str]:
+    payload = _signal_diagnostic_payload(
+        _contract(
+            composite_score=Decimal("0.49"),
+            uncapped_composite_score=Decimal("0.86"),
+            capped_composite_score=Decimal("0.49"),
+            high_score_danger_cap_applied=True,
+            high_score_danger_cap_reason="danger_combo_high_score_cap",
+            distance_to_target_abs_bps=Decimal("8"),
+            overextension_distance_bps=Decimal("3"),
+            side_adjusted_distance_status="overextended",
+            burst_context_status="recent_5m_return_large_vs_range",
+            cold_start_high_ratio_overextension_reasons=(
+                "progression_not_confirmed",
+                "return_range_ratio_above_high_threshold",
+            ),
+            continuation_major_danger_combo_blocked=True,
+            continuation_major_danger_combo_reasons=(
+                "cold_start_high_ratio_overextension",
+            ),
+            reversal_signal_source="probability_context",
+            reversal_probability_bucket="high",
+            opposite_side_price=Decimal("0.40"),
+            opposite_side_ev=Decimal("0.10"),
+            opposite_side_needs_cross=False,
+            opposite_side_required_bps_ok=True,
+        )
+    )
+    required = {
+        "uncapped_composite_score",
+        "capped_composite_score",
+        "high_score_danger_cap_applied",
+        "high_score_danger_cap_reason",
+        "distance_to_target_abs_bps",
+        "overextension_distance_bps",
+        "side_adjusted_distance_status",
+        "burst_context_status",
+        "cold_start_high_ratio_overextension_reasons",
+        "continuation_major_danger_combo_blocked",
+        "continuation_major_danger_combo_reasons",
+        "reversal_signal_source",
+        "reversal_probability_bucket",
+        "opposite_side_price",
+        "opposite_side_ev",
+        "opposite_side_needs_cross",
+        "opposite_side_required_bps_ok",
+        "reversal_shadow_only",
+    }
+    missing = sorted(key for key in required if key not in payload)
+    if missing:
+        return [f"missing final calibration telemetry={missing}"]
     return []
 
 
@@ -2467,6 +2589,24 @@ def _contract(
     fake_continuation_signature: bool | None = None,
     near_extreme_distance_bps: Decimal | None = None,
     adaptive_near_extreme_bps: Decimal | None = None,
+    hard_gate_results: tuple[tuple[str, str], ...] = (),
+    uncapped_composite_score: Decimal | None = None,
+    capped_composite_score: Decimal | None = None,
+    high_score_danger_cap_applied: bool | None = None,
+    high_score_danger_cap_reason: str | None = None,
+    distance_to_target_abs_bps: Decimal | None = None,
+    overextension_distance_bps: Decimal | None = None,
+    side_adjusted_distance_status: str | None = None,
+    burst_context_status: str | None = None,
+    cold_start_high_ratio_overextension_reasons: tuple[str, ...] = (),
+    continuation_major_danger_combo_blocked: bool | None = None,
+    continuation_major_danger_combo_reasons: tuple[str, ...] = (),
+    reversal_signal_source: str | None = None,
+    reversal_probability_bucket: str | None = None,
+    opposite_side_price: Decimal | None = None,
+    opposite_side_ev: Decimal | None = None,
+    opposite_side_needs_cross: bool | None = None,
+    opposite_side_required_bps_ok: bool | None = None,
 ) -> ScannedContract:
     return ScannedContract(
         product_id=product_id,
@@ -2523,6 +2663,30 @@ def _contract(
         fake_continuation_signature=fake_continuation_signature,
         near_extreme_distance_bps=near_extreme_distance_bps,
         adaptive_near_extreme_bps=adaptive_near_extreme_bps,
+        hard_gate_results=hard_gate_results,
+        uncapped_composite_score=uncapped_composite_score,
+        capped_composite_score=capped_composite_score,
+        high_score_danger_cap_applied=high_score_danger_cap_applied,
+        high_score_danger_cap_reason=high_score_danger_cap_reason,
+        distance_to_target_abs_bps=distance_to_target_abs_bps,
+        overextension_distance_bps=overextension_distance_bps,
+        side_adjusted_distance_status=side_adjusted_distance_status,
+        burst_context_status=burst_context_status,
+        cold_start_high_ratio_overextension_reasons=(
+            cold_start_high_ratio_overextension_reasons
+        ),
+        continuation_major_danger_combo_blocked=(
+            continuation_major_danger_combo_blocked
+        ),
+        continuation_major_danger_combo_reasons=(
+            continuation_major_danger_combo_reasons
+        ),
+        reversal_signal_source=reversal_signal_source,
+        reversal_probability_bucket=reversal_probability_bucket,
+        opposite_side_price=opposite_side_price,
+        opposite_side_ev=opposite_side_ev,
+        opposite_side_needs_cross=opposite_side_needs_cross,
+        opposite_side_required_bps_ok=opposite_side_required_bps_ok,
     )
 
 
@@ -2787,6 +2951,14 @@ class _Settings:
     live_score_aware_ev_cap_enabled: bool = False
     live_score_aware_ev_cap_bump: Decimal = Decimal("0.05")
     live_score_aware_ev_cap_max_by_product: dict[str, Decimal] | None = None
+    live_cold_start_high_ratio_block_enabled: bool = True
+    live_cold_start_high_ratio_min: Decimal = Decimal("3.00")
+    live_cold_start_overextension_distance_bps: Decimal = Decimal("5")
+    live_cold_start_burst_block_enabled: bool = True
+    live_high_score_danger_cap_enabled: bool = True
+    live_high_score_danger_cap_min_score: Decimal = Decimal("0.80")
+    live_high_score_danger_cap_max_score: Decimal = Decimal("0.49")
+    live_continuation_major_danger_combo_block_enabled: bool = True
 
 
 class _FixedEntryRiskManager:

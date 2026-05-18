@@ -3685,6 +3685,11 @@ def _roadmap_continuation_decision(
     progression_quality = getattr(contract, "progression_continuation_quality", None)
     decel_count = int(getattr(contract, "deceleration_persistence_count", None) or 0)
     weak_recent = getattr(contract, "trend_confirmation_status", None) == "weak_recent_return"
+    hard_gates = dict(getattr(contract, "hard_gate_results", ()) or ())
+    fake_signature = bool(getattr(contract, "fake_continuation_signature", False))
+    cold_start_overextension_blocked = (
+        hard_gates.get("cold_start_high_ratio_overextension") == "blocked"
+    )
     if progression_quality in {"weakening", "decaying"} and sample_count >= 3:
         return _blocked_continuation_decision(
             "progression_weakening_blocked",
@@ -3697,6 +3702,18 @@ def _roadmap_continuation_decision(
             reversal_candidate_generated=generated,
             reversal_rejected_reason=rejected_reason,
         )
+    if fake_signature:
+        return _blocked_continuation_decision(
+            "fake_continuation_signature_blocked",
+            reversal_candidate_generated=generated,
+            reversal_rejected_reason=rejected_reason,
+        )
+    if cold_start_overextension_blocked:
+        return _blocked_continuation_decision(
+            "cold_start_high_ratio_overextension_blocked",
+            reversal_candidate_generated=generated,
+            reversal_rejected_reason=rejected_reason,
+        )
     if weak_recent and (
         progression_quality in {"weakening", "decaying"} or decel_count >= 2
     ):
@@ -3705,7 +3722,13 @@ def _roadmap_continuation_decision(
             reversal_candidate_generated=generated,
             reversal_rejected_reason=rejected_reason,
         )
-    if _high_reversal_probability(contract, settings) and not generated:
+    danger_context = bool(
+        fake_signature
+        or cold_start_overextension_blocked
+        or progression_quality in {"weakening", "decaying"}
+        or decel_count >= 2
+    )
+    if _high_reversal_probability(contract, settings) and not generated and danger_context:
         return _blocked_continuation_decision(
             "high_reversal_probability_invalid_opposite_ev",
             reversal_candidate_generated=False,
@@ -3826,6 +3849,10 @@ def _continuation_danger_flags(
     ratio_decaying = _decimal_attr(contract, "ratio_decay")
     ratio_decaying = ratio_decaying is not None and ratio_decaying > Decimal("0")
     weak_trend = getattr(contract, "trend_confirmation_status", None) != "confirmed"
+    hard_gates = dict(getattr(contract, "hard_gate_results", ()) or ())
+    cold_start_overextension = (
+        hard_gates.get("cold_start_high_ratio_overextension") == "blocked"
+    )
     if progression_quality in {"weakening", "decaying"}:
         flags.append("progression_weakening")
     if decel_count >= 2:
@@ -3834,14 +3861,29 @@ def _continuation_danger_flags(
         flags.append("weak_recent_return")
     if fake_signature:
         flags.append("fake_continuation_signature")
-    if high_reversal:
-        flags.append("high_reversal_probability")
+    if cold_start_overextension:
+        flags.append("cold_start_high_ratio_overextension")
+    if high_reversal and (
+        fake_signature
+        or cold_start_overextension
+        or progression_quality in {"weakening", "decaying"}
+        or decel_count >= 2
+    ):
+        flags.append("high_reversal_probability_with_danger")
     if near_extreme and (
         weak_recent
         or progression_quality in {"weakening", "decaying"}
         or decel_count >= 2
         or fake_signature
-        or high_reversal
+        or cold_start_overextension
+        or (
+            high_reversal
+            and (
+                fake_signature
+                or progression_quality in {"weakening", "decaying"}
+                or decel_count >= 2
+            )
+        )
         or (ratio_decaying and weak_trend)
     ):
         flags.append("near_extreme_danger_combo")
@@ -5257,6 +5299,67 @@ def _signal_diagnostic_payload(contract: ScannedContract) -> dict[str, object]:
             None,
         ),
         "final_blocking_gate": getattr(contract, "final_blocking_gate", None),
+        "uncapped_composite_score": getattr(contract, "uncapped_composite_score", None),
+        "capped_composite_score": getattr(contract, "capped_composite_score", None),
+        "high_score_danger_cap_applied": getattr(
+            contract,
+            "high_score_danger_cap_applied",
+            None,
+        ),
+        "high_score_danger_cap_reason": getattr(
+            contract,
+            "high_score_danger_cap_reason",
+            None,
+        ),
+        "distance_to_target_abs_bps": getattr(
+            contract,
+            "distance_to_target_abs_bps",
+            None,
+        ),
+        "overextension_distance_bps": getattr(
+            contract,
+            "overextension_distance_bps",
+            None,
+        ),
+        "side_adjusted_distance_status": getattr(
+            contract,
+            "side_adjusted_distance_status",
+            None,
+        ),
+        "burst_context_status": getattr(contract, "burst_context_status", None),
+        "cold_start_high_ratio_overextension_reasons": list(
+            getattr(contract, "cold_start_high_ratio_overextension_reasons", ()) or ()
+        ),
+        "continuation_major_danger_combo_blocked": getattr(
+            contract,
+            "continuation_major_danger_combo_blocked",
+            None,
+        ),
+        "continuation_major_danger_combo_reasons": list(
+            getattr(contract, "continuation_major_danger_combo_reasons", ()) or ()
+        ),
+        "reversal_signal_source": getattr(
+            contract,
+            "reversal_signal_source",
+            None,
+        ),
+        "reversal_probability_bucket": getattr(
+            contract,
+            "reversal_probability_bucket",
+            None,
+        ),
+        "opposite_side_price": getattr(contract, "opposite_side_price", None),
+        "opposite_side_ev": getattr(contract, "opposite_side_ev", None),
+        "opposite_side_needs_cross": getattr(
+            contract,
+            "opposite_side_needs_cross",
+            None,
+        ),
+        "opposite_side_required_bps_ok": getattr(
+            contract,
+            "opposite_side_required_bps_ok",
+            None,
+        ),
         "product_filtered_reason": getattr(contract, "product_filtered_reason", None),
         "product_no_active_market_reason": getattr(
             contract,

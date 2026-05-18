@@ -226,6 +226,14 @@ DEFAULT_LIVE_SCORE_AWARE_EV_CAP_MAX_BY_PRODUCT = {
     "XRP-USD": Decimal("0.62"),
     "HYPE-USD": Decimal("0.60"),
 }
+DEFAULT_LIVE_COLD_START_HIGH_RATIO_BLOCK_ENABLED = True
+DEFAULT_LIVE_COLD_START_HIGH_RATIO_MIN = Decimal("3.00")
+DEFAULT_LIVE_COLD_START_OVEREXTENSION_DISTANCE_BPS = Decimal("5")
+DEFAULT_LIVE_COLD_START_BURST_BLOCK_ENABLED = True
+DEFAULT_LIVE_HIGH_SCORE_DANGER_CAP_ENABLED = True
+DEFAULT_LIVE_HIGH_SCORE_DANGER_CAP_MIN_SCORE = Decimal("0.80")
+DEFAULT_LIVE_HIGH_SCORE_DANGER_CAP_MAX_SCORE = Decimal("0.49")
+DEFAULT_LIVE_CONTINUATION_MAJOR_DANGER_COMBO_BLOCK_ENABLED = True
 DEFAULT_RUNNER_ENABLED = True
 DEFAULT_RUNNER_LOOP_INTERVAL_SECONDS = 5.0
 DEFAULT_RUNNER_STATUS_LOG_EVERY_N_CYCLES = 1
@@ -445,6 +453,14 @@ class KalshiSettings:
     live_score_aware_ev_cap_enabled: bool
     live_score_aware_ev_cap_bump: Decimal
     live_score_aware_ev_cap_max_by_product: dict[str, Decimal]
+    live_cold_start_high_ratio_block_enabled: bool
+    live_cold_start_high_ratio_min: Decimal
+    live_cold_start_overextension_distance_bps: Decimal
+    live_cold_start_burst_block_enabled: bool
+    live_high_score_danger_cap_enabled: bool
+    live_high_score_danger_cap_min_score: Decimal
+    live_high_score_danger_cap_max_score: Decimal
+    live_continuation_major_danger_combo_block_enabled: bool
     runner_enabled: bool
     runner_loop_interval_seconds: float
     runner_status_log_every_n_cycles: int
@@ -1296,6 +1312,51 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         DEFAULT_LIVE_SCORE_AWARE_EV_CAP_MAX_BY_PRODUCT,
         "LIVE_SCORE_AWARE_EV_CAP_MAX_BY_PRODUCT",
     )
+    live_cold_start_high_ratio_block_enabled = _parse_bool(
+        values.get("LIVE_COLD_START_HIGH_RATIO_BLOCK_ENABLED"),
+        DEFAULT_LIVE_COLD_START_HIGH_RATIO_BLOCK_ENABLED,
+        "LIVE_COLD_START_HIGH_RATIO_BLOCK_ENABLED",
+    )
+    live_cold_start_high_ratio_min = _parse_positive_decimal(
+        values.get("LIVE_COLD_START_HIGH_RATIO_MIN"),
+        DEFAULT_LIVE_COLD_START_HIGH_RATIO_MIN,
+        "LIVE_COLD_START_HIGH_RATIO_MIN",
+    )
+    live_cold_start_overextension_distance_bps = _parse_non_negative_decimal(
+        values.get("LIVE_COLD_START_OVEREXTENSION_DISTANCE_BPS"),
+        DEFAULT_LIVE_COLD_START_OVEREXTENSION_DISTANCE_BPS,
+        "LIVE_COLD_START_OVEREXTENSION_DISTANCE_BPS",
+    )
+    live_cold_start_burst_block_enabled = _parse_bool(
+        values.get("LIVE_COLD_START_BURST_BLOCK_ENABLED"),
+        DEFAULT_LIVE_COLD_START_BURST_BLOCK_ENABLED,
+        "LIVE_COLD_START_BURST_BLOCK_ENABLED",
+    )
+    live_high_score_danger_cap_enabled = _parse_bool(
+        values.get("LIVE_HIGH_SCORE_DANGER_CAP_ENABLED"),
+        DEFAULT_LIVE_HIGH_SCORE_DANGER_CAP_ENABLED,
+        "LIVE_HIGH_SCORE_DANGER_CAP_ENABLED",
+    )
+    live_high_score_danger_cap_min_score = _parse_probability(
+        values.get("LIVE_HIGH_SCORE_DANGER_CAP_MIN_SCORE"),
+        DEFAULT_LIVE_HIGH_SCORE_DANGER_CAP_MIN_SCORE,
+        "LIVE_HIGH_SCORE_DANGER_CAP_MIN_SCORE",
+    )
+    live_high_score_danger_cap_max_score = _parse_probability(
+        values.get("LIVE_HIGH_SCORE_DANGER_CAP_MAX_SCORE"),
+        DEFAULT_LIVE_HIGH_SCORE_DANGER_CAP_MAX_SCORE,
+        "LIVE_HIGH_SCORE_DANGER_CAP_MAX_SCORE",
+    )
+    if live_high_score_danger_cap_max_score >= live_high_score_danger_cap_min_score:
+        raise SettingsError(
+            "LIVE_HIGH_SCORE_DANGER_CAP_MAX_SCORE must be less than "
+            "LIVE_HIGH_SCORE_DANGER_CAP_MIN_SCORE."
+        )
+    live_continuation_major_danger_combo_block_enabled = _parse_bool(
+        values.get("LIVE_CONTINUATION_MAJOR_DANGER_COMBO_BLOCK_ENABLED"),
+        DEFAULT_LIVE_CONTINUATION_MAJOR_DANGER_COMBO_BLOCK_ENABLED,
+        "LIVE_CONTINUATION_MAJOR_DANGER_COMBO_BLOCK_ENABLED",
+    )
     runner_enabled = _parse_bool(
         values.get("RUNNER_ENABLED"),
         DEFAULT_RUNNER_ENABLED,
@@ -1702,6 +1763,20 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_score_aware_ev_cap_max_by_product=(
             live_score_aware_ev_cap_max_by_product
         ),
+        live_cold_start_high_ratio_block_enabled=(
+            live_cold_start_high_ratio_block_enabled
+        ),
+        live_cold_start_high_ratio_min=live_cold_start_high_ratio_min,
+        live_cold_start_overextension_distance_bps=(
+            live_cold_start_overextension_distance_bps
+        ),
+        live_cold_start_burst_block_enabled=live_cold_start_burst_block_enabled,
+        live_high_score_danger_cap_enabled=live_high_score_danger_cap_enabled,
+        live_high_score_danger_cap_min_score=live_high_score_danger_cap_min_score,
+        live_high_score_danger_cap_max_score=live_high_score_danger_cap_max_score,
+        live_continuation_major_danger_combo_block_enabled=(
+            live_continuation_major_danger_combo_block_enabled
+        ),
         runner_enabled=runner_enabled,
         runner_loop_interval_seconds=runner_loop_interval_seconds,
         runner_status_log_every_n_cycles=runner_status_log_every_n_cycles,
@@ -1946,6 +2021,14 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_SCORE_AWARE_EV_CAP_ENABLED",
         "LIVE_SCORE_AWARE_EV_CAP_BUMP",
         "LIVE_SCORE_AWARE_EV_CAP_MAX_BY_PRODUCT",
+        "LIVE_COLD_START_HIGH_RATIO_BLOCK_ENABLED",
+        "LIVE_COLD_START_HIGH_RATIO_MIN",
+        "LIVE_COLD_START_OVEREXTENSION_DISTANCE_BPS",
+        "LIVE_COLD_START_BURST_BLOCK_ENABLED",
+        "LIVE_HIGH_SCORE_DANGER_CAP_ENABLED",
+        "LIVE_HIGH_SCORE_DANGER_CAP_MIN_SCORE",
+        "LIVE_HIGH_SCORE_DANGER_CAP_MAX_SCORE",
+        "LIVE_CONTINUATION_MAJOR_DANGER_COMBO_BLOCK_ENABLED",
         "RUNNER_ENABLED",
         "RUNNER_LOOP_INTERVAL_SECONDS",
         "RUNNER_STATUS_LOG_EVERY_N_CYCLES",

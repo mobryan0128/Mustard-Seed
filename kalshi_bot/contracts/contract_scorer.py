@@ -47,6 +47,17 @@ class CompositeQualityScore:
     downgrade_reasons: tuple[str, ...]
     bonus_reasons: tuple[str, ...]
     hard_gate_statuses: dict[str, str]
+    uncapped_composite_score: Decimal | None = None
+    capped_composite_score: Decimal | None = None
+    high_score_danger_cap_applied: bool = False
+    high_score_danger_cap_reason: str | None = None
+    distance_to_target_abs_bps: Decimal | None = None
+    overextension_distance_bps: Decimal | None = None
+    side_adjusted_distance_status: str | None = None
+    burst_context_status: str | None = None
+    cold_start_high_ratio_overextension_reasons: tuple[str, ...] = ()
+    continuation_major_danger_combo_blocked: bool = False
+    continuation_major_danger_combo_reasons: tuple[str, ...] = ()
 
     def as_payload(self) -> dict[str, object]:
         return {
@@ -59,6 +70,23 @@ class CompositeQualityScore:
             "candidate_downgrade_reasons": list(self.downgrade_reasons),
             "candidate_upgrade_reasons": list(self.bonus_reasons),
             "hard_gate_results": dict(self.hard_gate_statuses),
+            "uncapped_composite_score": self.uncapped_composite_score,
+            "capped_composite_score": self.capped_composite_score,
+            "high_score_danger_cap_applied": self.high_score_danger_cap_applied,
+            "high_score_danger_cap_reason": self.high_score_danger_cap_reason,
+            "distance_to_target_abs_bps": self.distance_to_target_abs_bps,
+            "overextension_distance_bps": self.overextension_distance_bps,
+            "side_adjusted_distance_status": self.side_adjusted_distance_status,
+            "burst_context_status": self.burst_context_status,
+            "cold_start_high_ratio_overextension_reasons": list(
+                self.cold_start_high_ratio_overextension_reasons
+            ),
+            "continuation_major_danger_combo_blocked": (
+                self.continuation_major_danger_combo_blocked
+            ),
+            "continuation_major_danger_combo_reasons": list(
+                self.continuation_major_danger_combo_reasons
+            ),
         }
 
 
@@ -109,6 +137,17 @@ def score_candidate_quality(
     fake_continuation_signature: bool = False,
     reversal_probability_threshold: Decimal = Decimal("0.55"),
     is_reversal_candidate: bool = False,
+    distance_to_target_bps: Decimal | None = None,
+    recent_3m_return_bps: Decimal | None = None,
+    recent_3m_range_bps: Decimal | None = None,
+    cold_start_high_ratio_block_enabled: bool = True,
+    cold_start_high_ratio_min: Decimal = Decimal("3.00"),
+    cold_start_overextension_distance_bps: Decimal = Decimal("5"),
+    cold_start_burst_block_enabled: bool = True,
+    high_score_danger_cap_enabled: bool = True,
+    high_score_danger_cap_min_score: Decimal = Decimal("0.80"),
+    high_score_danger_cap_max_score: Decimal = Decimal("0.49"),
+    continuation_major_danger_combo_block_enabled: bool = True,
 ) -> CompositeQualityScore:
     """Score one candidate using fixed, explainable components."""
 
@@ -250,6 +289,38 @@ def score_candidate_quality(
         and ev >= ZERO_DECIMAL
         and not fake_continuation_signature
     )
+    distance_abs = _abs_decimal(distance_to_target_bps)
+    overextension_distance = (
+        max(distance_abs - cold_start_overextension_distance_bps, ZERO_DECIMAL)
+        if distance_abs is not None
+        else None
+    )
+    side_adjusted_distance_status = _side_adjusted_distance_status(
+        distance_abs=distance_abs,
+        threshold=cold_start_overextension_distance_bps,
+    )
+    burst_context_status = _burst_context_status(
+        recent_3m_return_bps=recent_3m_return_bps,
+        recent_3m_range_bps=recent_3m_range_bps,
+        recent_5m_return_bps=recent_5m_return_bps,
+        recent_5m_range_bps=recent_5m_range_bps,
+        range_expansion_status=range_expansion_status,
+        enabled=cold_start_burst_block_enabled,
+    )
+    cold_or_unconfirmed = _cold_or_unconfirmed_progression(
+        progression_memory=progression_memory,
+        progression_strengthening=progression_strengthening,
+    )
+    high_ratio = (
+        return_range_ratio is not None
+        and return_range_ratio > cold_start_high_ratio_min
+    )
+    distance_overextended = (
+        distance_abs is not None
+        and distance_abs >= cold_start_overextension_distance_bps
+    )
+    burst_context = burst_context_status not in {"clear", "disabled"}
+    cold_start_reasons: list[str] = []
     danger_flags = []
     if progression_weakening:
         danger_flags.append("progression_weakening")
@@ -260,8 +331,6 @@ def score_candidate_quality(
         downgrades.append("weak_recent_return")
     if fake_continuation_signature:
         danger_flags.append("fake_continuation_signature")
-    if high_reversal_probability:
-        danger_flags.append("high_reversal_probability")
     near_extreme_danger = near_extreme and (
         weak_recent_return
         or progression_weakening
@@ -273,20 +342,111 @@ def score_candidate_quality(
     if near_extreme_danger:
         danger_flags.append("near_extreme_danger_combo")
         downgrades.append("near_extreme_danger_combo")
+    if cold_or_unconfirmed:
+        cold_start_reasons.append("progression_not_confirmed")
+    if high_ratio:
+        cold_start_reasons.append("return_range_ratio_above_high_threshold")
+    if distance_overextended:
+        cold_start_reasons.append("distance_to_target_abs_bps_over_threshold")
+    if near_extreme_danger:
+        cold_start_reasons.append("near_extreme_danger_combo")
+    if burst_context:
+        cold_start_reasons.append(burst_context_status)
+    cold_start_high_ratio_overextension = (
+        cold_start_high_ratio_block_enabled
+        and cold_or_unconfirmed
+        and high_ratio
+        and (distance_overextended or near_extreme_danger or burst_context)
+    )
+    if cold_start_high_ratio_overextension:
+        danger_flags.append("cold_start_high_ratio_overextension")
+        downgrades.append("cold_start_high_ratio_overextension_blocked")
+        hard_gates["cold_start_high_ratio_overextension"] = "blocked"
+    else:
+        hard_gates["cold_start_high_ratio_overextension"] = "clear"
+    if high_reversal_probability and (
+        progression_weakening
+        or deceleration_persistence_count >= 2
+        or fake_continuation_signature
+        or cold_start_high_ratio_overextension
+    ):
+        danger_flags.append("high_reversal_probability_with_danger")
+
+    major_combo_reasons: list[str] = []
+    if progression_weakening:
+        major_combo_reasons.append("progression_weakening")
+    if deceleration_persistence_count >= 3:
+        major_combo_reasons.append("persistent_deceleration")
+    if fake_continuation_signature:
+        major_combo_reasons.append("fake_continuation_signature")
+    if cold_start_high_ratio_overextension:
+        major_combo_reasons.append("cold_start_high_ratio_overextension")
+    if near_extreme_danger:
+        major_combo_reasons.append("near_extreme_danger_combo")
+    if (weak_recent_return or high_reversal_probability) and (
+        cold_or_unconfirmed
+        or high_ratio
+        or distance_overextended
+        or burst_context
+        or fake_continuation_signature
+    ):
+        if weak_recent_return:
+            major_combo_reasons.append("weak_recent_return_combo")
+        if high_reversal_probability:
+            major_combo_reasons.append("high_reversal_probability_combo")
     major_danger = (
         progression_weakening
         or deceleration_persistence_count >= 3
-        or (weak_recent_return and (progression_weakening or deceleration_persistence_count >= 2))
-        or near_extreme_danger
+        or fake_continuation_signature
+        or cold_start_high_ratio_overextension
+        or (
+            continuation_major_danger_combo_block_enabled
+            and bool(major_combo_reasons)
+            and (
+                weak_recent_return
+                or near_extreme_danger
+                or high_reversal_probability
+                or high_ratio
+                or distance_overextended
+                or burst_context
+            )
+        )
     )
-    if danger_flags and not explicit_positive_confirmation:
-        continuation_score = min(continuation_score, Decimal("0.8900"))
+    uncapped_composite = continuation_score
+    high_score_cap_applied = False
+    high_score_cap_reason = None
+    cap_danger = bool(
+        progression_weakening
+        or deceleration_persistence_count >= 2
+        or fake_continuation_signature
+        or near_extreme_danger
+        or cold_start_high_ratio_overextension
+        or "high_reversal_probability_with_danger" in danger_flags
+        or (
+            weak_recent_return
+            and (
+                cold_or_unconfirmed
+                or high_ratio
+                or distance_overextended
+                or burst_context
+            )
+        )
+    )
+    if (
+        high_score_danger_cap_enabled
+        and cap_danger
+        and continuation_score > high_score_danger_cap_min_score
+        and not explicit_positive_confirmation
+    ):
+        continuation_score = min(continuation_score, high_score_danger_cap_max_score)
+        high_score_cap_applied = True
+        high_score_cap_reason = "danger_combo_high_score_cap"
         hard_gates["continuation_danger_cap"] = "capped_high_score"
         downgrades.append("continuation_danger_cap")
     else:
         hard_gates["continuation_danger_cap"] = "clear"
     if major_danger and not explicit_positive_confirmation:
-        continuation_score = min(continuation_score, Decimal("0.5500"))
+        continuation_score = min(continuation_score, high_score_danger_cap_max_score)
         hard_gates["continuation_major_danger"] = "blocked"
         downgrades.append("continuation_major_danger")
     else:
@@ -305,12 +465,33 @@ def score_candidate_quality(
         downgrade_reasons=tuple(dict.fromkeys(downgrades)),
         bonus_reasons=tuple(dict.fromkeys(bonuses)),
         hard_gate_statuses=hard_gates,
+        uncapped_composite_score=uncapped_composite,
+        capped_composite_score=(
+            continuation_score if high_score_cap_applied or major_danger else None
+        ),
+        high_score_danger_cap_applied=high_score_cap_applied,
+        high_score_danger_cap_reason=high_score_cap_reason,
+        distance_to_target_abs_bps=distance_abs,
+        overextension_distance_bps=overextension_distance,
+        side_adjusted_distance_status=side_adjusted_distance_status,
+        burst_context_status=burst_context_status,
+        cold_start_high_ratio_overextension_reasons=tuple(
+            dict.fromkeys(cold_start_reasons)
+        ),
+        continuation_major_danger_combo_blocked=bool(
+            major_danger and not explicit_positive_confirmation
+        ),
+        continuation_major_danger_combo_reasons=tuple(
+            dict.fromkeys(major_combo_reasons)
+        ),
     )
 
 
 def _ratio_component(value: Decimal | None, floor: Decimal) -> Decimal:
     if value is None:
         return Decimal("-0.08")
+    if value > Decimal("3.00"):
+        return Decimal("0.04")
     if value >= Decimal("1.00"):
         return Decimal("0.18")
     if value >= floor:
@@ -391,7 +572,7 @@ def _price_component(value: Decimal | None) -> Decimal:
     if value is None:
         return ZERO_DECIMAL
     if value <= Decimal("0.35"):
-        return Decimal("0.08")
+        return Decimal("0.05")
     if value <= Decimal("0.60"):
         return Decimal("0.02")
     if value <= Decimal("0.70"):
@@ -407,6 +588,74 @@ def _required_bps_component(value: Decimal | None, limit: Decimal) -> Decimal:
     if value <= limit:
         return Decimal("0.02")
     return Decimal("-0.12")
+
+
+def _abs_decimal(value: Decimal | None) -> Decimal | None:
+    if value is None:
+        return None
+    return abs(Decimal(str(value)))
+
+
+def _side_adjusted_distance_status(
+    *,
+    distance_abs: Decimal | None,
+    threshold: Decimal,
+) -> str:
+    if distance_abs is None:
+        return "distance_missing"
+    if distance_abs >= threshold:
+        return "overextended"
+    return "not_overextended"
+
+
+def _burst_context_status(
+    *,
+    recent_3m_return_bps: Decimal | None,
+    recent_3m_range_bps: Decimal | None,
+    recent_5m_return_bps: Decimal | None,
+    recent_5m_range_bps: Decimal | None,
+    range_expansion_status: str | None,
+    enabled: bool,
+) -> str:
+    if not enabled:
+        return "disabled"
+    if range_expansion_status in {"expanding", "bursting"}:
+        return "range_expansion_burst"
+    recent_5m_return = _abs_decimal(recent_5m_return_bps)
+    recent_5m_range = _abs_decimal(recent_5m_range_bps)
+    if (
+        recent_5m_return is not None
+        and recent_5m_range is not None
+        and recent_5m_range > ZERO_DECIMAL
+        and recent_5m_return >= recent_5m_range * Decimal("0.80")
+        and recent_5m_return >= Decimal("8")
+    ):
+        return "recent_5m_return_large_vs_range"
+    recent_3m_return = _abs_decimal(recent_3m_return_bps)
+    recent_3m_range = _abs_decimal(recent_3m_range_bps)
+    if (
+        recent_3m_return is not None
+        and recent_3m_range is not None
+        and recent_3m_range > ZERO_DECIMAL
+        and recent_3m_return >= recent_3m_range * Decimal("0.80")
+        and recent_3m_return >= Decimal("6")
+    ):
+        return "recent_3m_return_large_vs_range"
+    return "clear"
+
+
+def _cold_or_unconfirmed_progression(
+    *,
+    progression_memory: ProgressionMemoryState | None,
+    progression_strengthening: bool,
+) -> bool:
+    if progression_strengthening:
+        return False
+    if progression_memory is None:
+        return True
+    if progression_memory.memory_cold_start:
+        return True
+    return progression_memory.progression_continuation_quality != "strengthening"
 
 
 def _bounded(value: Decimal) -> Decimal:

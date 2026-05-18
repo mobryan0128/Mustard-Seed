@@ -178,6 +178,14 @@ Bias relaxation is disabled unless both `LIVE_BIAS_RECENT_RETURN_MIN` and `LIVE_
 
 Noise-cross handling is off at `LIVE_MIN_CROSS_DISTANCE_BPS=0`. When configured above zero, only tiny positive crosses at or below the threshold are marked `noise_cross_ignored`; true needs-cross candidates still flow through existing scanner, EV, composite, and live blocks.
 
+### Final Scoring Calibration
+
+`LIVE_COLD_START_HIGH_RATIO_BLOCK_ENABLED=true` activates a combination-only continuation safety gate. It does not block cold start alone, high return/range ratio alone, near-extreme alone, or ratio decay alone. The gate only blocks/caps when cold or unconfirmed progression combines with `LIVE_COLD_START_HIGH_RATIO_MIN` and overextension, near-extreme danger, or burst context. Defaults: `LIVE_COLD_START_HIGH_RATIO_MIN=3.00`, `LIVE_COLD_START_OVEREXTENSION_DISTANCE_BPS=5`, `LIVE_COLD_START_BURST_BLOCK_ENABLED=true`.
+
+`LIVE_HIGH_SCORE_DANGER_CAP_ENABLED=true` caps inflated high-composite candidates only when a major danger combo is present. Defaults: `LIVE_HIGH_SCORE_DANGER_CAP_MIN_SCORE=0.80`, `LIVE_HIGH_SCORE_DANGER_CAP_MAX_SCORE=0.49`. The cap records `uncapped_composite_score`, `capped_composite_score`, `high_score_danger_cap_applied`, and `high_score_danger_cap_reason`.
+
+`LIVE_CONTINUATION_MAJOR_DANGER_COMBO_BLOCK_ENABLED=true` keeps `continuation_major_danger` combination-based. Progression weakening, persistent deceleration, and fake continuation remain decisive; high reversal probability alone remains telemetry/soft context unless paired with confirmed danger.
+
 ### Candidate Funnel Diagnostics
 
 `LIVE_CANDIDATE_FUNNEL_DIAGNOSTICS_ENABLED=true` changes logging, not trading decisions. Runner cycle logs include detailed scanner diagnostics, and live funnel summaries include up to 20 live outcome records and scanner candidate diagnostics.

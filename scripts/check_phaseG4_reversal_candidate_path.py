@@ -13,6 +13,9 @@ from kalshi_bot.contracts.reversal_classifier import (  # noqa: E402
     classify_reversal_probability,
     reversal_expected_value,
 )
+from kalshi_bot.contracts.contract_scanner import (  # noqa: E402
+    _reversal_candidate_rejection_reason,
+)
 
 
 def main() -> None:
@@ -43,6 +46,45 @@ def main() -> None:
     )
     assert invalid_ev is not None
     assert invalid_ev < Decimal("0.00")
+    assert (
+        _reversal_candidate_rejection_reason(
+            probability=classification.reversal_probability,
+            minimum_probability=Decimal("0.55"),
+            executable_price=Decimal("0.55"),
+            max_executable_price=Decimal("0.60"),
+            expected_value=ev,
+            min_expected_value=Decimal("0.00"),
+            side_needs_cross=False,
+            classifier_enabled=True,
+        )
+        is None
+    )
+    assert (
+        _reversal_candidate_rejection_reason(
+            probability=classification.reversal_probability,
+            minimum_probability=Decimal("0.55"),
+            executable_price=invalid_price,
+            max_executable_price=Decimal("0.99"),
+            expected_value=invalid_ev,
+            min_expected_value=Decimal("0.00"),
+            side_needs_cross=False,
+            classifier_enabled=True,
+        )
+        == "reversal_expected_value_below_minimum"
+    )
+    assert (
+        _reversal_candidate_rejection_reason(
+            probability=classification.reversal_probability,
+            minimum_probability=Decimal("0.55"),
+            executable_price=Decimal("0.55"),
+            max_executable_price=Decimal("0.60"),
+            expected_value=ev,
+            min_expected_value=Decimal("0.00"),
+            side_needs_cross=True,
+            classifier_enabled=True,
+        )
+        == "reversal_needs_cross_blocked"
+    )
     print("phaseG4 reversal candidate checks passed")
 
 

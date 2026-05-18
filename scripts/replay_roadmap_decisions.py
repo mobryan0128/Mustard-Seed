@@ -95,6 +95,9 @@ def _roadmap_decision(payload: dict[str, Any], *, line_number: int) -> dict[str,
         ratio_decay=None,
         near_extreme_distance_bps=near_distance,
         near_extreme_threshold_bps=thresholds.adaptive_near_extreme_bps,
+        distance_to_target_bps=_decimal(payload.get("distance_to_target_bps")),
+        recent_3m_return_bps=_decimal(payload.get("recent_3m_return_bps")),
+        recent_3m_range_bps=_decimal(payload.get("recent_3m_range_bps")),
         recent_5m_range_bps=_decimal(payload.get("recent_5m_range_bps")),
         recent_5m_return_bps=_decimal(payload.get("recent_5m_return_bps")),
         lookback_return_bps=_decimal(payload.get("lookback_return_bps")),
@@ -127,7 +130,14 @@ def _roadmap_decision(payload: dict[str, Any], *, line_number: int) -> dict[str,
         and not bool(payload.get("side_needs_cross"))
     )
     high_reversal_invalid = (
-        reversal.reversal_probability >= Decimal("0.55") and not reversal_allowed
+        reversal.reversal_probability >= Decimal("0.55")
+        and not reversal_allowed
+        and (
+            reversal.fake_continuation_signature
+            or "continuation_major_danger" in score.downgrade_reasons
+            or "cold_start_high_ratio_overextension_blocked"
+            in score.downgrade_reasons
+        )
     )
     if bool(payload.get("side_needs_cross")):
         new_decision = "block_needs_cross"
@@ -148,12 +158,52 @@ def _roadmap_decision(payload: dict[str, Any], *, line_number: int) -> dict[str,
         "composite_score": score.composite_score,
         "continuation_score": score.continuation_score,
         "reversal_score": score.reversal_score,
+        "uncapped_composite_score": score.uncapped_composite_score,
+        "capped_composite_score": score.capped_composite_score,
+        "high_score_danger_cap_applied": score.high_score_danger_cap_applied,
+        "high_score_danger_cap_reason": score.high_score_danger_cap_reason,
         "return_range_ratio": ratio,
         "near_extreme_distance_bps": near_distance,
+        "distance_to_target_abs_bps": score.distance_to_target_abs_bps,
+        "overextension_distance_bps": score.overextension_distance_bps,
+        "side_adjusted_distance_status": score.side_adjusted_distance_status,
+        "burst_context_status": score.burst_context_status,
+        "cold_start_high_ratio_overextension_reasons": (
+            score.cold_start_high_ratio_overextension_reasons
+        ),
+        "continuation_major_danger_combo_blocked": (
+            score.continuation_major_danger_combo_blocked
+        ),
+        "continuation_major_danger_combo_reasons": (
+            score.continuation_major_danger_combo_reasons
+        ),
         "adaptive_near_extreme_bps": thresholds.adaptive_near_extreme_bps,
         "adaptive_ratio_floor": thresholds.adaptive_ratio_floor,
         "reversal_probability": reversal.reversal_probability,
+        "reversal_signal_source": (
+            "fake_continuation_classifier"
+            if reversal.fake_continuation_signature
+            else "probability_context"
+            if reversal.reversal_probability >= Decimal("0.55")
+            else "low_probability"
+        ),
+        "reversal_probability_bucket": (
+            "high"
+            if reversal.reversal_probability >= Decimal("0.65")
+            else "qualified"
+            if reversal.reversal_probability >= Decimal("0.55")
+            else "low"
+        ),
         "opposite_executable_price": opposite_price,
+        "opposite_side_price": opposite_price,
+        "opposite_side_ev": reversal_ev,
+        "opposite_side_needs_cross": bool(payload.get("side_needs_cross")),
+        "opposite_side_required_bps_ok": (
+            _decimal(payload.get("required_bps_per_minute")) is not None
+            and _decimal(payload.get("required_bps_per_minute"))
+            <= thresholds.adaptive_required_bps_per_minute_limit
+        ),
+        "reversal_shadow_only": True,
         "reversal_expected_value": reversal_ev,
         "reversal_candidate_status": (
             "shadow_candidate" if reversal_allowed else "rejected"

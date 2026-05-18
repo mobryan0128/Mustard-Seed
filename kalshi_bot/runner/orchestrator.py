@@ -2127,6 +2127,59 @@ def _roadmap_diagnostic_fields(item) -> dict[str, object]:  # noqa: ANN001
             None,
         ),
         "final_blocking_gate": getattr(item, "final_blocking_gate", None),
+        "uncapped_composite_score": getattr(item, "uncapped_composite_score", None),
+        "capped_composite_score": getattr(item, "capped_composite_score", None),
+        "high_score_danger_cap_applied": getattr(
+            item,
+            "high_score_danger_cap_applied",
+            None,
+        ),
+        "high_score_danger_cap_reason": getattr(
+            item,
+            "high_score_danger_cap_reason",
+            None,
+        ),
+        "distance_to_target_abs_bps": getattr(
+            item,
+            "distance_to_target_abs_bps",
+            None,
+        ),
+        "overextension_distance_bps": getattr(
+            item,
+            "overextension_distance_bps",
+            None,
+        ),
+        "side_adjusted_distance_status": getattr(
+            item,
+            "side_adjusted_distance_status",
+            None,
+        ),
+        "burst_context_status": getattr(item, "burst_context_status", None),
+        "cold_start_high_ratio_overextension_reasons": list(
+            getattr(item, "cold_start_high_ratio_overextension_reasons", ()) or ()
+        ),
+        "continuation_major_danger_combo_blocked": getattr(
+            item,
+            "continuation_major_danger_combo_blocked",
+            None,
+        ),
+        "continuation_major_danger_combo_reasons": list(
+            getattr(item, "continuation_major_danger_combo_reasons", ()) or ()
+        ),
+        "reversal_signal_source": getattr(item, "reversal_signal_source", None),
+        "reversal_probability_bucket": getattr(
+            item,
+            "reversal_probability_bucket",
+            None,
+        ),
+        "opposite_side_price": getattr(item, "opposite_side_price", None),
+        "opposite_side_ev": getattr(item, "opposite_side_ev", None),
+        "opposite_side_needs_cross": getattr(item, "opposite_side_needs_cross", None),
+        "opposite_side_required_bps_ok": getattr(
+            item,
+            "opposite_side_required_bps_ok",
+            None,
+        ),
         "product_filtered_reason": getattr(item, "product_filtered_reason", None),
         "product_no_active_market_reason": getattr(
             item,

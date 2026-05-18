@@ -201,6 +201,23 @@ class ScannedContract:
     legacy_gate_mapped_to_score: str | None = None
     legacy_gate_bypassed_due_to_roadmap_mode: str | None = None
     final_blocking_gate: str | None = None
+    uncapped_composite_score: Decimal | None = None
+    capped_composite_score: Decimal | None = None
+    high_score_danger_cap_applied: bool | None = None
+    high_score_danger_cap_reason: str | None = None
+    distance_to_target_abs_bps: Decimal | None = None
+    overextension_distance_bps: Decimal | None = None
+    side_adjusted_distance_status: str | None = None
+    burst_context_status: str | None = None
+    cold_start_high_ratio_overextension_reasons: tuple[str, ...] = ()
+    continuation_major_danger_combo_blocked: bool | None = None
+    continuation_major_danger_combo_reasons: tuple[str, ...] = ()
+    reversal_signal_source: str | None = None
+    reversal_probability_bucket: str | None = None
+    opposite_side_price: Decimal | None = None
+    opposite_side_ev: Decimal | None = None
+    opposite_side_needs_cross: bool | None = None
+    opposite_side_required_bps_ok: bool | None = None
     product_filtered_reason: str | None = None
     product_no_active_market_reason: str | None = None
     product_no_liquidity_reason: str | None = None
@@ -323,6 +340,23 @@ class SkippedContract:
     legacy_gate_mapped_to_score: str | None = None
     legacy_gate_bypassed_due_to_roadmap_mode: str | None = None
     final_blocking_gate: str | None = None
+    uncapped_composite_score: Decimal | None = None
+    capped_composite_score: Decimal | None = None
+    high_score_danger_cap_applied: bool | None = None
+    high_score_danger_cap_reason: str | None = None
+    distance_to_target_abs_bps: Decimal | None = None
+    overextension_distance_bps: Decimal | None = None
+    side_adjusted_distance_status: str | None = None
+    burst_context_status: str | None = None
+    cold_start_high_ratio_overextension_reasons: tuple[str, ...] = ()
+    continuation_major_danger_combo_blocked: bool | None = None
+    continuation_major_danger_combo_reasons: tuple[str, ...] = ()
+    reversal_signal_source: str | None = None
+    reversal_probability_bucket: str | None = None
+    opposite_side_price: Decimal | None = None
+    opposite_side_ev: Decimal | None = None
+    opposite_side_needs_cross: bool | None = None
+    opposite_side_required_bps_ok: bool | None = None
     product_filtered_reason: str | None = None
     product_no_active_market_reason: str | None = None
     product_no_liquidity_reason: str | None = None
@@ -426,6 +460,14 @@ class ContractScanner:
         adaptive_pacing_enabled: bool = False,
         product_volatility_scale_by_product: Mapping[str, Decimal] | None = None,
         score_telemetry_enabled: bool = True,
+        cold_start_high_ratio_block_enabled: bool = True,
+        cold_start_high_ratio_min: Decimal = Decimal("3.00"),
+        cold_start_overextension_distance_bps: Decimal = Decimal("5"),
+        cold_start_burst_block_enabled: bool = True,
+        high_score_danger_cap_enabled: bool = True,
+        high_score_danger_cap_min_score: Decimal = Decimal("0.80"),
+        high_score_danger_cap_max_score: Decimal = Decimal("0.49"),
+        continuation_major_danger_combo_block_enabled: bool = True,
     ) -> None:
         normalized = {
             product_id.strip(): tuple(
@@ -536,6 +578,24 @@ class ContractScanner:
             for key, value in (product_volatility_scale_by_product or {}).items()
         }
         self._score_telemetry_enabled = score_telemetry_enabled
+        self._cold_start_high_ratio_block_enabled = (
+            cold_start_high_ratio_block_enabled
+        )
+        self._cold_start_high_ratio_min = Decimal(str(cold_start_high_ratio_min))
+        self._cold_start_overextension_distance_bps = Decimal(
+            str(cold_start_overextension_distance_bps)
+        )
+        self._cold_start_burst_block_enabled = cold_start_burst_block_enabled
+        self._high_score_danger_cap_enabled = high_score_danger_cap_enabled
+        self._high_score_danger_cap_min_score = Decimal(
+            str(high_score_danger_cap_min_score)
+        )
+        self._high_score_danger_cap_max_score = Decimal(
+            str(high_score_danger_cap_max_score)
+        )
+        self._continuation_major_danger_combo_block_enabled = (
+            continuation_major_danger_combo_block_enabled
+        )
         self._roadmap_mode_active = any(
             (
                 self._composite_score_enabled,
@@ -1200,6 +1260,15 @@ class ContractScanner:
             ratio_decay=ratio_decay,
             near_extreme_distance_bps=near_extreme_distance,
             near_extreme_threshold_bps=thresholds.adaptive_near_extreme_bps,
+            distance_to_target_bps=(
+                feasibility.distance_to_target_bps if feasibility else None
+            ),
+            recent_3m_return_bps=_decimal_or_none(
+                getattr(bias_state, "recent_3m_return_bps", None)
+            ),
+            recent_3m_range_bps=_decimal_or_none(
+                getattr(bias_state, "recent_3m_range_bps", None)
+            ),
             recent_5m_range_bps=recent_range,
             recent_5m_return_bps=_decimal_or_none(
                 getattr(bias_state, "recent_5m_return_bps", None)
@@ -1231,6 +1300,24 @@ class ContractScanner:
             ),
             reversal_probability_threshold=self._reversal_min_probability,
             is_reversal_candidate=is_reversal_candidate,
+            cold_start_high_ratio_block_enabled=(
+                self._cold_start_high_ratio_block_enabled
+            ),
+            cold_start_high_ratio_min=self._cold_start_high_ratio_min,
+            cold_start_overextension_distance_bps=(
+                self._cold_start_overextension_distance_bps
+            ),
+            cold_start_burst_block_enabled=self._cold_start_burst_block_enabled,
+            high_score_danger_cap_enabled=self._high_score_danger_cap_enabled,
+            high_score_danger_cap_min_score=(
+                self._high_score_danger_cap_min_score
+            ),
+            high_score_danger_cap_max_score=(
+                self._high_score_danger_cap_max_score
+            ),
+            continuation_major_danger_combo_block_enabled=(
+                self._continuation_major_danger_combo_block_enabled
+            ),
         )
         payload = {
             "adaptive_chop_threshold_bps": thresholds.adaptive_chop_threshold_bps,
@@ -1245,9 +1332,36 @@ class ContractScanner:
             "reversal_score": quality_score.reversal_score,
             "hit_probability_estimate": quality_score.hit_probability_estimate,
             "quality_band": quality_score.quality_band,
+            "uncapped_composite_score": quality_score.uncapped_composite_score,
+            "capped_composite_score": quality_score.capped_composite_score,
+            "high_score_danger_cap_applied": (
+                quality_score.high_score_danger_cap_applied
+            ),
+            "high_score_danger_cap_reason": (
+                quality_score.high_score_danger_cap_reason
+            ),
             "return_range_ratio": ratio,
             "ratio_decay": ratio_decay,
             "near_extreme_distance_bps": near_extreme_distance,
+            "distance_to_target_abs_bps": (
+                quality_score.distance_to_target_abs_bps
+            ),
+            "overextension_distance_bps": (
+                quality_score.overextension_distance_bps
+            ),
+            "side_adjusted_distance_status": (
+                quality_score.side_adjusted_distance_status
+            ),
+            "burst_context_status": quality_score.burst_context_status,
+            "cold_start_high_ratio_overextension_reasons": (
+                quality_score.cold_start_high_ratio_overextension_reasons
+            ),
+            "continuation_major_danger_combo_blocked": (
+                quality_score.continuation_major_danger_combo_blocked
+            ),
+            "continuation_major_danger_combo_reasons": (
+                quality_score.continuation_major_danger_combo_reasons
+            ),
             "trend_age_cycles": trend_age,
             "failed_continuation_count": failed_attempts,
             "retry_degradation_factor": (
@@ -1269,6 +1383,34 @@ class ContractScanner:
             ),
             "fake_continuation_signature": (
                 reversal_classification.fake_continuation_signature
+            ),
+            "reversal_signal_source": (
+                "fake_continuation_classifier"
+                if reversal_classification.fake_continuation_signature
+                else "probability_context"
+                if reversal_probability >= self._reversal_min_probability
+                else "low_probability"
+            ),
+            "reversal_probability_bucket": (
+                "high"
+                if reversal_probability >= Decimal("0.65")
+                else "qualified"
+                if reversal_probability >= self._reversal_min_probability
+                else "low"
+            ),
+            "opposite_side_price": None,
+            "opposite_side_ev": reversal_expected_value_override,
+            "opposite_side_needs_cross": (
+                feasibility.side_needs_cross if is_reversal_candidate and feasibility else None
+            ),
+            "opposite_side_required_bps_ok": (
+                (
+                    feasibility.required_bps_per_minute is not None
+                    and feasibility.required_bps_per_minute
+                    <= thresholds.adaptive_required_bps_per_minute_limit
+                )
+                if is_reversal_candidate and feasibility
+                else None
             ),
             "reversal_shadow_only": self._reversal_shadow_only,
             "score_components": tuple(quality_score.component_scores.items()),
@@ -1373,6 +1515,17 @@ class ContractScanner:
             reversal_candidate_status=candidate_status,
             reversal_rejection_reason=rejection_reason,
         )
+        roadmap_fields = {
+            **roadmap_fields,
+            "opposite_side_price": opposite_price,
+            "opposite_side_ev": reversal_ev,
+            "opposite_side_needs_cross": feasibility.side_needs_cross,
+            "opposite_side_required_bps_ok": (
+                feasibility.required_bps_per_minute is not None
+                and feasibility.required_bps_per_minute
+                <= roadmap_fields["adaptive_required_bps_per_minute_limit"]
+            ),
+        }
         score = score_contract(
             confidence=max(contract.confidence - 10, 1),
             best_bid=ticker_state.yes_bid_dollars or Decimal("0"),
@@ -1691,6 +1844,28 @@ def scanner_live_settings_kwargs(settings: KalshiSettings) -> dict[str, object]:
             settings.live_product_volatility_scale_by_product
         ),
         "score_telemetry_enabled": settings.live_score_telemetry_enabled,
+        "cold_start_high_ratio_block_enabled": (
+            settings.live_cold_start_high_ratio_block_enabled
+        ),
+        "cold_start_high_ratio_min": settings.live_cold_start_high_ratio_min,
+        "cold_start_overextension_distance_bps": (
+            settings.live_cold_start_overextension_distance_bps
+        ),
+        "cold_start_burst_block_enabled": (
+            settings.live_cold_start_burst_block_enabled
+        ),
+        "high_score_danger_cap_enabled": (
+            settings.live_high_score_danger_cap_enabled
+        ),
+        "high_score_danger_cap_min_score": (
+            settings.live_high_score_danger_cap_min_score
+        ),
+        "high_score_danger_cap_max_score": (
+            settings.live_high_score_danger_cap_max_score
+        ),
+        "continuation_major_danger_combo_block_enabled": (
+            settings.live_continuation_major_danger_combo_block_enabled
+        ),
     }
 
 

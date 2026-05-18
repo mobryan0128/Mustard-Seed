@@ -155,6 +155,15 @@ def _load_audit(
         "low_score_attempted_side_win_rate": low_wr,
         "danger_high_score_count": len(danger_high_scores),
         "danger_allowed_count": len(danger_allows),
+        "cold_start_high_ratio_overextension_count": sum(
+            1
+            for row in roadmap
+            if "cold_start_high_ratio_overextension_blocked"
+            in _reason_set(row)
+        ),
+        "high_score_danger_cap_count": sum(
+            1 for row in roadmap if _truthy(row.get("high_score_danger_cap_applied"))
+        ),
         "failures": failures,
     }
 
@@ -236,14 +245,7 @@ def _mapping_debug(
 
 
 def _has_danger_flag(row: dict[str, Any]) -> bool:
-    reasons = {
-        str(item)
-        for item in (
-            row.get("candidate_downgrade_reasons")
-            or row.get("downgrade_reasons")
-            or []
-        )
-    }
+    reasons = _reason_set(row)
     return bool(
         reasons
         & {
@@ -253,19 +255,14 @@ def _has_danger_flag(row: dict[str, Any]) -> bool:
             "weak_recent_return",
             "high_reversal_probability",
             "near_extreme_danger_combo",
+            "cold_start_high_ratio_overextension_blocked",
+            "high_reversal_probability_with_danger",
         }
     ) or bool(row.get("fake_continuation_signature"))
 
 
 def _has_decisive_danger(row: dict[str, Any]) -> bool:
-    reasons = {
-        str(item)
-        for item in (
-            row.get("candidate_downgrade_reasons")
-            or row.get("downgrade_reasons")
-            or []
-        )
-    }
+    reasons = _reason_set(row)
     return bool(
         reasons
         & {
@@ -273,8 +270,20 @@ def _has_decisive_danger(row: dict[str, Any]) -> bool:
             "persistent_deceleration",
             "continuation_major_danger",
             "near_extreme_danger_combo",
+            "cold_start_high_ratio_overextension_blocked",
         }
     )
+
+
+def _reason_set(row: dict[str, Any]) -> set[str]:
+    return {
+        str(item)
+        for item in (
+            row.get("candidate_downgrade_reasons")
+            or row.get("downgrade_reasons")
+            or []
+        )
+    }
 
 
 def _continuation_allowed(row: dict[str, Any]) -> bool:
@@ -488,6 +497,12 @@ def _decimal(value: Any) -> Decimal | None:
         return Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes"}
 
 
 if __name__ == "__main__":

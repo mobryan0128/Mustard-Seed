@@ -22,6 +22,9 @@ def main() -> None:
             "reason": "ev_filter_blocked",
             "lookback_return_bps": "12",
             "recent_5m_range_bps": "10",
+            "recent_3m_return_bps": "6",
+            "recent_3m_range_bps": "8",
+            "distance_to_target_bps": "2",
             "distance_to_recent_high_bps": "8",
             "momentum_deceleration_status": "not_bursting",
             "range_expansion_status": "normal",
@@ -39,6 +42,12 @@ def main() -> None:
     assert rows
     assert "new_decision" in rows[0]
     assert "composite_score" in rows[0]
+    assert "uncapped_composite_score" in rows[0]
+    assert "high_score_danger_cap_applied" in rows[0]
+    assert "distance_to_target_abs_bps" in rows[0]
+    assert "burst_context_status" in rows[0]
+    assert "reversal_signal_source" in rows[0]
+    assert "opposite_side_ev" in rows[0]
     print("phaseG5 roadmap replay checks passed")
 
 
