@@ -155,6 +155,12 @@ def _summarize_audit(
             for row in telemetry
             if "cold_start_high_ratio_overextension_blocked" in _reason_set(row)
         ),
+        "quiet_exhaustion_direction_conflict_count": sum(
+            1
+            for row in telemetry
+            if _truthy(row.get("quiet_exhaustion_direction_conflict_blocked"))
+            or "quiet_exhaustion_direction_conflict" in _reason_set(row)
+        ),
         "failures": failures,
     }
 

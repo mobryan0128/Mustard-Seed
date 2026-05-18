@@ -48,6 +48,9 @@ class LatencyDiagnostics:
         self._monotonic = monotonic or time.monotonic
         self._last_emit_by_key: dict[tuple[str, str, str], float] = {}
         self._spot_history_by_product: dict[str, Deque[_SpotObservation]] = {}
+        self._last_spot_threshold_by_product: dict[str, _SpotObservation] = {}
+        self._last_top_of_book_by_ticker: dict[str, dict[str, object]] = {}
+        self._last_kalshi_receive_by_ticker: dict[str, datetime] = {}
 
     @classmethod
     def from_settings(
@@ -109,6 +112,12 @@ class LatencyDiagnostics:
             for value in returns.values()
             if value is not None
         )
+        latest_spot_move_bps = _latest_spot_move_bps(returns)
+        if threshold_met and latest_spot_move_bps is not None:
+            self._last_spot_threshold_by_product[product_id] = _SpotObservation(
+                received_at=local_receive_timestamp,
+                price=latest_spot_move_bps,
+            )
         payload = {
             "product_id": product_id,
             "price": price,
@@ -122,6 +131,7 @@ class LatencyDiagnostics:
             "sequence_num": sequence_num,
             "spot_move_threshold_bps": self._min_spot_move_bps,
             "spot_move_threshold_met": threshold_met,
+            "latest_spot_move_bps": latest_spot_move_bps,
             **returns,
         }
         self._emit(
@@ -156,8 +166,43 @@ class LatencyDiagnostics:
             return
 
         local_receive_timestamp = _ensure_utc(local_receive_timestamp)
+        product_id = _product_from_market_ticker(market_ticker)
+        spot_history = self._spot_history_by_product.get(product_id or "")
+        last_spot = spot_history[-1] if spot_history else None
+        last_threshold = (
+            self._last_spot_threshold_by_product.get(product_id or "")
+            if product_id
+            else None
+        )
+        previous_top = self._last_top_of_book_by_ticker.get(market_ticker)
+        previous_kalshi_receive = self._last_kalshi_receive_by_ticker.get(
+            market_ticker
+        )
+        current_top = {
+            **_ticker_payload(ticker_state),
+            **_orderbook_payload(
+                orderbook,
+                ticker_state=ticker_state,
+                message_type=message_type,
+                max_depth_levels=self._max_depth_levels,
+            ),
+        }
+        repricing_gap = _repricing_gap(previous_top, current_top)
+        time_since_last_spot_update_ms = _elapsed_ms(
+            local_receive_timestamp,
+            last_spot.received_at if last_spot is not None else None,
+        )
+        time_since_last_kalshi_update_ms = _elapsed_ms(
+            local_receive_timestamp,
+            previous_kalshi_receive,
+        )
+        time_since_spot_move_bps_threshold_ms = _elapsed_ms(
+            local_receive_timestamp,
+            last_threshold.received_at if last_threshold is not None else None,
+        )
         payload = {
             "message_type": message_type,
+            "product_id": product_id,
             "market_ticker": market_ticker,
             "market_id": market_id,
             "sid": sid,
@@ -172,14 +217,28 @@ class LatencyDiagnostics:
                 if message_type.startswith("orderbook")
                 else None
             ),
-            **_ticker_payload(ticker_state),
-            **_orderbook_payload(
-                orderbook,
-                ticker_state=ticker_state,
-                message_type=message_type,
-                max_depth_levels=self._max_depth_levels,
+            "time_since_last_spot_update": time_since_last_spot_update_ms,
+            "time_since_last_spot_update_ms": time_since_last_spot_update_ms,
+            "time_since_last_kalshi_update": time_since_last_kalshi_update_ms,
+            "time_since_last_kalshi_update_ms": time_since_last_kalshi_update_ms,
+            "time_since_spot_move_bps_threshold": (
+                time_since_spot_move_bps_threshold_ms
             ),
+            "time_since_spot_move_bps_threshold_ms": (
+                time_since_spot_move_bps_threshold_ms
+            ),
+            "latest_spot_move_bps": (
+                last_threshold.price if last_threshold is not None else None
+            ),
+            "kalshi_top_of_book_before_spot_move": previous_top,
+            "kalshi_top_of_book_after_spot_move": current_top,
+            "previous_top_of_book": previous_top,
+            "repricing_gap": repricing_gap,
+            "stale_side_available": repricing_gap is not None and repricing_gap > 0,
+            **current_top,
         }
+        self._last_top_of_book_by_ticker[market_ticker] = current_top
+        self._last_kalshi_receive_by_ticker[market_ticker] = local_receive_timestamp
         self._emit(
             event_type="kalshi_market_update_received",
             source="kalshi_ws",
@@ -264,6 +323,7 @@ def _ticker_payload(ticker_state: TickerState | None) -> dict[str, object]:
             "ticker_yes_ask_size_fp": None,
             "ticker_exchange_time": None,
             "ticker_exchange_ts": None,
+            "ticker_receive_timestamp": None,
             "ticker_seq": None,
         }
     return {
@@ -275,6 +335,7 @@ def _ticker_payload(ticker_state: TickerState | None) -> dict[str, object]:
         "ticker_yes_ask_size_fp": ticker_state.yes_ask_size_fp,
         "ticker_exchange_time": ticker_state.exchange_time,
         "ticker_exchange_ts": ticker_state.exchange_ts,
+        "ticker_receive_timestamp": ticker_state.local_receive_timestamp,
         "ticker_seq": ticker_state.seq,
     }
 
@@ -294,6 +355,7 @@ def _orderbook_payload(
             "orderbook_empty_reason": "orderbook_absent",
             "orderbook_seq": None,
             "orderbook_sid": None,
+            "orderbook_cache_receive_timestamp": None,
             "orderbook_yes_level_count": 0,
             "orderbook_no_level_count": 0,
             **fallback,
@@ -317,6 +379,7 @@ def _orderbook_payload(
         ),
         "orderbook_seq": orderbook.seq,
         "orderbook_sid": orderbook.sid,
+        "orderbook_cache_receive_timestamp": orderbook.local_receive_timestamp,
         "orderbook_yes_level_count": len(orderbook.yes),
         "orderbook_no_level_count": len(orderbook.no),
         **top_of_book,
@@ -475,6 +538,59 @@ def _return_bps(
     return (
         (current_price - anchor_price) / anchor_price * BASIS_POINTS_MULTIPLIER
     ).quantize(Decimal("0.001"))
+
+
+def _latest_spot_move_bps(returns: dict[str, Decimal | None]) -> Decimal | None:
+    values = [value for value in returns.values() if value is not None]
+    if not values:
+        return None
+    return max(values, key=lambda value: abs(value))
+
+
+def _product_from_market_ticker(market_ticker: str) -> str | None:
+    upper = market_ticker.upper()
+    prefixes = {
+        "KXBTC": "BTC-USD",
+        "KXETH": "ETH-USD",
+        "KXSOL": "SOL-USD",
+        "KXXRP": "XRP-USD",
+        "KXDOGE": "DOGE-USD",
+        "KXBNB": "BNB-USD",
+        "KXHYPE": "HYPE-USD",
+    }
+    for prefix, product_id in prefixes.items():
+        if upper.startswith(prefix):
+            return product_id
+    return None
+
+
+def _elapsed_ms(current: datetime, previous: datetime | None) -> int | None:
+    if previous is None:
+        return None
+    return int((current - previous).total_seconds() * 1000)
+
+
+def _repricing_gap(
+    previous_top: dict[str, object] | None,
+    current_top: dict[str, object],
+) -> Decimal | None:
+    if previous_top is None:
+        return None
+    previous_mid = _top_midpoint(previous_top)
+    current_mid = _top_midpoint(current_top)
+    if previous_mid is None or current_mid is None:
+        return None
+    return abs(current_mid - previous_mid).quantize(Decimal("0.0001"))
+
+
+def _top_midpoint(payload: dict[str, object]) -> Decimal | None:
+    yes_bid = payload.get("yes_bid")
+    yes_ask = payload.get("yes_ask")
+    if yes_bid is None or yes_ask is None:
+        return None
+    return ((Decimal(str(yes_bid)) + Decimal(str(yes_ask))) / Decimal("2")).quantize(
+        Decimal("0.0001")
+    )
 
 
 def _ensure_utc(value: datetime) -> datetime:

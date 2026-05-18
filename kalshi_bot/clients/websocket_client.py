@@ -289,7 +289,10 @@ class KalshiWebSocketClient:
                     f"Kalshi WebSocket error {parsed.code}: {parsed.message}"
                 )
 
-            self._apply_message(parsed)
+            self._apply_message(
+                parsed,
+                local_receive_timestamp=local_receive_timestamp,
+            )
             self._record_latency_diagnostics(
                 parsed,
                 local_receive_timestamp=local_receive_timestamp,
@@ -298,7 +301,12 @@ class KalshiWebSocketClient:
 
         return result
 
-    def _apply_message(self, message: ParsedMessage) -> None:
+    def _apply_message(
+        self,
+        message: ParsedMessage,
+        *,
+        local_receive_timestamp: datetime,
+    ) -> None:
         try:
             if isinstance(message, TickerMessage):
                 self._cache.update_ticker(
@@ -316,6 +324,7 @@ class KalshiWebSocketClient:
                     last_trade_size_fp=message.last_trade_size_fp,
                     exchange_ts=message.exchange_ts,
                     exchange_time=message.exchange_time,
+                    local_receive_timestamp=local_receive_timestamp.isoformat(),
                     sid=message.sid,
                     seq=message.seq,
                 )
@@ -333,6 +342,7 @@ class KalshiWebSocketClient:
                     ),
                     sid=message.sid,
                     seq=message.seq,
+                    local_receive_timestamp=local_receive_timestamp.isoformat(),
                 )
             elif isinstance(message, OrderbookDeltaMessage):
                 self._cache.apply_orderbook_delta(
@@ -343,6 +353,7 @@ class KalshiWebSocketClient:
                     delta_fp=message.delta_fp,
                     sid=message.sid,
                     seq=message.seq,
+                    local_receive_timestamp=local_receive_timestamp.isoformat(),
                 )
         except MarketStateCacheError as exc:
             raise KalshiWebSocketError(str(exc)) from exc

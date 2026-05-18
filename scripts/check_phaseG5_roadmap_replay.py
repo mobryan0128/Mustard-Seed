@@ -31,6 +31,8 @@ def main() -> None:
             "entry_price": "0.45",
             "side_needs_cross": False,
             "required_bps_per_minute": "0",
+            "classification_reason": "trend_continuation",
+            "signal_conflict_flags": {"impulse_direction_conflict": False},
         },
     }
     with tempfile.TemporaryDirectory() as directory:
@@ -46,6 +48,8 @@ def main() -> None:
     assert "high_score_danger_cap_applied" in rows[0]
     assert "distance_to_target_abs_bps" in rows[0]
     assert "burst_context_status" in rows[0]
+    assert "quiet_exhaustion_direction_conflict_blocked" in rows[0]
+    assert "quiet_exhaustion_direction_conflict_reasons" in rows[0]
     assert "reversal_signal_source" in rows[0]
     assert "opposite_side_ev" in rows[0]
     print("phaseG5 roadmap replay checks passed")

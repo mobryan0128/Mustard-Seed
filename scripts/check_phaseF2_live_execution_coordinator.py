@@ -112,9 +112,11 @@ def main() -> int:
     failures.extend(_validate_persistent_deceleration_blocks_continuation())
     failures.extend(_validate_weak_recent_return_danger_blocks_continuation())
     failures.extend(_validate_cold_start_high_ratio_overextension_blocks())
+    failures.extend(_validate_quiet_exhaustion_conflict_blocks_continuation())
     failures.extend(_validate_high_reversal_clean_continuation_allowed())
     failures.extend(_validate_score_aware_ev_cap_allows_clean_candidate())
     failures.extend(_validate_score_aware_ev_cap_rejects_danger_candidate())
+    failures.extend(_validate_score_aware_ev_cap_rejects_quiet_conflict())
     failures.extend(_validate_score_aware_ev_cap_rejects_cold_start_combo())
     failures.extend(_validate_final_calibration_telemetry_fields_present())
 
@@ -1123,6 +1125,28 @@ def _validate_cold_start_high_ratio_overextension_blocks() -> list[str]:
     return []
 
 
+def _validate_quiet_exhaustion_conflict_blocks_continuation() -> list[str]:
+    status = _roadmap_continuation_decision(
+        contract=_contract(
+            hard_gate_results=(("quiet_exhaustion_direction_conflict", "blocked"),),
+            classification_reason="quiet_continuation_from_exhaustion",
+            trend_confirmation_status="recent_direction_mismatch",
+            signal_conflict_flags=(("impulse_direction_conflict", True),),
+            progression_continuation_quality="cold_start",
+        ),
+        ev_filter=_allowed_ev_status(),
+        settings=_Settings(log_directory=Path("."), log_jsonl_enabled=False),
+        weak_progression=_allowed_weak_progression(),
+    )
+    if status.continuation_allowed:
+        return ["quiet exhaustion conflict continuation allowed"]
+    if status.continuation_blocked_reason != "quiet_exhaustion_direction_conflict":
+        return [f"quiet conflict reason={status.continuation_blocked_reason}"]
+    if status.final_blocking_gate != "quiet_exhaustion_direction_conflict":
+        return [f"quiet conflict final gate={status.final_blocking_gate}"]
+    return []
+
+
 def _validate_high_reversal_clean_continuation_allowed() -> list[str]:
     status = _roadmap_continuation_decision(
         contract=_contract(
@@ -1195,6 +1219,32 @@ def _validate_score_aware_ev_cap_rejects_danger_candidate() -> list[str]:
     return []
 
 
+def _validate_score_aware_ev_cap_rejects_quiet_conflict() -> list[str]:
+    status = _ev_filter_status(
+        contract=_contract(
+            midpoint=Decimal("0.72"),
+            required_bps_per_minute=Decimal("0.000"),
+            composite_score=Decimal("0.75"),
+            progression_continuation_quality="cold_start",
+            hard_gate_results=(("quiet_exhaustion_direction_conflict", "blocked"),),
+        ),
+        pricing=_pricing(intent_price=Decimal("0.72")),
+        entry_segment=_entry_segment(),
+        settings=_Settings(
+            log_directory=Path("."),
+            log_jsonl_enabled=False,
+            live_ev_filter_enabled=True,
+            live_ev_max_actual_cost=Decimal("0.80"),
+            live_ev_min_reward_dollars=Decimal("0.20"),
+            live_score_aware_ev_cap_enabled=True,
+            live_score_aware_ev_cap_max_by_product={"BTC-USD": Decimal("0.75")},
+        ),
+    )
+    if status.score_aware_ev_cap_status != "blocked_by_danger":
+        return [f"score-aware quiet conflict cap={status.score_aware_ev_cap_status}"]
+    return []
+
+
 def _validate_score_aware_ev_cap_rejects_cold_start_combo() -> list[str]:
     status = _ev_filter_status(
         contract=_contract(
@@ -1241,6 +1291,15 @@ def _validate_final_calibration_telemetry_fields_present() -> list[str]:
             continuation_major_danger_combo_reasons=(
                 "cold_start_high_ratio_overextension",
             ),
+            quiet_exhaustion_direction_conflict_blocked=True,
+            quiet_exhaustion_direction_conflict_reasons=(
+                "quiet_continuation_from_exhaustion",
+                "recent_direction_mismatch",
+            ),
+            quiet_exhaustion_direction_conflict_cap_applied=True,
+            quiet_exhaustion_direction_conflict_cap_reason=(
+                "quiet_exhaustion_direction_conflict_cap"
+            ),
             reversal_signal_source="probability_context",
             reversal_probability_bucket="high",
             opposite_side_price=Decimal("0.40"),
@@ -1261,6 +1320,10 @@ def _validate_final_calibration_telemetry_fields_present() -> list[str]:
         "cold_start_high_ratio_overextension_reasons",
         "continuation_major_danger_combo_blocked",
         "continuation_major_danger_combo_reasons",
+        "quiet_exhaustion_direction_conflict_blocked",
+        "quiet_exhaustion_direction_conflict_reasons",
+        "quiet_exhaustion_direction_conflict_cap_applied",
+        "quiet_exhaustion_direction_conflict_cap_reason",
         "reversal_signal_source",
         "reversal_probability_bucket",
         "opposite_side_price",
@@ -2578,7 +2641,11 @@ def _contract(
     structure: str = "trend",
     reversal_confirmation_status: str = "not_reversal",
     trend_confirmation_status: str = "confirmed",
+    signal_conflict_flags: tuple[tuple[str, bool], ...] = (
+        ("impulse_direction_conflict", False),
+    ),
     exhaustion_status: str | None = None,
+    classification_reason: str | None = None,
     contract_time_remaining_seconds: int | None = 120,
     composite_score: Decimal | None = None,
     progression_memory_snapshot: tuple[tuple[str, object], ...] = (),
@@ -2586,6 +2653,7 @@ def _contract(
     deceleration_persistence_count: int | None = None,
     reversal_probability: Decimal | None = None,
     reversal_expected_value: Decimal | None = None,
+    reversal_candidate_status: str | None = None,
     fake_continuation_signature: bool | None = None,
     near_extreme_distance_bps: Decimal | None = None,
     adaptive_near_extreme_bps: Decimal | None = None,
@@ -2601,6 +2669,10 @@ def _contract(
     cold_start_high_ratio_overextension_reasons: tuple[str, ...] = (),
     continuation_major_danger_combo_blocked: bool | None = None,
     continuation_major_danger_combo_reasons: tuple[str, ...] = (),
+    quiet_exhaustion_direction_conflict_blocked: bool | None = None,
+    quiet_exhaustion_direction_conflict_reasons: tuple[str, ...] = (),
+    quiet_exhaustion_direction_conflict_cap_applied: bool | None = None,
+    quiet_exhaustion_direction_conflict_cap_reason: str | None = None,
     reversal_signal_source: str | None = None,
     reversal_probability_bucket: str | None = None,
     opposite_side_price: Decimal | None = None,
@@ -2648,18 +2720,20 @@ def _contract(
         reversal_confirmation_status=reversal_confirmation_status,
         trend_confirmation_status=trend_confirmation_status,
         exhaustion_status=exhaustion_status,
-        signal_conflict_flags=(("impulse_direction_conflict", False),),
+        signal_conflict_flags=signal_conflict_flags,
         scanner_score_confidence=confidence,
         scanner_score_downgrade_reasons=(),
         contract_open_time="2026-04-23T11:45:00+00:00",
         contract_close_time=contract_close_time,
         contract_time_remaining_seconds=contract_time_remaining_seconds,
+        classification_reason=classification_reason,
         composite_score=composite_score,
         progression_memory_snapshot=progression_memory_snapshot,
         progression_continuation_quality=progression_continuation_quality,
         deceleration_persistence_count=deceleration_persistence_count,
         reversal_probability=reversal_probability,
         reversal_expected_value=reversal_expected_value,
+        reversal_candidate_status=reversal_candidate_status,
         fake_continuation_signature=fake_continuation_signature,
         near_extreme_distance_bps=near_extreme_distance_bps,
         adaptive_near_extreme_bps=adaptive_near_extreme_bps,
@@ -2680,6 +2754,18 @@ def _contract(
         ),
         continuation_major_danger_combo_reasons=(
             continuation_major_danger_combo_reasons
+        ),
+        quiet_exhaustion_direction_conflict_blocked=(
+            quiet_exhaustion_direction_conflict_blocked
+        ),
+        quiet_exhaustion_direction_conflict_reasons=(
+            quiet_exhaustion_direction_conflict_reasons
+        ),
+        quiet_exhaustion_direction_conflict_cap_applied=(
+            quiet_exhaustion_direction_conflict_cap_applied
+        ),
+        quiet_exhaustion_direction_conflict_cap_reason=(
+            quiet_exhaustion_direction_conflict_cap_reason
         ),
         reversal_signal_source=reversal_signal_source,
         reversal_probability_bucket=reversal_probability_bucket,
@@ -2947,6 +3033,7 @@ class _Settings:
     live_adaptive_chop_enabled: bool = False
     live_progression_memory_enabled: bool = False
     live_reversal_classifier_enabled: bool = False
+    live_reversal_shadow_only: bool = True
     live_adaptive_pacing_enabled: bool = False
     live_score_aware_ev_cap_enabled: bool = False
     live_score_aware_ev_cap_bump: Decimal = Decimal("0.05")
@@ -2959,6 +3046,15 @@ class _Settings:
     live_high_score_danger_cap_min_score: Decimal = Decimal("0.80")
     live_high_score_danger_cap_max_score: Decimal = Decimal("0.49")
     live_continuation_major_danger_combo_block_enabled: bool = True
+    live_quiet_exhaustion_conflict_block_enabled: bool = True
+    live_quiet_exhaustion_conflict_min_composite: Decimal = Decimal("0.75")
+    live_quiet_exhaustion_conflict_min_ratio: Decimal = Decimal("1.00")
+    live_quiet_exhaustion_conflict_max_ratio: Decimal = Decimal("2.00")
+    live_quiet_exhaustion_conflict_max_distance_abs_bps: Decimal = Decimal("1.00")
+    live_quiet_exhaustion_conflict_cap_score: Decimal = Decimal("0.49")
+    live_quiet_exhaustion_conflict_require_cold_start: bool = True
+    live_quiet_exhaustion_conflict_require_impulse_conflict: bool = True
+    live_quiet_exhaustion_conflict_require_recent_direction_mismatch: bool = True
 
 
 class _FixedEntryRiskManager:

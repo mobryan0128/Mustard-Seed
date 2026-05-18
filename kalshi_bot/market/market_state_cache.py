@@ -26,6 +26,7 @@ class TickerState:
     last_trade_size_fp: Decimal | None = None
     exchange_ts: int | None = None
     exchange_time: str | None = None
+    local_receive_timestamp: str | None = None
     sid: int | None = None
     seq: int | None = None
 
@@ -38,6 +39,7 @@ class OrderBookState:
     no: dict[Decimal, Decimal] = field(default_factory=dict)
     sid: int | None = None
     seq: int | None = None
+    local_receive_timestamp: str | None = None
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,7 @@ class MarketStateCache:
         last_trade_size_fp: str | None = None,
         exchange_ts: int | None = None,
         exchange_time: str | None = None,
+        local_receive_timestamp: str | None = None,
         sid: int | None = None,
         seq: int | None = None,
     ) -> None:
@@ -89,6 +92,7 @@ class MarketStateCache:
             last_trade_size_fp=_optional_decimal(last_trade_size_fp),
             exchange_ts=exchange_ts,
             exchange_time=exchange_time,
+            local_receive_timestamp=local_receive_timestamp,
             sid=sid,
             seq=seq,
         )
@@ -103,6 +107,7 @@ class MarketStateCache:
         market_id: str | None = None,
         sid: int | None = None,
         seq: int | None = None,
+        local_receive_timestamp: str | None = None,
     ) -> None:
         self._require_market_ticker(market_ticker)
         self._orderbooks[market_ticker] = OrderBookState(
@@ -112,6 +117,7 @@ class MarketStateCache:
             no=_levels_to_book(no_levels),
             sid=sid,
             seq=seq,
+            local_receive_timestamp=local_receive_timestamp,
         )
         self._track_sequence(sid, seq)
         self._normalize_orderbook_ticker(market_ticker)
@@ -126,6 +132,7 @@ class MarketStateCache:
         market_id: str | None = None,
         sid: int | None = None,
         seq: int | None = None,
+        local_receive_timestamp: str | None = None,
     ) -> None:
         self._require_market_ticker(market_ticker)
         normalized_side = side.lower()
@@ -140,6 +147,7 @@ class MarketStateCache:
             orderbook.market_id = market_id
         orderbook.sid = sid
         orderbook.seq = seq
+        orderbook.local_receive_timestamp = local_receive_timestamp
 
         book_side = orderbook.yes if normalized_side == "yes" else orderbook.no
         price = _required_decimal(price_dollars)

@@ -285,8 +285,11 @@ class LiveTrailingStopState:
 
     armed: bool
     peak_exit_bid: Decimal | None
+    trough_exit_bid: Decimal | None
     last_position_count: Decimal
     exit_pending: bool
+    profit_capture_trigger_price: Decimal | None = None
+    profit_capture_trigger_time: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1399,15 +1402,38 @@ class LiveExecutionCoordinator:
             ticker_state,
             side=side,
         )
+        entry_price = _live_entry_price_for_exit(
+            self._live_position_ledger.values(),
+            ticker=position.ticker,
+            side=side,
+        )
+        state_key = _exit_state_key(position.ticker, side)
+        state = self._trailing_stop_states.get(state_key)
+        if executable_bid is not None:
+            position_count = abs(position.position_fp)
+            state = _updated_exit_telemetry_state(
+                state=state,
+                executable_bid=executable_bid,
+                position_count=position_count,
+            )
+            self._trailing_stop_states[state_key] = state
         base_payload = _live_exit_payload(
             settings=self._settings,
             cycle_number=cycle_number,
             ticker=position.ticker,
             side=side,
             position_count=abs(position.position_fp),
+            entry_price=entry_price,
             executable_exit_bid=executable_bid,
             liquidity_size=liquidity_size,
-            peak_exit_bid=None,
+            peak_exit_bid=state.peak_exit_bid if state is not None else None,
+            trough_exit_bid=state.trough_exit_bid if state is not None else None,
+            profit_capture_trigger_price=(
+                state.profit_capture_trigger_price if state is not None else None
+            ),
+            profit_capture_trigger_time=(
+                state.profit_capture_trigger_time if state is not None else None
+            ),
             sell_count=None,
         )
         if skip_reason is not None or executable_bid is None:
@@ -1425,7 +1451,25 @@ class LiveExecutionCoordinator:
             Decimal("0.99"),
         ):
             sell_count = _live_sell_count(position_count=abs(position.position_fp))
-            trigger_payload = {**base_payload, "sell_count": sell_count}
+            trigger_time = datetime.now(timezone.utc).isoformat()
+            state = LiveTrailingStopState(
+                armed=state.armed if state is not None else False,
+                peak_exit_bid=state.peak_exit_bid if state is not None else executable_bid,
+                trough_exit_bid=(
+                    state.trough_exit_bid if state is not None else executable_bid
+                ),
+                last_position_count=abs(position.position_fp),
+                exit_pending=state.exit_pending if state is not None else False,
+                profit_capture_trigger_price=executable_bid,
+                profit_capture_trigger_time=trigger_time,
+            )
+            self._trailing_stop_states[state_key] = state
+            trigger_payload = {
+                **base_payload,
+                "sell_count": sell_count,
+                "profit_capture_trigger_price": executable_bid,
+                "profit_capture_trigger_time": trigger_time,
+            }
             if sell_count < 1:
                 self._log_exit_skipped(
                     event_type="profit_capture_exit_skipped",
@@ -1479,6 +1523,7 @@ class LiveExecutionCoordinator:
             state = LiveTrailingStopState(
                 armed=False,
                 peak_exit_bid=None,
+                trough_exit_bid=None,
                 last_position_count=position_count,
                 exit_pending=False,
             )
@@ -1495,6 +1540,7 @@ class LiveExecutionCoordinator:
             state = LiveTrailingStopState(
                 armed=True,
                 peak_exit_bid=executable_bid,
+                trough_exit_bid=state.trough_exit_bid,
                 last_position_count=position_count,
                 exit_pending=False,
             )
@@ -1511,8 +1557,11 @@ class LiveExecutionCoordinator:
             state = LiveTrailingStopState(
                 armed=True,
                 peak_exit_bid=executable_bid,
+                trough_exit_bid=state.trough_exit_bid,
                 last_position_count=position_count,
                 exit_pending=False,
+                profit_capture_trigger_price=state.profit_capture_trigger_price,
+                profit_capture_trigger_time=state.profit_capture_trigger_time,
             )
             self._trailing_stop_states[key] = state
             self._log_and_record(
@@ -1562,8 +1611,11 @@ class LiveExecutionCoordinator:
         self._trailing_stop_states[key] = LiveTrailingStopState(
             armed=True,
             peak_exit_bid=peak_exit_bid,
+            trough_exit_bid=state.trough_exit_bid,
             last_position_count=position_count,
             exit_pending=True,
+            profit_capture_trigger_price=state.profit_capture_trigger_price,
+            profit_capture_trigger_time=state.profit_capture_trigger_time,
         )
         return result
 
@@ -1648,7 +1700,11 @@ class LiveExecutionCoordinator:
         order_placed = False
         poll_attempts_used = 0
         try:
+            submit_started_at = time.monotonic()
             created_order = self._client.create_order(order_request)
+            order_submit_delay_ms = int(
+                (time.monotonic() - submit_started_at) * 1000
+            )
             order_placed = True
             final_order = created_order
             if not _is_terminal_order(created_order):
@@ -1666,6 +1722,11 @@ class LiveExecutionCoordinator:
                 details={
                     **trigger_payload,
                     "message": error_message,
+                    "order_submit_delay_ms": (
+                        int((time.monotonic() - submit_started_at) * 1000)
+                        if "submit_started_at" in locals()
+                        else None
+                    ),
                     **_order_request_payload(order_request),
                 },
             )
@@ -1685,6 +1746,13 @@ class LiveExecutionCoordinator:
             payload={
                 **trigger_payload,
                 "classification": classification,
+                "order_submit_delay_ms": order_submit_delay_ms,
+                "exit_submitted_price": price_dollars,
+                "exit_filled_price": _exit_order_price_dollars(
+                    final_order,
+                    side=side,
+                    fallback=price_dollars,
+                ),
                 **_order_request_payload(order_request),
                 **_order_summary_payload(final_order),
             },
@@ -1803,6 +1871,7 @@ class LiveExecutionCoordinator:
         order_placed = False
         poll_attempts_used = 0
         try:
+            submit_started_at = time.monotonic()
             self._log_and_record(
                 event_type="live_order_submit_attempt",
                 identifier=order_request.client_order_id,
@@ -1814,6 +1883,9 @@ class LiveExecutionCoordinator:
                 },
             )
             created_order = self._client.create_order(order_request)
+            order_submit_delay_ms = int(
+                (time.monotonic() - submit_started_at) * 1000
+            )
             order_placed = True
             final_order = created_order
             self._log_and_record(
@@ -1823,6 +1895,7 @@ class LiveExecutionCoordinator:
                     **self._intent_diagnostics_payload(
                         created_order.client_order_id
                     ),
+                    "order_submit_delay_ms": order_submit_delay_ms,
                     **_order_summary_payload(created_order),
                 },
             )
@@ -1833,6 +1906,7 @@ class LiveExecutionCoordinator:
                     **self._intent_diagnostics_payload(
                         created_order.client_order_id
                     ),
+                    "order_submit_delay_ms": order_submit_delay_ms,
                     **_order_summary_payload(created_order),
                 },
             )
@@ -1854,6 +1928,11 @@ class LiveExecutionCoordinator:
                 identifier=order_request.client_order_id,
                 payload={
                     "message": error_message,
+                    "order_submit_delay_ms": (
+                        int((time.monotonic() - submit_started_at) * 1000)
+                        if "submit_started_at" in locals()
+                        else None
+                    ),
                     **self._intent_diagnostics_payload(
                         order_request.client_order_id
                     ),
@@ -2605,16 +2684,29 @@ def _live_exit_payload(
     ticker: str,
     side: str,
     position_count: Decimal,
+    entry_price: Decimal | None,
     executable_exit_bid: Decimal | None,
     liquidity_size: Decimal | None,
     peak_exit_bid: Decimal | None,
+    trough_exit_bid: Decimal | None,
+    profit_capture_trigger_price: Decimal | None,
+    profit_capture_trigger_time: str | None,
     sell_count: int | None,
 ) -> dict[str, object]:
+    estimated_pnl = (
+        ((executable_exit_bid - entry_price) * position_count).quantize(
+            Decimal("0.0001")
+        )
+        if executable_exit_bid is not None and entry_price is not None
+        else None
+    )
     return {
         "cycle_number": cycle_number,
         "ticker": ticker,
         "side": side,
         "position_count": position_count,
+        "entry_price": entry_price,
+        "current_executable_exit_bid": executable_exit_bid,
         "executable_exit_bid": executable_exit_bid,
         "liquidity_size": liquidity_size,
         "profit_capture_price": getattr(
@@ -2628,8 +2720,62 @@ def _live_exit_payload(
             Decimal("0.05"),
         ),
         "peak_exit_bid": peak_exit_bid,
+        "max_favorable_price_since_entry": peak_exit_bid,
+        "max_adverse_price_since_entry": trough_exit_bid,
+        "profit_capture_trigger_price": profit_capture_trigger_price,
+        "profit_capture_trigger_time": profit_capture_trigger_time,
         "sell_count": sell_count,
+        "estimated_realized_pnl": estimated_pnl,
     }
+
+
+def _updated_exit_telemetry_state(
+    *,
+    state: LiveTrailingStopState | None,
+    executable_bid: Decimal,
+    position_count: Decimal,
+) -> LiveTrailingStopState:
+    if (
+        state is None
+        or state.exit_pending
+        or state.last_position_count != position_count
+    ):
+        return LiveTrailingStopState(
+            armed=False,
+            peak_exit_bid=executable_bid,
+            trough_exit_bid=executable_bid,
+            last_position_count=position_count,
+            exit_pending=False,
+        )
+    return LiveTrailingStopState(
+        armed=state.armed,
+        peak_exit_bid=max(state.peak_exit_bid or executable_bid, executable_bid),
+        trough_exit_bid=min(state.trough_exit_bid or executable_bid, executable_bid),
+        last_position_count=position_count,
+        exit_pending=state.exit_pending,
+        profit_capture_trigger_price=state.profit_capture_trigger_price,
+        profit_capture_trigger_time=state.profit_capture_trigger_time,
+    )
+
+
+def _live_entry_price_for_exit(
+    records: Any,
+    *,
+    ticker: str,
+    side: str,
+) -> Decimal | None:
+    for record in records:
+        if (
+            getattr(record, "ticker", None) == ticker
+            and getattr(record, "side", None) == side
+            and _record_has_live_exposure(record)
+        ):
+            return getattr(record, "average_fill_price_dollars", None) or getattr(
+                record,
+                "price_dollars",
+                None,
+            )
+    return None
 
 
 def _execution_pricing(
@@ -3690,6 +3836,9 @@ def _roadmap_continuation_decision(
     cold_start_overextension_blocked = (
         hard_gates.get("cold_start_high_ratio_overextension") == "blocked"
     )
+    quiet_exhaustion_conflict_blocked = (
+        hard_gates.get("quiet_exhaustion_direction_conflict") == "blocked"
+    )
     if progression_quality in {"weakening", "decaying"} and sample_count >= 3:
         return _blocked_continuation_decision(
             "progression_weakening_blocked",
@@ -3711,6 +3860,12 @@ def _roadmap_continuation_decision(
     if cold_start_overextension_blocked:
         return _blocked_continuation_decision(
             "cold_start_high_ratio_overextension_blocked",
+            reversal_candidate_generated=generated,
+            reversal_rejected_reason=rejected_reason,
+        )
+    if quiet_exhaustion_conflict_blocked:
+        return _blocked_continuation_decision(
+            "quiet_exhaustion_direction_conflict",
             reversal_candidate_generated=generated,
             reversal_rejected_reason=rejected_reason,
         )
@@ -3853,6 +4008,9 @@ def _continuation_danger_flags(
     cold_start_overextension = (
         hard_gates.get("cold_start_high_ratio_overextension") == "blocked"
     )
+    quiet_exhaustion_conflict = (
+        hard_gates.get("quiet_exhaustion_direction_conflict") == "blocked"
+    )
     if progression_quality in {"weakening", "decaying"}:
         flags.append("progression_weakening")
     if decel_count >= 2:
@@ -3863,9 +4021,12 @@ def _continuation_danger_flags(
         flags.append("fake_continuation_signature")
     if cold_start_overextension:
         flags.append("cold_start_high_ratio_overextension")
+    if quiet_exhaustion_conflict:
+        flags.append("quiet_exhaustion_direction_conflict")
     if high_reversal and (
         fake_signature
         or cold_start_overextension
+        or quiet_exhaustion_conflict
         or progression_quality in {"weakening", "decaying"}
         or decel_count >= 2
     ):
@@ -5338,6 +5499,25 @@ def _signal_diagnostic_payload(contract: ScannedContract) -> dict[str, object]:
         "continuation_major_danger_combo_reasons": list(
             getattr(contract, "continuation_major_danger_combo_reasons", ()) or ()
         ),
+        "quiet_exhaustion_direction_conflict_blocked": getattr(
+            contract,
+            "quiet_exhaustion_direction_conflict_blocked",
+            None,
+        ),
+        "quiet_exhaustion_direction_conflict_reasons": list(
+            getattr(contract, "quiet_exhaustion_direction_conflict_reasons", ())
+            or ()
+        ),
+        "quiet_exhaustion_direction_conflict_cap_applied": getattr(
+            contract,
+            "quiet_exhaustion_direction_conflict_cap_applied",
+            None,
+        ),
+        "quiet_exhaustion_direction_conflict_cap_reason": getattr(
+            contract,
+            "quiet_exhaustion_direction_conflict_cap_reason",
+            None,
+        ),
         "reversal_signal_source": getattr(
             contract,
             "reversal_signal_source",
@@ -5948,6 +6128,19 @@ def _order_price_dollars(
     if order.side == "no" and order.no_price_dollars is not None:
         return order.no_price_dollars
     return intent.price_dollars
+
+
+def _exit_order_price_dollars(
+    order: KalshiOrderSummary,
+    *,
+    side: str,
+    fallback: Decimal,
+) -> Decimal:
+    if side == "yes" and order.yes_price_dollars is not None:
+        return order.yes_price_dollars
+    if side == "no" and order.no_price_dollars is not None:
+        return order.no_price_dollars
+    return fallback
 
 
 def _live_position_record_payload(record: LivePositionRecord) -> dict[str, object]:

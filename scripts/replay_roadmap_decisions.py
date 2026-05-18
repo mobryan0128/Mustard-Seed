@@ -120,6 +120,8 @@ def _roadmap_decision(payload: dict[str, Any], *, line_number: int) -> dict[str,
         progression_memory=None,
         reversal_probability=reversal.reversal_probability,
         fake_continuation_signature=reversal.fake_continuation_signature,
+        classification_reason=str(payload.get("classification_reason") or ""),
+        signal_conflict_flags=_signal_conflict_flags(payload),
     )
     reversal_allowed = (
         reversal.reversal_probability >= Decimal("0.55")
@@ -139,8 +141,14 @@ def _roadmap_decision(payload: dict[str, Any], *, line_number: int) -> dict[str,
             in score.downgrade_reasons
         )
     )
+    quiet_conflict_blocked = (
+        score.hard_gate_statuses.get("quiet_exhaustion_direction_conflict")
+        == "blocked"
+    )
     if bool(payload.get("side_needs_cross")):
         new_decision = "block_needs_cross"
+    elif quiet_conflict_blocked:
+        new_decision = "quiet_exhaustion_direction_conflict"
     elif high_reversal_invalid:
         new_decision = "block_high_reversal_invalid_opposite_ev"
     elif reversal_allowed:
@@ -176,6 +184,18 @@ def _roadmap_decision(payload: dict[str, Any], *, line_number: int) -> dict[str,
         ),
         "continuation_major_danger_combo_reasons": (
             score.continuation_major_danger_combo_reasons
+        ),
+        "quiet_exhaustion_direction_conflict_blocked": (
+            score.quiet_exhaustion_direction_conflict_blocked
+        ),
+        "quiet_exhaustion_direction_conflict_reasons": (
+            score.quiet_exhaustion_direction_conflict_reasons
+        ),
+        "quiet_exhaustion_direction_conflict_cap_applied": (
+            score.quiet_exhaustion_direction_conflict_cap_applied
+        ),
+        "quiet_exhaustion_direction_conflict_cap_reason": (
+            score.quiet_exhaustion_direction_conflict_cap_reason
         ),
         "adaptive_near_extreme_bps": thresholds.adaptive_near_extreme_bps,
         "adaptive_ratio_floor": thresholds.adaptive_ratio_floor,
@@ -231,6 +251,22 @@ def _payload(event: dict[str, Any]) -> dict[str, Any]:
     return event
 
 
+def _signal_conflict_flags(payload: dict[str, Any]) -> tuple[tuple[str, bool], ...]:
+    raw = payload.get("signal_conflict_flags")
+    if isinstance(raw, dict):
+        return tuple((str(key), _truthy(value)) for key, value in raw.items())
+    if isinstance(raw, list | tuple):
+        flags: list[tuple[str, bool]] = []
+        for item in raw:
+            if isinstance(item, dict):
+                for key, value in item.items():
+                    flags.append((str(key), _truthy(value)))
+            elif isinstance(item, list | tuple) and len(item) == 2:
+                flags.append((str(item[0]), _truthy(item[1])))
+        return tuple(flags)
+    return ()
+
+
 def _return_range_ratio(
     lookback_return_bps: Decimal | None,
     recent_5m_range_bps: Decimal | None,
@@ -259,6 +295,12 @@ def _decimal(value: Any) -> Decimal | None:
         return Decimal(str(value))
     except (InvalidOperation, ValueError):
         return None
+
+
+def _truthy(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def main() -> None:

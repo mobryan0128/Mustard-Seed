@@ -58,6 +58,10 @@ class CompositeQualityScore:
     cold_start_high_ratio_overextension_reasons: tuple[str, ...] = ()
     continuation_major_danger_combo_blocked: bool = False
     continuation_major_danger_combo_reasons: tuple[str, ...] = ()
+    quiet_exhaustion_direction_conflict_blocked: bool = False
+    quiet_exhaustion_direction_conflict_reasons: tuple[str, ...] = ()
+    quiet_exhaustion_direction_conflict_cap_applied: bool = False
+    quiet_exhaustion_direction_conflict_cap_reason: str | None = None
 
     def as_payload(self) -> dict[str, object]:
         return {
@@ -86,6 +90,18 @@ class CompositeQualityScore:
             ),
             "continuation_major_danger_combo_reasons": list(
                 self.continuation_major_danger_combo_reasons
+            ),
+            "quiet_exhaustion_direction_conflict_blocked": (
+                self.quiet_exhaustion_direction_conflict_blocked
+            ),
+            "quiet_exhaustion_direction_conflict_reasons": list(
+                self.quiet_exhaustion_direction_conflict_reasons
+            ),
+            "quiet_exhaustion_direction_conflict_cap_applied": (
+                self.quiet_exhaustion_direction_conflict_cap_applied
+            ),
+            "quiet_exhaustion_direction_conflict_cap_reason": (
+                self.quiet_exhaustion_direction_conflict_cap_reason
             ),
         }
 
@@ -148,6 +164,17 @@ def score_candidate_quality(
     high_score_danger_cap_min_score: Decimal = Decimal("0.80"),
     high_score_danger_cap_max_score: Decimal = Decimal("0.49"),
     continuation_major_danger_combo_block_enabled: bool = True,
+    classification_reason: str | None = None,
+    signal_conflict_flags: tuple[tuple[str, bool], ...] = (),
+    quiet_exhaustion_conflict_block_enabled: bool = True,
+    quiet_exhaustion_conflict_min_composite: Decimal = Decimal("0.75"),
+    quiet_exhaustion_conflict_min_ratio: Decimal = Decimal("1.00"),
+    quiet_exhaustion_conflict_max_ratio: Decimal = Decimal("2.00"),
+    quiet_exhaustion_conflict_max_distance_abs_bps: Decimal = Decimal("1.00"),
+    quiet_exhaustion_conflict_cap_score: Decimal = Decimal("0.49"),
+    quiet_exhaustion_conflict_require_cold_start: bool = True,
+    quiet_exhaustion_conflict_require_impulse_conflict: bool = True,
+    quiet_exhaustion_conflict_require_recent_direction_mismatch: bool = True,
 ) -> CompositeQualityScore:
     """Score one candidate using fixed, explainable components."""
 
@@ -364,11 +391,39 @@ def score_candidate_quality(
         hard_gates["cold_start_high_ratio_overextension"] = "blocked"
     else:
         hard_gates["cold_start_high_ratio_overextension"] = "clear"
+    quiet_conflict_reasons = _quiet_exhaustion_direction_conflict_reasons(
+        enabled=quiet_exhaustion_conflict_block_enabled,
+        classification_reason=classification_reason,
+        trend_confirmation_status=trend_confirmation_status,
+        signal_conflict_flags=signal_conflict_flags,
+        cold_or_unconfirmed=cold_or_unconfirmed,
+        return_range_ratio=return_range_ratio,
+        min_ratio=quiet_exhaustion_conflict_min_ratio,
+        max_ratio=quiet_exhaustion_conflict_max_ratio,
+        distance_abs=distance_abs,
+        max_distance_abs_bps=quiet_exhaustion_conflict_max_distance_abs_bps,
+        continuation_score=continuation_score,
+        min_composite=quiet_exhaustion_conflict_min_composite,
+        require_cold_start=quiet_exhaustion_conflict_require_cold_start,
+        require_impulse_conflict=quiet_exhaustion_conflict_require_impulse_conflict,
+        require_recent_direction_mismatch=(
+            quiet_exhaustion_conflict_require_recent_direction_mismatch
+        ),
+        is_reversal_candidate=is_reversal_candidate,
+    )
+    quiet_exhaustion_conflict = bool(quiet_conflict_reasons)
+    if quiet_exhaustion_conflict:
+        danger_flags.append("quiet_exhaustion_direction_conflict")
+        downgrades.append("quiet_exhaustion_direction_conflict")
+        hard_gates["quiet_exhaustion_direction_conflict"] = "blocked"
+    else:
+        hard_gates["quiet_exhaustion_direction_conflict"] = "clear"
     if high_reversal_probability and (
         progression_weakening
         or deceleration_persistence_count >= 2
         or fake_continuation_signature
         or cold_start_high_ratio_overextension
+        or quiet_exhaustion_conflict
     ):
         danger_flags.append("high_reversal_probability_with_danger")
 
@@ -381,6 +436,8 @@ def score_candidate_quality(
         major_combo_reasons.append("fake_continuation_signature")
     if cold_start_high_ratio_overextension:
         major_combo_reasons.append("cold_start_high_ratio_overextension")
+    if quiet_exhaustion_conflict:
+        major_combo_reasons.append("quiet_exhaustion_direction_conflict")
     if near_extreme_danger:
         major_combo_reasons.append("near_extreme_danger_combo")
     if (weak_recent_return or high_reversal_probability) and (
@@ -399,6 +456,7 @@ def score_candidate_quality(
         or deceleration_persistence_count >= 3
         or fake_continuation_signature
         or cold_start_high_ratio_overextension
+        or quiet_exhaustion_conflict
         or (
             continuation_major_danger_combo_block_enabled
             and bool(major_combo_reasons)
@@ -421,6 +479,7 @@ def score_candidate_quality(
         or fake_continuation_signature
         or near_extreme_danger
         or cold_start_high_ratio_overextension
+        or quiet_exhaustion_conflict
         or "high_reversal_probability_with_danger" in danger_flags
         or (
             weak_recent_return
@@ -445,6 +504,15 @@ def score_candidate_quality(
         downgrades.append("continuation_danger_cap")
     else:
         hard_gates["continuation_danger_cap"] = "clear"
+    quiet_conflict_cap_applied = False
+    quiet_conflict_cap_reason = None
+    if quiet_exhaustion_conflict:
+        continuation_score = min(
+            continuation_score,
+            quiet_exhaustion_conflict_cap_score,
+        )
+        quiet_conflict_cap_applied = True
+        quiet_conflict_cap_reason = "quiet_exhaustion_direction_conflict_cap"
     if major_danger and not explicit_positive_confirmation:
         continuation_score = min(continuation_score, high_score_danger_cap_max_score)
         hard_gates["continuation_major_danger"] = "blocked"
@@ -467,7 +535,9 @@ def score_candidate_quality(
         hard_gate_statuses=hard_gates,
         uncapped_composite_score=uncapped_composite,
         capped_composite_score=(
-            continuation_score if high_score_cap_applied or major_danger else None
+            continuation_score
+            if high_score_cap_applied or quiet_conflict_cap_applied or major_danger
+            else None
         ),
         high_score_danger_cap_applied=high_score_cap_applied,
         high_score_danger_cap_reason=high_score_cap_reason,
@@ -484,6 +554,12 @@ def score_candidate_quality(
         continuation_major_danger_combo_reasons=tuple(
             dict.fromkeys(major_combo_reasons)
         ),
+        quiet_exhaustion_direction_conflict_blocked=quiet_exhaustion_conflict,
+        quiet_exhaustion_direction_conflict_reasons=tuple(
+            dict.fromkeys(quiet_conflict_reasons)
+        ),
+        quiet_exhaustion_direction_conflict_cap_applied=quiet_conflict_cap_applied,
+        quiet_exhaustion_direction_conflict_cap_reason=quiet_conflict_cap_reason,
     )
 
 
@@ -497,6 +573,58 @@ def _ratio_component(value: Decimal | None, floor: Decimal) -> Decimal:
     if value >= floor:
         return Decimal("0.08")
     return -min((floor - value) / max(floor, Decimal("0.01")) * Decimal("0.18"), Decimal("0.18"))
+
+
+def _quiet_exhaustion_direction_conflict_reasons(
+    *,
+    enabled: bool,
+    classification_reason: str | None,
+    trend_confirmation_status: str | None,
+    signal_conflict_flags: tuple[tuple[str, bool], ...],
+    cold_or_unconfirmed: bool,
+    return_range_ratio: Decimal | None,
+    min_ratio: Decimal,
+    max_ratio: Decimal,
+    distance_abs: Decimal | None,
+    max_distance_abs_bps: Decimal,
+    continuation_score: Decimal,
+    min_composite: Decimal,
+    require_cold_start: bool,
+    require_impulse_conflict: bool,
+    require_recent_direction_mismatch: bool,
+    is_reversal_candidate: bool,
+) -> tuple[str, ...]:
+    if not enabled or is_reversal_candidate:
+        return ()
+    if classification_reason != "quiet_continuation_from_exhaustion":
+        return ()
+    if (
+        require_recent_direction_mismatch
+        and trend_confirmation_status != "recent_direction_mismatch"
+    ):
+        return ()
+    impulse_conflict = bool(
+        dict(signal_conflict_flags or ()).get("impulse_direction_conflict")
+    )
+    if require_impulse_conflict and not impulse_conflict:
+        return ()
+    if require_cold_start and not cold_or_unconfirmed:
+        return ()
+    if return_range_ratio is None or not (min_ratio <= return_range_ratio <= max_ratio):
+        return ()
+    if distance_abs is None or distance_abs > max_distance_abs_bps:
+        return ()
+    if continuation_score < min_composite:
+        return ()
+    return (
+        "quiet_continuation_from_exhaustion",
+        "recent_direction_mismatch",
+        "impulse_direction_conflict",
+        "progression_not_confirmed",
+        "moderate_return_range_ratio",
+        "tiny_distance_to_target",
+        "high_composite_score",
+    )
 
 
 def _near_extreme_component(distance: Decimal | None, threshold: Decimal) -> Decimal:

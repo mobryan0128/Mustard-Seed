@@ -63,6 +63,21 @@ def main() -> None:
         reversal_probability=Decimal("0.75"),
         progression_memory=_memory("strengthening", decel=0),
     )
+    quiet_loser_shape = _quiet_conflict_score()
+    clean_quiet_winner = _quiet_conflict_score(
+        trend_confirmation_status="confirmed",
+        signal_conflict_flags=(("impulse_direction_conflict", False),),
+        progression_memory=_memory("strengthening", decel=0),
+    )
+    cold_start_alone = _score(progression_memory=None)
+    mismatch_alone = _score(trend_confirmation_status="recent_direction_mismatch")
+    impulse_conflict_alone = _score(
+        signal_conflict_flags=(("impulse_direction_conflict", True),)
+    )
+    quiet_ratio_above_band = _quiet_conflict_score(return_range_ratio=Decimal("2.50"))
+    quiet_distance_above_band = _quiet_conflict_score(
+        distance_to_target_bps=Decimal("1.50")
+    )
 
     assert clean_near_extreme.composite_score >= Decimal("0.60")
     assert "near_extreme_danger_combo" not in clean_near_extreme.downgrade_reasons
@@ -89,6 +104,33 @@ def main() -> None:
     assert "persistent_deceleration" in persistent_deceleration.downgrade_reasons
     assert high_reversal_clean.composite_score >= Decimal("0.60")
     assert "continuation_major_danger" not in high_reversal_clean.downgrade_reasons
+    assert quiet_loser_shape.composite_score == Decimal("0.49")
+    assert "quiet_exhaustion_direction_conflict" in (
+        quiet_loser_shape.downgrade_reasons
+    )
+    assert (
+        quiet_loser_shape.hard_gate_statuses.get(
+            "quiet_exhaustion_direction_conflict"
+        )
+        == "blocked"
+    )
+    assert quiet_loser_shape.quiet_exhaustion_direction_conflict_blocked
+    assert quiet_loser_shape.quiet_exhaustion_direction_conflict_cap_applied
+    assert clean_quiet_winner.composite_score >= Decimal("0.60")
+    assert "quiet_exhaustion_direction_conflict" not in (
+        clean_quiet_winner.downgrade_reasons
+    )
+    for label, score in {
+        "cold_start_alone": cold_start_alone,
+        "mismatch_alone": mismatch_alone,
+        "impulse_conflict_alone": impulse_conflict_alone,
+        "quiet_ratio_above_band": quiet_ratio_above_band,
+        "quiet_distance_above_band": quiet_distance_above_band,
+    }.items():
+        assert "quiet_exhaustion_direction_conflict" not in score.downgrade_reasons, (
+            label,
+            score.downgrade_reasons,
+        )
     print("phaseG3 composite scoring checks passed")
 
 
@@ -110,6 +152,8 @@ def _score(
     progression_memory: ProgressionMemoryState | None = None,
     reversal_probability: Decimal = Decimal("0.20"),
     fake_continuation_signature: bool = False,
+    classification_reason: str | None = None,
+    signal_conflict_flags: tuple[tuple[str, bool], ...] = (),
 ):
     return score_candidate_quality(
         return_range_ratio=return_range_ratio,
@@ -134,10 +178,28 @@ def _score(
         progression_memory=progression_memory,
         reversal_probability=reversal_probability,
         fake_continuation_signature=fake_continuation_signature,
+        classification_reason=classification_reason,
+        signal_conflict_flags=signal_conflict_flags,
         distance_to_target_bps=distance_to_target_bps,
         recent_3m_return_bps=recent_3m_return_bps,
         recent_3m_range_bps=recent_3m_range_bps,
     )
+
+
+def _quiet_conflict_score(**overrides):
+    values = {
+        "return_range_ratio": Decimal("1.246"),
+        "near_extreme_distance_bps": Decimal("10"),
+        "distance_to_target_bps": Decimal("0.426"),
+        "trend_confirmation_status": "recent_direction_mismatch",
+        "progression_memory": None,
+        "classification_reason": "quiet_continuation_from_exhaustion",
+        "signal_conflict_flags": (("impulse_direction_conflict", True),),
+        "price": Decimal("0.61"),
+        "ev": Decimal("0.10"),
+    }
+    values.update(overrides)
+    return _score(**values)
 
 
 def _memory(quality: str, *, decel: int) -> ProgressionMemoryState:

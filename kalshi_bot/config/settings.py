@@ -234,6 +234,15 @@ DEFAULT_LIVE_HIGH_SCORE_DANGER_CAP_ENABLED = True
 DEFAULT_LIVE_HIGH_SCORE_DANGER_CAP_MIN_SCORE = Decimal("0.80")
 DEFAULT_LIVE_HIGH_SCORE_DANGER_CAP_MAX_SCORE = Decimal("0.49")
 DEFAULT_LIVE_CONTINUATION_MAJOR_DANGER_COMBO_BLOCK_ENABLED = True
+DEFAULT_LIVE_QUIET_EXHAUSTION_CONFLICT_BLOCK_ENABLED = True
+DEFAULT_LIVE_QUIET_EXHAUSTION_CONFLICT_MIN_COMPOSITE = Decimal("0.75")
+DEFAULT_LIVE_QUIET_EXHAUSTION_CONFLICT_MIN_RATIO = Decimal("1.00")
+DEFAULT_LIVE_QUIET_EXHAUSTION_CONFLICT_MAX_RATIO = Decimal("2.00")
+DEFAULT_LIVE_QUIET_EXHAUSTION_CONFLICT_MAX_DISTANCE_ABS_BPS = Decimal("1.00")
+DEFAULT_LIVE_QUIET_EXHAUSTION_CONFLICT_CAP_SCORE = Decimal("0.49")
+DEFAULT_LIVE_QUIET_EXHAUSTION_CONFLICT_REQUIRE_COLD_START = True
+DEFAULT_LIVE_QUIET_EXHAUSTION_CONFLICT_REQUIRE_IMPULSE_CONFLICT = True
+DEFAULT_LIVE_QUIET_EXHAUSTION_CONFLICT_REQUIRE_RECENT_DIRECTION_MISMATCH = True
 DEFAULT_RUNNER_ENABLED = True
 DEFAULT_RUNNER_LOOP_INTERVAL_SECONDS = 5.0
 DEFAULT_RUNNER_STATUS_LOG_EVERY_N_CYCLES = 1
@@ -461,6 +470,15 @@ class KalshiSettings:
     live_high_score_danger_cap_min_score: Decimal
     live_high_score_danger_cap_max_score: Decimal
     live_continuation_major_danger_combo_block_enabled: bool
+    live_quiet_exhaustion_conflict_block_enabled: bool
+    live_quiet_exhaustion_conflict_min_composite: Decimal
+    live_quiet_exhaustion_conflict_min_ratio: Decimal
+    live_quiet_exhaustion_conflict_max_ratio: Decimal
+    live_quiet_exhaustion_conflict_max_distance_abs_bps: Decimal
+    live_quiet_exhaustion_conflict_cap_score: Decimal
+    live_quiet_exhaustion_conflict_require_cold_start: bool
+    live_quiet_exhaustion_conflict_require_impulse_conflict: bool
+    live_quiet_exhaustion_conflict_require_recent_direction_mismatch: bool
     runner_enabled: bool
     runner_loop_interval_seconds: float
     runner_status_log_every_n_cycles: int
@@ -1357,6 +1375,69 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         DEFAULT_LIVE_CONTINUATION_MAJOR_DANGER_COMBO_BLOCK_ENABLED,
         "LIVE_CONTINUATION_MAJOR_DANGER_COMBO_BLOCK_ENABLED",
     )
+    live_quiet_exhaustion_conflict_block_enabled = _parse_bool(
+        values.get("LIVE_QUIET_EXHAUSTION_CONFLICT_BLOCK_ENABLED"),
+        DEFAULT_LIVE_QUIET_EXHAUSTION_CONFLICT_BLOCK_ENABLED,
+        "LIVE_QUIET_EXHAUSTION_CONFLICT_BLOCK_ENABLED",
+    )
+    live_quiet_exhaustion_conflict_min_composite = _parse_probability(
+        values.get("LIVE_QUIET_EXHAUSTION_CONFLICT_MIN_COMPOSITE"),
+        DEFAULT_LIVE_QUIET_EXHAUSTION_CONFLICT_MIN_COMPOSITE,
+        "LIVE_QUIET_EXHAUSTION_CONFLICT_MIN_COMPOSITE",
+    )
+    live_quiet_exhaustion_conflict_min_ratio = _parse_non_negative_decimal(
+        values.get("LIVE_QUIET_EXHAUSTION_CONFLICT_MIN_RATIO"),
+        DEFAULT_LIVE_QUIET_EXHAUSTION_CONFLICT_MIN_RATIO,
+        "LIVE_QUIET_EXHAUSTION_CONFLICT_MIN_RATIO",
+    )
+    live_quiet_exhaustion_conflict_max_ratio = _parse_non_negative_decimal(
+        values.get("LIVE_QUIET_EXHAUSTION_CONFLICT_MAX_RATIO"),
+        DEFAULT_LIVE_QUIET_EXHAUSTION_CONFLICT_MAX_RATIO,
+        "LIVE_QUIET_EXHAUSTION_CONFLICT_MAX_RATIO",
+    )
+    if (
+        live_quiet_exhaustion_conflict_max_ratio
+        < live_quiet_exhaustion_conflict_min_ratio
+    ):
+        raise SettingsError(
+            "LIVE_QUIET_EXHAUSTION_CONFLICT_MAX_RATIO must be greater than "
+            "or equal to LIVE_QUIET_EXHAUSTION_CONFLICT_MIN_RATIO."
+        )
+    live_quiet_exhaustion_conflict_max_distance_abs_bps = (
+        _parse_non_negative_decimal(
+            values.get("LIVE_QUIET_EXHAUSTION_CONFLICT_MAX_DISTANCE_ABS_BPS"),
+            DEFAULT_LIVE_QUIET_EXHAUSTION_CONFLICT_MAX_DISTANCE_ABS_BPS,
+            "LIVE_QUIET_EXHAUSTION_CONFLICT_MAX_DISTANCE_ABS_BPS",
+        )
+    )
+    live_quiet_exhaustion_conflict_cap_score = _parse_probability(
+        values.get("LIVE_QUIET_EXHAUSTION_CONFLICT_CAP_SCORE"),
+        DEFAULT_LIVE_QUIET_EXHAUSTION_CONFLICT_CAP_SCORE,
+        "LIVE_QUIET_EXHAUSTION_CONFLICT_CAP_SCORE",
+    )
+    if (
+        live_quiet_exhaustion_conflict_cap_score
+        >= live_quiet_exhaustion_conflict_min_composite
+    ):
+        raise SettingsError(
+            "LIVE_QUIET_EXHAUSTION_CONFLICT_CAP_SCORE must be less than "
+            "LIVE_QUIET_EXHAUSTION_CONFLICT_MIN_COMPOSITE."
+        )
+    live_quiet_exhaustion_conflict_require_cold_start = _parse_bool(
+        values.get("LIVE_QUIET_EXHAUSTION_CONFLICT_REQUIRE_COLD_START"),
+        DEFAULT_LIVE_QUIET_EXHAUSTION_CONFLICT_REQUIRE_COLD_START,
+        "LIVE_QUIET_EXHAUSTION_CONFLICT_REQUIRE_COLD_START",
+    )
+    live_quiet_exhaustion_conflict_require_impulse_conflict = _parse_bool(
+        values.get("LIVE_QUIET_EXHAUSTION_CONFLICT_REQUIRE_IMPULSE_CONFLICT"),
+        DEFAULT_LIVE_QUIET_EXHAUSTION_CONFLICT_REQUIRE_IMPULSE_CONFLICT,
+        "LIVE_QUIET_EXHAUSTION_CONFLICT_REQUIRE_IMPULSE_CONFLICT",
+    )
+    live_quiet_exhaustion_conflict_require_recent_direction_mismatch = _parse_bool(
+        values.get("LIVE_QUIET_EXHAUSTION_CONFLICT_REQUIRE_RECENT_DIRECTION_MISMATCH"),
+        DEFAULT_LIVE_QUIET_EXHAUSTION_CONFLICT_REQUIRE_RECENT_DIRECTION_MISMATCH,
+        "LIVE_QUIET_EXHAUSTION_CONFLICT_REQUIRE_RECENT_DIRECTION_MISMATCH",
+    )
     runner_enabled = _parse_bool(
         values.get("RUNNER_ENABLED"),
         DEFAULT_RUNNER_ENABLED,
@@ -1777,6 +1858,33 @@ def load_settings(env_file: str | Path = ".env") -> KalshiSettings:
         live_continuation_major_danger_combo_block_enabled=(
             live_continuation_major_danger_combo_block_enabled
         ),
+        live_quiet_exhaustion_conflict_block_enabled=(
+            live_quiet_exhaustion_conflict_block_enabled
+        ),
+        live_quiet_exhaustion_conflict_min_composite=(
+            live_quiet_exhaustion_conflict_min_composite
+        ),
+        live_quiet_exhaustion_conflict_min_ratio=(
+            live_quiet_exhaustion_conflict_min_ratio
+        ),
+        live_quiet_exhaustion_conflict_max_ratio=(
+            live_quiet_exhaustion_conflict_max_ratio
+        ),
+        live_quiet_exhaustion_conflict_max_distance_abs_bps=(
+            live_quiet_exhaustion_conflict_max_distance_abs_bps
+        ),
+        live_quiet_exhaustion_conflict_cap_score=(
+            live_quiet_exhaustion_conflict_cap_score
+        ),
+        live_quiet_exhaustion_conflict_require_cold_start=(
+            live_quiet_exhaustion_conflict_require_cold_start
+        ),
+        live_quiet_exhaustion_conflict_require_impulse_conflict=(
+            live_quiet_exhaustion_conflict_require_impulse_conflict
+        ),
+        live_quiet_exhaustion_conflict_require_recent_direction_mismatch=(
+            live_quiet_exhaustion_conflict_require_recent_direction_mismatch
+        ),
         runner_enabled=runner_enabled,
         runner_loop_interval_seconds=runner_loop_interval_seconds,
         runner_status_log_every_n_cycles=runner_status_log_every_n_cycles,
@@ -2029,6 +2137,15 @@ def _merge_env(file_values: dict[str, str]) -> dict[str, str]:
         "LIVE_HIGH_SCORE_DANGER_CAP_MIN_SCORE",
         "LIVE_HIGH_SCORE_DANGER_CAP_MAX_SCORE",
         "LIVE_CONTINUATION_MAJOR_DANGER_COMBO_BLOCK_ENABLED",
+        "LIVE_QUIET_EXHAUSTION_CONFLICT_BLOCK_ENABLED",
+        "LIVE_QUIET_EXHAUSTION_CONFLICT_MIN_COMPOSITE",
+        "LIVE_QUIET_EXHAUSTION_CONFLICT_MIN_RATIO",
+        "LIVE_QUIET_EXHAUSTION_CONFLICT_MAX_RATIO",
+        "LIVE_QUIET_EXHAUSTION_CONFLICT_MAX_DISTANCE_ABS_BPS",
+        "LIVE_QUIET_EXHAUSTION_CONFLICT_CAP_SCORE",
+        "LIVE_QUIET_EXHAUSTION_CONFLICT_REQUIRE_COLD_START",
+        "LIVE_QUIET_EXHAUSTION_CONFLICT_REQUIRE_IMPULSE_CONFLICT",
+        "LIVE_QUIET_EXHAUSTION_CONFLICT_REQUIRE_RECENT_DIRECTION_MISMATCH",
         "RUNNER_ENABLED",
         "RUNNER_LOOP_INTERVAL_SECONDS",
         "RUNNER_STATUS_LOG_EVERY_N_CYCLES",

@@ -186,6 +186,8 @@ Noise-cross handling is off at `LIVE_MIN_CROSS_DISTANCE_BPS=0`. When configured 
 
 `LIVE_CONTINUATION_MAJOR_DANGER_COMBO_BLOCK_ENABLED=true` keeps `continuation_major_danger` combination-based. Progression weakening, persistent deceleration, and fake continuation remain decisive; high reversal probability alone remains telemetry/soft context unless paired with confirmed danger.
 
+`LIVE_QUIET_EXHAUSTION_CONFLICT_BLOCK_ENABLED=true` adds a separate combination-only quiet-continuation safety gate. It does not block quiet continuation alone, cold start alone, recent direction mismatch alone, impulse conflict alone, moderate return/range ratio alone, tiny distance alone, or high composite alone. It only blocks/caps `quiet_continuation_from_exhaustion` when recent direction mismatches, impulse conflicts, progression is cold/unconfirmed, return/range ratio is within `LIVE_QUIET_EXHAUSTION_CONFLICT_MIN_RATIO` and `LIVE_QUIET_EXHAUSTION_CONFLICT_MAX_RATIO`, absolute target distance is at or below `LIVE_QUIET_EXHAUSTION_CONFLICT_MAX_DISTANCE_ABS_BPS`, and composite is at or above `LIVE_QUIET_EXHAUSTION_CONFLICT_MIN_COMPOSITE`. Defaults: min composite `0.75`, ratio band `1.00`-`2.00`, max distance `1.00`, cap score `0.49`, and all three require flags true.
+
 ### Candidate Funnel Diagnostics
 
 `LIVE_CANDIDATE_FUNNEL_DIAGNOSTICS_ENABLED=true` changes logging, not trading decisions. Runner cycle logs include detailed scanner diagnostics, and live funnel summaries include up to 20 live outcome records and scanner candidate diagnostics.

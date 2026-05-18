@@ -212,6 +212,10 @@ class ScannedContract:
     cold_start_high_ratio_overextension_reasons: tuple[str, ...] = ()
     continuation_major_danger_combo_blocked: bool | None = None
     continuation_major_danger_combo_reasons: tuple[str, ...] = ()
+    quiet_exhaustion_direction_conflict_blocked: bool | None = None
+    quiet_exhaustion_direction_conflict_reasons: tuple[str, ...] = ()
+    quiet_exhaustion_direction_conflict_cap_applied: bool | None = None
+    quiet_exhaustion_direction_conflict_cap_reason: str | None = None
     reversal_signal_source: str | None = None
     reversal_probability_bucket: str | None = None
     opposite_side_price: Decimal | None = None
@@ -351,6 +355,10 @@ class SkippedContract:
     cold_start_high_ratio_overextension_reasons: tuple[str, ...] = ()
     continuation_major_danger_combo_blocked: bool | None = None
     continuation_major_danger_combo_reasons: tuple[str, ...] = ()
+    quiet_exhaustion_direction_conflict_blocked: bool | None = None
+    quiet_exhaustion_direction_conflict_reasons: tuple[str, ...] = ()
+    quiet_exhaustion_direction_conflict_cap_applied: bool | None = None
+    quiet_exhaustion_direction_conflict_cap_reason: str | None = None
     reversal_signal_source: str | None = None
     reversal_probability_bucket: str | None = None
     opposite_side_price: Decimal | None = None
@@ -468,6 +476,15 @@ class ContractScanner:
         high_score_danger_cap_min_score: Decimal = Decimal("0.80"),
         high_score_danger_cap_max_score: Decimal = Decimal("0.49"),
         continuation_major_danger_combo_block_enabled: bool = True,
+        quiet_exhaustion_conflict_block_enabled: bool = True,
+        quiet_exhaustion_conflict_min_composite: Decimal = Decimal("0.75"),
+        quiet_exhaustion_conflict_min_ratio: Decimal = Decimal("1.00"),
+        quiet_exhaustion_conflict_max_ratio: Decimal = Decimal("2.00"),
+        quiet_exhaustion_conflict_max_distance_abs_bps: Decimal = Decimal("1.00"),
+        quiet_exhaustion_conflict_cap_score: Decimal = Decimal("0.49"),
+        quiet_exhaustion_conflict_require_cold_start: bool = True,
+        quiet_exhaustion_conflict_require_impulse_conflict: bool = True,
+        quiet_exhaustion_conflict_require_recent_direction_mismatch: bool = True,
     ) -> None:
         normalized = {
             product_id.strip(): tuple(
@@ -595,6 +612,33 @@ class ContractScanner:
         )
         self._continuation_major_danger_combo_block_enabled = (
             continuation_major_danger_combo_block_enabled
+        )
+        self._quiet_exhaustion_conflict_block_enabled = (
+            quiet_exhaustion_conflict_block_enabled
+        )
+        self._quiet_exhaustion_conflict_min_composite = Decimal(
+            str(quiet_exhaustion_conflict_min_composite)
+        )
+        self._quiet_exhaustion_conflict_min_ratio = Decimal(
+            str(quiet_exhaustion_conflict_min_ratio)
+        )
+        self._quiet_exhaustion_conflict_max_ratio = Decimal(
+            str(quiet_exhaustion_conflict_max_ratio)
+        )
+        self._quiet_exhaustion_conflict_max_distance_abs_bps = Decimal(
+            str(quiet_exhaustion_conflict_max_distance_abs_bps)
+        )
+        self._quiet_exhaustion_conflict_cap_score = Decimal(
+            str(quiet_exhaustion_conflict_cap_score)
+        )
+        self._quiet_exhaustion_conflict_require_cold_start = (
+            quiet_exhaustion_conflict_require_cold_start
+        )
+        self._quiet_exhaustion_conflict_require_impulse_conflict = (
+            quiet_exhaustion_conflict_require_impulse_conflict
+        )
+        self._quiet_exhaustion_conflict_require_recent_direction_mismatch = (
+            quiet_exhaustion_conflict_require_recent_direction_mismatch
         )
         self._roadmap_mode_active = any(
             (
@@ -843,6 +887,7 @@ class ContractScanner:
                     feasibility=feasibility,
                     entry_price=midpoint,
                     trend_confirmation_status=trend_confirmation_status,
+                    signal_conflict_flags=signal_conflict_flags,
                     signal_quality_fields=signal_quality_fields,
                     progression_memory=_progression_memory_for_candidate(
                         progression_memory_by_product,
@@ -1162,6 +1207,7 @@ class ContractScanner:
         feasibility: TargetFeasibility | None,
         entry_price: Decimal | None,
         trend_confirmation_status: str | None,
+        signal_conflict_flags: tuple[tuple[str, bool], ...],
         signal_quality_fields: Mapping[str, object],
         progression_memory: ProgressionMemoryState | None,
         is_reversal_candidate: bool = False,
@@ -1318,6 +1364,35 @@ class ContractScanner:
             continuation_major_danger_combo_block_enabled=(
                 self._continuation_major_danger_combo_block_enabled
             ),
+            classification_reason=getattr(bias_state, "classification_reason", None),
+            signal_conflict_flags=signal_conflict_flags,
+            quiet_exhaustion_conflict_block_enabled=(
+                self._quiet_exhaustion_conflict_block_enabled
+            ),
+            quiet_exhaustion_conflict_min_composite=(
+                self._quiet_exhaustion_conflict_min_composite
+            ),
+            quiet_exhaustion_conflict_min_ratio=(
+                self._quiet_exhaustion_conflict_min_ratio
+            ),
+            quiet_exhaustion_conflict_max_ratio=(
+                self._quiet_exhaustion_conflict_max_ratio
+            ),
+            quiet_exhaustion_conflict_max_distance_abs_bps=(
+                self._quiet_exhaustion_conflict_max_distance_abs_bps
+            ),
+            quiet_exhaustion_conflict_cap_score=(
+                self._quiet_exhaustion_conflict_cap_score
+            ),
+            quiet_exhaustion_conflict_require_cold_start=(
+                self._quiet_exhaustion_conflict_require_cold_start
+            ),
+            quiet_exhaustion_conflict_require_impulse_conflict=(
+                self._quiet_exhaustion_conflict_require_impulse_conflict
+            ),
+            quiet_exhaustion_conflict_require_recent_direction_mismatch=(
+                self._quiet_exhaustion_conflict_require_recent_direction_mismatch
+            ),
         )
         payload = {
             "adaptive_chop_threshold_bps": thresholds.adaptive_chop_threshold_bps,
@@ -1361,6 +1436,18 @@ class ContractScanner:
             ),
             "continuation_major_danger_combo_reasons": (
                 quality_score.continuation_major_danger_combo_reasons
+            ),
+            "quiet_exhaustion_direction_conflict_blocked": (
+                quality_score.quiet_exhaustion_direction_conflict_blocked
+            ),
+            "quiet_exhaustion_direction_conflict_reasons": (
+                quality_score.quiet_exhaustion_direction_conflict_reasons
+            ),
+            "quiet_exhaustion_direction_conflict_cap_applied": (
+                quality_score.quiet_exhaustion_direction_conflict_cap_applied
+            ),
+            "quiet_exhaustion_direction_conflict_cap_reason": (
+                quality_score.quiet_exhaustion_direction_conflict_cap_reason
             ),
             "trend_age_cycles": trend_age,
             "failed_continuation_count": failed_attempts,
@@ -1507,6 +1594,7 @@ class ContractScanner:
             feasibility=feasibility,
             entry_price=opposite_price,
             trend_confirmation_status=contract.trend_confirmation_status,
+            signal_conflict_flags=contract.signal_conflict_flags,
             signal_quality_fields=signal_quality_fields,
             progression_memory=progression_memory,
             is_reversal_candidate=True,
@@ -1865,6 +1953,33 @@ def scanner_live_settings_kwargs(settings: KalshiSettings) -> dict[str, object]:
         ),
         "continuation_major_danger_combo_block_enabled": (
             settings.live_continuation_major_danger_combo_block_enabled
+        ),
+        "quiet_exhaustion_conflict_block_enabled": (
+            settings.live_quiet_exhaustion_conflict_block_enabled
+        ),
+        "quiet_exhaustion_conflict_min_composite": (
+            settings.live_quiet_exhaustion_conflict_min_composite
+        ),
+        "quiet_exhaustion_conflict_min_ratio": (
+            settings.live_quiet_exhaustion_conflict_min_ratio
+        ),
+        "quiet_exhaustion_conflict_max_ratio": (
+            settings.live_quiet_exhaustion_conflict_max_ratio
+        ),
+        "quiet_exhaustion_conflict_max_distance_abs_bps": (
+            settings.live_quiet_exhaustion_conflict_max_distance_abs_bps
+        ),
+        "quiet_exhaustion_conflict_cap_score": (
+            settings.live_quiet_exhaustion_conflict_cap_score
+        ),
+        "quiet_exhaustion_conflict_require_cold_start": (
+            settings.live_quiet_exhaustion_conflict_require_cold_start
+        ),
+        "quiet_exhaustion_conflict_require_impulse_conflict": (
+            settings.live_quiet_exhaustion_conflict_require_impulse_conflict
+        ),
+        "quiet_exhaustion_conflict_require_recent_direction_mismatch": (
+            settings.live_quiet_exhaustion_conflict_require_recent_direction_mismatch
         ),
     }
 
