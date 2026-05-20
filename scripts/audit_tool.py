@@ -4,9 +4,14 @@ Validation commands:
 
     python scripts/audit_tool.py inspect-repo
     python scripts/audit_tool.py inspect-logs
+    python scripts/audit_tool.py inspect-logs --max-rows 1000
     python scripts/audit_tool.py field-presence --start <small window> --end <small window>
     python scripts/audit_tool.py build-dataset --start <small window> --end <small window> --out export_logs/test_agent_dataset --package
     python scripts/audit_tool.py raw-around --timestamp <known timestamp> --seconds 300 --out export_logs/test_raw_around.jsonl
+
+inspect-logs is sampled by default for huge runtime logs. Use
+inspect-logs --full for exact full-log counts. Use build-dataset or
+field-presence with explicit time windows for exact audit ranges.
 
 This tool is read-only with respect to trading behavior. It does not submit
 orders, restart services, edit .env, or change strategy/scoring/gating logic.
@@ -166,6 +171,11 @@ def main() -> int:
 
     inspect_logs = sub.add_parser("inspect-logs")
     inspect_logs.add_argument("--logs-dir", type=Path, default=Path("logs"))
+    inspect_logs.add_argument("--max-rows", type=int, default=50000)
+    inspect_logs.add_argument("--full", action="store_true")
+    inspect_logs.add_argument("--sample-head", type=int, default=5000)
+    inspect_logs.add_argument("--sample-tail", type=int, default=5000)
+    inspect_logs.add_argument("--progress", action="store_true")
     inspect_logs.set_defaults(func=cmd_inspect_logs)
 
     build = sub.add_parser("build-dataset")
@@ -288,7 +298,14 @@ def cmd_inspect_logs(args: argparse.Namespace) -> int:
         print(f"no runtime logs found under {args.logs_dir}")
         return 0
     for path in paths:
-        summary = _log_file_summary(path)
+        summary = _log_file_summary(
+            path,
+            full=args.full,
+            max_rows=args.max_rows,
+            sample_head=args.sample_head,
+            sample_tail=args.sample_tail,
+            progress=args.progress,
+        )
         print(json.dumps(_json_safe(summary), sort_keys=True))
     return 0
 
@@ -563,32 +580,72 @@ def _iter_records(
             continue
 
 
-def _log_file_summary(path: Path) -> dict[str, Any]:
+def _log_file_summary(
+    path: Path,
+    *,
+    full: bool,
+    max_rows: int,
+    sample_head: int,
+    sample_tail: int,
+    progress: bool,
+) -> dict[str, Any]:
     event_counts: Counter[str] = Counter()
     field_counts: Counter[str] = Counter()
     first: str | None = None
-    last: str | None = None
+    sampled_last: str | None = None
+    exact_last: str | None = None
     rows = 0
-    for item in _iter_records(path.parent, start=None, end=None):
-        if item.path != path:
-            continue
+    row_limit = None if full else max(max_rows, 0)
+    for item in _iter_log_file(path):
         rows += 1
         ts = item.record.get("recorded_at")
         first = str(ts) if first is None and ts else first
-        last = str(ts) if ts else last
+        sampled_last = str(ts) if ts else sampled_last
+        exact_last = sampled_last
         event_counts[_event_type(item.record)] += 1
-        for field, count in _field_hits([item]).items():
-            if count:
-                field_counts[field] += count
+        field_counts.update(_important_fields_present(item.record))
+        if progress and full and rows % 100000 == 0:
+            print(f"inspect-logs progress path={path} rows={rows}", file=sys.stderr)
+        if row_limit is not None and rows >= row_limit:
+            break
     return {
         "path": str(path),
         "size_bytes": path.stat().st_size,
-        "rows": rows,
+        "scan_mode": "full" if full else "sampled",
+        "rows_scanned": rows,
+        "max_rows": None if full else row_limit,
+        "sample_head": sample_head,
+        "sample_tail": sample_tail,
+        "tail_sampling": "skipped",
         "first_recorded_at": first,
-        "last_recorded_at": last,
+        "last_recorded_at": exact_last if full else None,
+        "sampled_last_recorded_at": sampled_last,
         "top_event_types": dict(event_counts.most_common(20)),
         "important_field_presence_counts": dict(field_counts),
     }
+
+
+def _iter_log_file(path: Path) -> Iterable[LogItem]:
+    opener = gzip.open if path.suffix == ".gz" else open
+    try:
+        with opener(path, "rt", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, start=1):
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict):
+                    continue
+                yield LogItem(
+                    path=path,
+                    line_number=line_number,
+                    record=record,
+                    recorded_at=_parse_optional_ts(record.get("recorded_at")),
+                )
+    except OSError:
+        return
 
 
 def _event_counts(items: Iterable[LogItem]) -> Counter[str]:
@@ -601,16 +658,27 @@ def _event_counts(items: Iterable[LogItem]) -> Counter[str]:
 def _field_hits(items: Iterable[LogItem]) -> dict[str, int]:
     counts = {field: 0 for field in IMPORTANT_FIELDS}
     for item in items:
-        for field in IMPORTANT_FIELDS:
-            if _has_field(item.record, field):
-                counts[field] += 1
+        for field in _important_fields_present(item.record):
+            counts[field] += 1
     return counts
+
+
+def _important_fields_present(record: dict[str, Any]) -> set[str]:
+    event = _event_type(record)
+    present = {event} if event in IMPORTANT_FIELDS else set()
+    for path, _value in _walk_paths(record.get("payload", {})):
+        terminal = path.rsplit(".", 1)[-1]
+        if "[" in terminal:
+            terminal = terminal.split("[", 1)[0]
+        if terminal in IMPORTANT_FIELDS:
+            present.add(terminal)
+    return present
 
 
 def _has_field(record: dict[str, Any], field: str) -> bool:
     if _event_type(record) == field:
         return True
-    return any(path.rsplit(".", 1)[-1] == field for path, _value in _walk_paths(record.get("payload", {})))
+    return field in _important_fields_present(record)
 
 
 def _walk_paths(value: Any, prefix: str = "") -> Iterable[tuple[str, Any]]:
