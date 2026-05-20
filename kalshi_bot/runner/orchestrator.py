@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
+import os
+import subprocess
 import time
 from collections import Counter, deque
-from dataclasses import dataclass
+from dataclasses import fields, is_dataclass, dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
@@ -292,6 +296,7 @@ class KalshiBotRunner:
             log_directory=settings.log_directory,
             enabled=settings.log_jsonl_enabled,
         )
+        _log_runner_env_snapshot(logger=logger, settings=settings)
         replay_engine = ReplayEngine(
             replay_directory=settings.replay_directory,
             enabled=settings.replay_write_enabled,
@@ -1445,6 +1450,90 @@ def _empty_simulation_snapshot() -> SimulationSnapshot:
         decisions=(),
         evaluation_count=0,
     )
+
+
+def _log_runner_env_snapshot(
+    *,
+    logger: StructuredLogger,
+    settings: KalshiSettings,
+) -> None:
+    """Emit safe startup context without changing runner behavior."""
+
+    try:
+        safe_raw_env = {
+            key: value
+            for key, value in sorted(os.environ.items())
+            if not _sensitive_env_key(key)
+        }
+        safe_loaded_settings = _safe_loaded_settings(settings)
+        env_hash = hashlib.sha256(
+            json.dumps(
+                {
+                    "safe_raw_env": safe_raw_env,
+                    "safe_loaded_settings": safe_loaded_settings,
+                },
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8")
+        ).hexdigest()
+        payload = {
+            "safe_raw_env": safe_raw_env,
+            "safe_loaded_settings": safe_loaded_settings,
+            "env_hash": env_hash,
+            "git_commit": _git_output(("rev-parse", "HEAD")),
+            "git_status_short": _git_output(("status", "--short")),
+        }
+    except Exception as exc:  # noqa: BLE001
+        payload = {
+            "safe_raw_env": {},
+            "safe_loaded_settings": {},
+            "env_hash": None,
+            "git_commit": None,
+            "git_status_short": None,
+            "snapshot_error": str(exc),
+        }
+    try:
+        logger.log_event(
+            category="runner",
+            event_type="runner_env_snapshot",
+            source="kalshi_bot_runner",
+            identifier="startup",
+            payload=payload,
+        )
+    except Exception:
+        return
+
+
+def _safe_loaded_settings(settings: KalshiSettings) -> dict[str, object]:
+    if not is_dataclass(settings):
+        return {}
+    safe: dict[str, object] = {}
+    for field in fields(settings):
+        if _sensitive_env_key(field.name):
+            continue
+        safe[field.name] = getattr(settings, field.name)
+    return safe
+
+
+def _sensitive_env_key(key: str) -> bool:
+    upper = key.upper()
+    return any(
+        token in upper
+        for token in ("KEY", "SECRET", "TOKEN", "PASSWORD", "PRIVATE", "API")
+    )
+
+
+def _git_output(args: tuple[str, ...]) -> str:
+    try:
+        completed = subprocess.run(
+            ("git", *args),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return ""
+    return (completed.stdout or completed.stderr).strip()
 
 
 def _live_runner_risk_manager_from_settings(settings: KalshiSettings) -> RiskManager:
