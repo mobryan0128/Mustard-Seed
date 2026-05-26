@@ -8,6 +8,8 @@ Validation commands:
     python scripts/audit_tool.py field-presence --start <small window> --end <small window>
     python scripts/audit_tool.py build-dataset --start <small window> --end <small window> --out export_logs/test_agent_dataset --package
     python scripts/audit_tool.py raw-around --timestamp <known timestamp> --seconds 300 --out export_logs/test_raw_around.jsonl
+    python scripts/audit_tool.py fetch-charts --start "2026-05-19T10:00:00+00:00" --end "2026-05-19T10:30:00+00:00" --name "test_fetch" --products "BTC-USD,ETH-USD" --granularities "60,300"
+    python scripts/audit_tool.py charts-status --charts-dir chart_csv
 
 inspect-logs is sampled by default for huge runtime logs. Use
 inspect-logs --full for exact full-log counts. Use build-dataset or
@@ -238,10 +240,19 @@ def main() -> int:
     official.set_defaults(func=cmd_official_outcomes)
 
     charts = sub.add_parser("charts-status")
-    charts.add_argument("--start", required=True)
-    charts.add_argument("--end", required=True)
-    charts.add_argument("--charts-dir", type=Path)
+    charts.add_argument("--start")
+    charts.add_argument("--end")
+    charts.add_argument("--charts-dir", type=Path, default=Path("chart_csv"))
     charts.set_defaults(func=cmd_charts_status)
+
+    fetch_charts = sub.add_parser("fetch-charts")
+    fetch_charts.add_argument("--start", required=True)
+    fetch_charts.add_argument("--end", required=True)
+    fetch_charts.add_argument("--products")
+    fetch_charts.add_argument("--granularities")
+    fetch_charts.add_argument("--name", required=True)
+    fetch_charts.add_argument("--out-root", type=Path, default=Path("chart_csv"))
+    fetch_charts.set_defaults(func=cmd_fetch_charts)
 
     rows_ticker = sub.add_parser("rows-by-ticker")
     _add_window_args(rows_ticker)
@@ -423,9 +434,33 @@ def cmd_rows_around_market(args: argparse.Namespace) -> int:
 
 
 def cmd_charts_status(args: argparse.Namespace) -> int:
-    start, end = _window(args.start, args.end)
+    start = end = None
+    if args.start or args.end:
+        if not args.start or not args.end:
+            raise SystemExit("--start and --end must be supplied together")
+        start, end = _window(args.start, args.end)
     rows = _chart_status_rows(start=start, end=end, charts_dir=args.charts_dir)
     _write_csv_stdout(rows)
+    return 0
+
+
+def cmd_fetch_charts(args: argparse.Namespace) -> int:
+    name_path = Path(args.name)
+    if name_path.is_absolute() or ".." in name_path.parts:
+        raise SystemExit("--name must be a relative directory name under --out-root")
+    out_dir = args.out_root / name_path
+    from fetch_chart_candles import fetch_chart_candles
+
+    result = fetch_chart_candles(
+        start_raw=args.start,
+        end_raw=args.end,
+        products_raw=args.products,
+        granularities_raw=args.granularities,
+        out_dir=out_dir,
+    )
+    print(f"output_dir={result['output_dir']}")
+    print(f"errors={result['errors_count']}")
+    print(f"summary={Path(result['output_dir']) / 'FETCH_SUMMARY.json'}")
     return 0
 
 
@@ -1345,26 +1380,91 @@ def _chart_directories(charts_dir: Path | None) -> list[str]:
     if charts_dir is not None:
         candidates.append(charts_dir)
     candidates.extend(path for path in REPO_ROOT.iterdir() if path.is_dir() and re.search(r"(chart|candle|ohlc|price)", path.name, re.I))
-    return [str(path) for path in candidates if path.exists()]
+    result: list[str] = []
+    seen: set[Path] = set()
+    for path in candidates:
+        if not path.exists():
+            continue
+        resolved = path.resolve()
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        result.append(str(path))
+    return result
 
 
-def _chart_status_rows(*, start: datetime, end: datetime, charts_dir: Path | None) -> list[dict[str, Any]]:
+def _chart_status_rows(*, start: datetime | None, end: datetime | None, charts_dir: Path | None) -> list[dict[str, Any]]:
     rows = []
-    for product in PRODUCT_IDS:
-        files: list[Path] = []
-        if charts_dir and charts_dir.exists():
-            symbol = product.split("-", 1)[0].lower()
-            files = [path for path in charts_dir.rglob("*") if path.is_file() and symbol in path.name.lower() and path.suffix.lower() in {".csv", ".json", ".jsonl", ".gz"}]
+    chart_dirs = _chart_directories(charts_dir)
+    for directory in chart_dirs:
+        path = Path(directory)
+        csv_files = sorted(item for item in path.rglob("*.csv") if item.is_file()) if path.exists() else []
+        latest_mtime = max((item.stat().st_mtime for item in csv_files), default=path.stat().st_mtime if path.exists() else None)
         rows.append({
-            "product_id": product,
-            "start_utc": start.isoformat(),
-            "end_utc": end.isoformat(),
-            "charts_dir": str(charts_dir) if charts_dir else None,
-            "status": "present" if files else "missing",
-            "file_count": len(files),
-            "example_files": ";".join(str(path) for path in files[:5]),
+            "row_type": "directory",
+            "path": str(path),
+            "product_id": None,
+            "granularity": None,
+            "start_utc": start.isoformat() if start else None,
+            "end_utc": end.isoformat() if end else None,
+            "status": "present" if path.exists() else "missing",
+            "file_count": len(csv_files),
+            "row_count": None,
+            "modified_at": _mtime_iso(latest_mtime),
+        })
+
+    if charts_dir and charts_dir.exists():
+        for path in sorted(item for item in charts_dir.rglob("*.csv") if item.is_file()):
+            product_id, granularity = _parse_chart_filename(path)
+            rows.append({
+                "row_type": "file",
+                "path": str(path),
+                "product_id": product_id,
+                "granularity": granularity,
+                "start_utc": start.isoformat() if start else None,
+                "end_utc": end.isoformat() if end else None,
+                "status": "present",
+                "file_count": 1,
+                "row_count": _cheap_csv_row_count(path),
+                "modified_at": _mtime_iso(path.stat().st_mtime),
+            })
+
+    if charts_dir and not charts_dir.exists():
+        rows.append({
+            "row_type": "directory",
+            "path": str(charts_dir),
+            "product_id": None,
+            "granularity": None,
+            "start_utc": start.isoformat() if start else None,
+            "end_utc": end.isoformat() if end else None,
+            "status": "missing",
+            "file_count": 0,
+            "row_count": None,
+            "modified_at": None,
         })
     return rows
+
+
+def _parse_chart_filename(path: Path) -> tuple[str | None, int | None]:
+    match = re.match(r"^(?P<product>[A-Z0-9]+-USD)_(?P<granularity>\d+)\.csv$", path.name, re.I)
+    if not match:
+        return None, None
+    return match.group("product").upper(), int(match.group("granularity"))
+
+
+def _cheap_csv_row_count(path: Path) -> int | None:
+    try:
+        with path.open("r", encoding="utf-8", newline="") as handle:
+            count = sum(1 for _line in handle)
+    except OSError:
+        return None
+    return max(count - 1, 0)
+
+
+def _mtime_iso(value: float | None) -> str | None:
+    if value is None:
+        return None
+    return datetime.fromtimestamp(value, tz=timezone.utc).isoformat()
 
 
 def _env_system_matrix_rows(env_file: Path) -> list[dict[str, Any]]:
